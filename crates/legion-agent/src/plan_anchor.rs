@@ -290,7 +290,7 @@ fn list_runs(text: &str) -> Vec<ListRun> {
         // somebody else's install instructions became the plan this run was
         // held to, permanently, and came back every fourth turn as "the plan
         // you stated".
-        if let Some(marker) = fence_marker(line.trim()) {
+        if let Some(marker) = fence_at(line) {
             match open_fence {
                 Some(open) if closes(open, marker) => open_fence = None,
                 Some(_) => continue,
@@ -408,6 +408,22 @@ fn is_setext_underline(line: &str) -> bool {
         Some('-') => line.len() >= 2 && characters.all(|found| found == '-'),
         _ => false,
     }
+}
+
+/// The fence a line is, honouring the indentation that decides whether it is.
+///
+/// A fence may be indented up to three columns; at four it is content, exactly
+/// as a list item is. `line.trim()` threw that away, so an indented delimiter
+/// inside an outer quotation closed the outer fence and the numbered lines
+/// below it were read as the model's own.
+///
+/// The indentation rule was applied to list items and not to the fences that
+/// decide whether a list item is even being read -- which is the more load
+/// bearing of the two.
+fn fence_at(line: &str) -> Option<FenceMarker> {
+    (indent_columns(line) < 4)
+        .then(|| fence_marker(line.trim()))
+        .flatten()
 }
 
 /// A fence delimiter: which character, and how many of it.
@@ -528,7 +544,7 @@ fn introduced_as_a_plan(text: &str, search_from: usize, first_line: usize) -> bo
     let mut fenced = vec![false; lines.len()];
     let mut open_fence: Option<FenceMarker> = None;
     for (index, line) in lines.iter().enumerate() {
-        match (open_fence, fence_marker(line.trim())) {
+        match (open_fence, fence_at(line)) {
             (Some(open), Some(marker)) if closes(open, marker) => open_fence = None,
             (None, Some(marker)) => open_fence = Some(marker),
             _ => fenced[index] = open_fence.is_some(),
@@ -1009,6 +1025,24 @@ mod tests {
         assert!(
             parse_plan_steps(text).is_empty(),
             "a tilde line inside a backtick fence is content, not the close"
+        );
+    }
+
+    /// An indented delimiter is content, not a close.
+    ///
+    /// A fence may be indented up to three columns; at four it is content,
+    /// exactly as a list item is. Trimming the line threw that away, so an
+    /// indented delimiter inside an outer quotation closed the outer fence and
+    /// the numbered lines below became the plan.
+    #[test]
+    fn an_indented_delimiter_does_not_close_a_fence() {
+        // Escaped rather than continued: a `\\n\` continuation strips
+        // the leading whitespace of the next line, which is the subject.
+        let text = "The README says:\n```\n    ```\n1. Install the toolchain\n2. Configure the endpoint\n```\n";
+
+        assert!(
+            parse_plan_steps(text).is_empty(),
+            "four columns of indent makes it content inside the fence"
         );
     }
 
