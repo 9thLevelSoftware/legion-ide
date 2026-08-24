@@ -80,7 +80,10 @@ const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
 /// Number of bytes inspected by the binary sniff in the streaming search path.
 /// Matches the 8 KiB heuristic used by `git diff --stat` and GNU `grep`.
 const SEARCH_BINARY_SNIFF_WINDOW: usize = 8192;
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+/// Maximum duration for local Git inspection and mutation commands.
+const GIT_LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum duration for remote Git operations that may wait on network/authentication.
+const GIT_REMOTE_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 type WorkspaceScanResult = (
     Vec<FileTreeNode>,
@@ -1642,7 +1645,7 @@ pub fn push_git_remote(
     branch: &str,
 ) -> Result<String, GitInspectionError> {
     let args = vec!["push".to_string(), remote.to_string(), branch.to_string()];
-    git_stdout_owned(root.as_ref(), &args, None)
+    git_stdout_owned_with_timeout(root.as_ref(), &args, None, GIT_REMOTE_COMMAND_TIMEOUT)
 }
 
 /// Fetch from the named remote without mutating the working tree.
@@ -1651,7 +1654,7 @@ pub fn fetch_git_remote(
     remote: &str,
 ) -> Result<String, GitInspectionError> {
     let args = vec!["fetch".to_string(), remote.to_string()];
-    git_stdout_owned(root.as_ref(), &args, None)
+    git_stdout_owned_with_timeout(root.as_ref(), &args, None, GIT_REMOTE_COMMAND_TIMEOUT)
 }
 
 /// Pull the named branch from the named remote.
@@ -1661,7 +1664,7 @@ pub fn pull_git_remote(
     branch: &str,
 ) -> Result<String, GitInspectionError> {
     let args = vec!["pull".to_string(), remote.to_string(), branch.to_string()];
-    git_stdout_owned(root.as_ref(), &args, None)
+    git_stdout_owned_with_timeout(root.as_ref(), &args, None, GIT_REMOTE_COMMAND_TIMEOUT)
 }
 
 /// Which side of a conflict to keep when resolving.
@@ -1933,15 +1936,43 @@ fn git_stdout(
     args: &[&str],
     input: Option<&[u8]>,
 ) -> Result<String, GitInspectionError> {
-    git_stdout_program(root, "git", &[], args, input)
+    git_stdout_with_timeout(root, args, input, GIT_LOCAL_COMMAND_TIMEOUT)
 }
 
+#[cfg(test)]
 fn git_stdout_program(
     root: &Path,
     program: &str,
     program_args: &[String],
     args: &[&str],
     input: Option<&[u8]>,
+) -> Result<String, GitInspectionError> {
+    git_stdout_program_with_timeout(
+        root,
+        program,
+        program_args,
+        args,
+        input,
+        GIT_LOCAL_COMMAND_TIMEOUT,
+    )
+}
+
+fn git_stdout_with_timeout(
+    root: &Path,
+    args: &[&str],
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<String, GitInspectionError> {
+    git_stdout_program_with_timeout(root, "git", &[], args, input, timeout)
+}
+
+fn git_stdout_program_with_timeout(
+    root: &Path,
+    program: &str,
+    program_args: &[String],
+    args: &[&str],
+    input: Option<&[u8]>,
+    timeout: Duration,
 ) -> Result<String, GitInspectionError> {
     let command_label = args.join(" ");
     // The platform process service owns process groups/job objects and drains
@@ -1964,7 +1995,7 @@ fn git_stdout_program(
         ("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string()),
     ];
     request.stdin = input.map(<[u8]>::to_vec);
-    request.timeout = Some(GIT_COMMAND_TIMEOUT);
+    request.timeout = Some(timeout);
     let output = NativeProcessService
         .execute(&request)
         .map_err(|error| match error {
@@ -1994,6 +2025,16 @@ fn git_stdout_owned(
 ) -> Result<String, GitInspectionError> {
     let borrowed_args = args.iter().map(String::as_str).collect::<Vec<_>>();
     git_stdout(root, &borrowed_args, input)
+}
+
+fn git_stdout_owned_with_timeout(
+    root: &Path,
+    args: &[String],
+    input: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<String, GitInspectionError> {
+    let borrowed_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+    git_stdout_with_timeout(root, &borrowed_args, input, timeout)
 }
 
 fn git_status_entries(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
@@ -9653,6 +9694,12 @@ mod tests {
     }
 
     #[test]
+    fn git_command_timeout_budgets_are_operation_specific() {
+        assert_eq!(GIT_LOCAL_COMMAND_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(GIT_REMOTE_COMMAND_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
     fn git_inspection_hung_shim_timeout_kills_descendants() {
         let root = std::env::temp_dir().join(format!(
             "legion-git-shim-{}-{}",
@@ -9672,7 +9719,7 @@ mod tests {
             std::fs::write(
                 &script,
                 format!(
-                    "$child = \"Start-Sleep -Seconds 3; Set-Content -LiteralPath '{}' -Value alive\"; Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-Command',$child) -WindowStyle Hidden; Start-Sleep -Seconds 30",
+                    "$child = \"Start-Sleep -Seconds 10; Set-Content -LiteralPath '{}' -Value alive\"; Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-Command',$child) -WindowStyle Hidden; Start-Sleep -Seconds 30",
                     marker_text
                 ),
             )
@@ -9689,7 +9736,7 @@ mod tests {
         #[cfg(unix)]
         let (program, program_args) = {
             let script = format!(
-                "(sleep 3; printf alive > '{}') & sleep 30",
+                "(sleep 10; printf alive > '{}') & sleep 30",
                 marker.to_string_lossy()
             );
             ("sh", vec!["-c".to_string(), script])
@@ -9701,7 +9748,7 @@ mod tests {
             error.to_string().contains("timed out"),
             "unexpected error: {error}"
         );
-        std::thread::sleep(Duration::from_secs(4));
+        std::thread::sleep(Duration::from_secs(7));
         assert!(
             !marker.exists(),
             "timed-out Git shim descendant survived process-tree cleanup"
