@@ -2,16 +2,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::{Arc, Barrier},
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Barrier},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use legion_app::{AppCommandOutcome, AppComposition, GitInspectionRunner};
 use legion_editor::{TextEdit, TextPosition};
 use legion_ui::{
     CommandDispatchIntent, GitConflictChoiceProjection, GitDiffStrategyProjection,
-    GitHunkStageProjection, SearchStatusKindProjection,
+    GitHunkStageProjection, GitRefreshState, SearchStatusKindProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -164,24 +164,35 @@ fn git_refresh_rejects_stale_generation_and_eventually_leaves_refreshing() {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(first_started.load(Ordering::Acquire), "first refresh did not start");
+    assert!(
+        first_started.load(Ordering::Acquire),
+        "first refresh did not start"
+    );
 
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("second refresh should dispatch");
     let pending = app
         .shell_projection_snapshot("git-generation")
         .expect("pending snapshot");
-    assert_eq!(pending.git_projection.refresh_state, GitRefreshState::Refreshing);
-    assert!(pending.git_projection.stale, "pending refresh must mark rows stale");
+    assert_eq!(
+        pending.git_projection.refresh_state,
+        GitRefreshState::Refreshing
+    );
+    assert!(
+        pending.git_projection.stale,
+        "pending refresh must mark rows stale"
+    );
 
     release_first.wait();
     let settled = app.drain_git_until_idle();
     assert_eq!(settled.refresh_state, GitRefreshState::Failed);
     assert!(!settled.stale, "latest failure must settle stale state");
-    assert!(settled
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.contains("generation 2")));
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("generation 2"))
+    );
 }
 
 #[test]
@@ -221,7 +232,10 @@ fn git_refresh_burst_coalesces_to_first_and_latest_worker_jobs() {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(first_started.load(Ordering::Acquire), "first refresh did not start");
+    assert!(
+        first_started.load(Ordering::Acquire),
+        "first refresh did not start"
+    );
 
     for _ in 0..49 {
         app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
@@ -231,12 +245,17 @@ fn git_refresh_burst_coalesces_to_first_and_latest_worker_jobs() {
     release_first.wait();
     let settled = app.drain_git_until_idle();
     let jobs = spawn_count.load(Ordering::SeqCst);
-    assert!(jobs <= 2, "50 refreshes should execute at most two jobs, got {jobs}");
+    assert!(
+        jobs <= 2,
+        "50 refreshes should execute at most two jobs, got {jobs}"
+    );
     assert_eq!(settled.refresh_state, GitRefreshState::Failed);
-    assert!(settled
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.contains("generation 50")));
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("generation 50"))
+    );
 }
 
 #[test]

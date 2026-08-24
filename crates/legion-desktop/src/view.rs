@@ -11232,8 +11232,8 @@ mod tests {
     };
     use legion_ui::{
         DebugStackFrameProjection, DebugVariableProjection, GitBlameLineProjection,
-        GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-        GitHunkStageProjection, Shell,
+        GitDiffStrategyProjection, GitFileProjection, GitHunkProjection, GitHunkStageProjection,
+        Shell,
     };
 
     #[test]

@@ -1860,36 +1860,6 @@ pub enum GitRefreshState {
 }
 
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitRefreshState {
-    /// No Git inspection is pending.
-    Idle,
-    /// A background Git inspection is running.
-    Refreshing,
-    /// The worker exceeded its bounded command timeout.
-    TimedOut,
-    /// The worker returned a non-timeout failure.
-    Failed,
-    /// Git requested credentials or another interactive action.
-    AuthRequired,
-}
-
-/// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitRefreshState {
-    /// No Git inspection is pending.
-    Idle,
-    /// A background Git inspection is running.
-    Refreshing,
-    /// The worker exceeded its bounded command timeout.
-    TimedOut,
-    /// The worker returned a non-timeout failure.
-    Failed,
-    /// Git requested credentials or another interactive action.
-    AuthRequired,
-}
-
-/// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
     /// Repository root label.

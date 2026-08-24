@@ -30,12 +30,10 @@ use legion_ai_providers::{
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
 
-mod assist_proposal;
 mod git_inspection;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
-use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use git_inspection::GitInspectionRunner;
 use git_inspection::{GitMutateOp, GitWorkRequest, GitWorkResult, GitWorker};
@@ -170,11 +168,9 @@ use legion_project::{
     WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
     WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
     WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
-    WorkspaceRestoreFileOp, WorkspaceSaveRequest, commit_git_changes, create_git_branch,
-    delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
-    prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
-    stage_git_hunk, stage_git_path, stash_git_changes, switch_git_branch, unstage_git_hunk,
-    unstage_git_path,
+    WorkspaceRestoreFileOp, WorkspaceSaveRequest, create_git_branch, delete_git_branch,
+    discover_cargo_debug_configurations, git_repository_root, prune_git_worktrees,
+    remove_git_worktree, resolve_git_conflict, stash_git_changes, switch_git_branch,
 };
 use legion_protocol::CallHierarchyDirection;
 use legion_protocol::{
