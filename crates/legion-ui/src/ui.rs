@@ -1544,6 +1544,14 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             combo: KeyCombo::new("F11", false, true, false),
             action_label: "DebugStepOut".into(),
         },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowUp", false, false, true),
+            action_label: "DebugStackPrevious".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowDown", false, false, true),
+            action_label: "DebugStackNext".into(),
+        },
     ]
 }
 

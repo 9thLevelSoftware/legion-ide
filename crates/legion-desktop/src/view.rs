@@ -2703,6 +2703,7 @@ fn render_activity_sidebar(
         ActivitySurface::Debug => {
             sidebar_header(ui, "RUN AND DEBUG", model.layout_title.clone());
             render_debug_controls(ui, snapshot, actions);
+            render_debug_inspector(ui, snapshot, actions);
             render_compact_rows(ui, &model.debug_rows, "No debug configurations", 12);
         }
     }
@@ -10566,6 +10567,128 @@ fn render_debug_controls(
     });
 }
 
+fn render_debug_inspector(
+    ui: &mut egui::Ui,
+    snapshot: &ShellProjectionSnapshot,
+    actions: &mut Vec<DesktopAction>,
+) {
+    let debug = &snapshot.debug_projection;
+    if debug.active_session_id.is_none()
+        || (debug.stack_frames.is_empty() && debug.variables.is_empty())
+    {
+        return;
+    }
+
+    ui.separator();
+    egui::CollapsingHeader::new("Call stack")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::List);
+                node.set_label("Debug call stack");
+            });
+            if debug.stack_frames.is_empty() {
+                ui.label(theme::muted("No stack frames"));
+            } else {
+                let selected_index =
+                    debug_selected_stack_frame_index(ui.ctx(), debug.stack_frames.len());
+                for (index, frame) in debug.stack_frames.iter().take(32).enumerate() {
+                    let response = ui.selectable_label(
+                        index == selected_index,
+                        debug_stack_frame_label(frame, index),
+                    );
+                    if response.clicked() {
+                        set_debug_selected_stack_frame_index(ui.ctx(), index);
+                        if let Some(action) = debug_frame_navigation_action(frame) {
+                            actions.push(action);
+                        }
+                    }
+                    ui.ctx().accesskit_node_builder(response.id, |node| {
+                        node.set_role(egui::accesskit::Role::ListItem);
+                        node.set_label(debug_stack_frame_label(frame, index));
+                        node.set_selected(index == selected_index);
+                    });
+                }
+            }
+        });
+
+    egui::CollapsingHeader::new("Variables")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
+                node.set_role(egui::accesskit::Role::Tree);
+                node.set_label("Debug variables");
+            });
+            if debug.variables.is_empty() {
+                ui.label(theme::muted("No variables"));
+            } else {
+                for variable in debug.variables.iter().take(64) {
+                    let label = debug_variable_label(variable);
+                    let response = ui.label(label.clone());
+                    ui.ctx().accesskit_node_builder(response.id, |node| {
+                        node.set_role(egui::accesskit::Role::TreeItem);
+                        node.set_label(label);
+                        node.set_expanded(variable.has_children);
+                    });
+                }
+            }
+        });
+}
+
+fn debug_stack_selection_id() -> egui::Id {
+    egui::Id::new("legion.debug.selected-stack-frame")
+}
+
+fn debug_selected_stack_frame_index(ctx: &egui::Context, frame_count: usize) -> usize {
+    if frame_count == 0 {
+        return 0;
+    }
+    ctx.data(|data| {
+        data.get_temp::<usize>(debug_stack_selection_id())
+            .unwrap_or_default()
+            .min(frame_count - 1)
+    })
+}
+
+fn set_debug_selected_stack_frame_index(ctx: &egui::Context, index: usize) {
+    ctx.data_mut(|data| data.insert_temp(debug_stack_selection_id(), index));
+}
+
+fn debug_frame_navigation_action(
+    frame: &legion_ui::DebugStackFrameProjection,
+) -> Option<DesktopAction> {
+    Some(DesktopAction::NavigateToProblem {
+        path: frame.path.as_ref()?.0.clone(),
+        line: frame.line?.saturating_sub(1),
+    })
+}
+
+fn debug_stack_frame_label(frame: &legion_ui::DebugStackFrameProjection, index: usize) -> String {
+    let path = frame
+        .path
+        .as_ref()
+        .map(|path| path.0.as_str())
+        .unwrap_or("<unknown>");
+    let line = frame
+        .line
+        .map(|line| line.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    format!("{} · {} · {}:{}", index + 1, frame.name, path, line)
+}
+
+fn debug_variable_label(variable: &legion_ui::DebugVariableProjection) -> String {
+    format!(
+        "{} = {}{}",
+        variable.name,
+        variable.value_label,
+        variable
+            .type_label
+            .as_deref()
+            .map(|type_label| format!(" · {type_label}"))
+            .unwrap_or_default()
+    )
+}
+
 fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let debug = &snapshot.debug_projection;
     let mut rows = Vec::new();
@@ -11032,7 +11155,10 @@ mod tests {
         DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass, RedactionHint,
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
-    use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, Shell};
+    use legion_ui::{
+        DebugStackFrameProjection, DebugVariableProjection, GitBlameLineProjection,
+        GitHunkProjection, GitHunkStageProjection, Shell,
+    };
 
     #[test]
     fn provider_permission_uses_plain_ai_copy() {
@@ -11040,6 +11166,37 @@ mod tests {
             workflow_permission_action_label(PermissionBudgetActionClass::InvokeProvider),
             "Uses an AI provider"
         );
+    }
+
+    #[test]
+    fn debug_inspector_labels_and_navigation_preserve_projection_metadata() {
+        let frame = DebugStackFrameProjection {
+            session_id: legion_protocol::DebugSessionId("debug:1".into()),
+            frame_id: 7,
+            name: "main".into(),
+            path: Some(CanonicalPath("src/main.rs".into())),
+            line: Some(12),
+        };
+        assert_eq!(
+            debug_stack_frame_label(&frame, 0),
+            "1 · main · src/main.rs:12"
+        );
+        assert_eq!(
+            debug_frame_navigation_action(&frame),
+            Some(DesktopAction::NavigateToProblem {
+                path: "src/main.rs".into(),
+                line: 11,
+            })
+        );
+
+        let variable = DebugVariableProjection {
+            session_id: legion_protocol::DebugSessionId("debug:1".into()),
+            name: "count".into(),
+            value_label: "3".into(),
+            type_label: Some("i32".into()),
+            has_children: false,
+        };
+        assert_eq!(debug_variable_label(&variable), "count = 3 · i32");
     }
 
     #[test]

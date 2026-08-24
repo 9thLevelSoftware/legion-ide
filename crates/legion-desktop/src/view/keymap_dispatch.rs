@@ -203,11 +203,35 @@ pub(crate) fn dispatch_keybindings(
             if binding.combo.alt != input.modifiers.alt {
                 continue;
             }
-            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot)
+            let action = match binding.action_label.as_str() {
+                "DebugStackPrevious" => debug_stack_navigation_action(ctx, snapshot, -1),
+                "DebugStackNext" => debug_stack_navigation_action(ctx, snapshot, 1),
+                _ => action_label_to_desktop_action(&binding.action_label, snapshot),
+            };
+            if let Some(action) = action
                 && (editor_input_enabled || !action_is_editor_scoped(&action))
             {
                 actions.push(action);
             }
         }
     });
+}
+
+fn debug_stack_navigation_action(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    direction: isize,
+) -> Option<DesktopAction> {
+    let frame_count = snapshot.debug_projection.stack_frames.len();
+    if frame_count == 0 {
+        return None;
+    }
+    let current = debug_selected_stack_frame_index(ctx, frame_count);
+    let next = (current as isize + direction).clamp(0, frame_count as isize - 1) as usize;
+    set_debug_selected_stack_frame_index(ctx, next);
+    snapshot
+        .debug_projection
+        .stack_frames
+        .get(next)
+        .and_then(debug_frame_navigation_action)
 }
