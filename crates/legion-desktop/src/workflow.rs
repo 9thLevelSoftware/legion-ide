@@ -33,9 +33,9 @@ use legion_storage::{
     OsKeyringSecretStore, SecretStore, provider_api_key_reference, provider_secret_reference,
 };
 use legion_ui::{
-    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
-    SearchScopeProjection, SearchStatusKindProjection, SettingsProjection, Shell,
-    ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, GitRefreshState,
+    PaletteMode, PanelId, SearchScopeProjection, SearchStatusKindProjection, SettingsProjection,
+    Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -4095,6 +4095,10 @@ impl DesktopEframeApp {
         // requiring another user gesture after launch.
         {
             let snapshot = self.runtime.projection_snapshot();
+            if snapshot.git_projection.refresh_state == GitRefreshState::Refreshing {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
             if snapshot
                 .terminal_panel_projection
                 .active_session_id

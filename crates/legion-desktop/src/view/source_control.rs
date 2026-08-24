@@ -9,8 +9,8 @@
 
 use legion_protocol::TextCoordinate;
 use legion_ui::{
-    GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, PaletteMode,
-    ShellProjectionSnapshot,
+    GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, GitRefreshState,
+    PaletteMode, ShellProjectionSnapshot,
 };
 
 use super::components::soft_button;
@@ -22,6 +22,20 @@ pub(super) fn render_git_controls(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
+    let refresh_label = match snapshot.git_projection.refresh_state {
+        GitRefreshState::Idle => None,
+        GitRefreshState::Refreshing => Some("Git refresh: Refreshing"),
+        GitRefreshState::TimedOut => Some("Git refresh: TimedOut"),
+        GitRefreshState::Failed => Some("Git refresh: Failed"),
+        GitRefreshState::AuthRequired => Some("Git refresh: AuthRequired"),
+    };
+    if let Some(label) = refresh_label {
+        let response = ui.label(theme::muted(label));
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_role(egui::accesskit::Role::Status);
+            node.set_label(label);
+        });
+    }
     ui.horizontal_wrapped(|ui| {
         if soft_button(ui, "Refresh Git").clicked() {
             actions.push(DesktopAction::RefreshGit);
@@ -759,9 +773,11 @@ pub(super) fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !git.conflicts.is_empty()
         || !git.worktrees.is_empty()
         || !git.diagnostics.is_empty()
+        || git.refresh_state != GitRefreshState::Idle
     {
         rows.push(format!(
-            "git: branch={} head={} changes={} hunks={} conflicts={} worktrees={}",
+            "git: refresh={:?} branch={} head={} changes={} hunks={} conflicts={} worktrees={}",
+            git.refresh_state,
             git.branch_label.as_deref().unwrap_or("<none>"),
             git.head_short.as_deref().unwrap_or("<none>"),
             git.changed_files.len(),

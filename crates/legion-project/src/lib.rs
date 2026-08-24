@@ -3,13 +3,11 @@
 #![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::{Read as IoRead, Write};
+use std::io::Read as IoRead;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobSet};
 use ignore::WalkBuilder;
@@ -29,8 +27,9 @@ use legion_observability::{
     security_denial_event, stale_proposal_rejected_event, watcher_recovery_event,
 };
 use legion_platform::{
-    FileSystemEntryKind, FileSystemMetadata, FileSystemService, PathNormalizationService,
-    PlatformError, WatcherService, resolve_existing_prefix,
+    FileSystemEntryKind, FileSystemMetadata, FileSystemService, NativeProcessService,
+    PathNormalizationService, PlatformError, ProcessRequest, ProcessService, WatcherService,
+    resolve_existing_prefix,
 };
 use legion_protocol::{
     BufferVersion, CanonicalPath, CapabilityId, CapabilityRequestContext, CausalityId,
@@ -1925,101 +1924,56 @@ fn git_stdout(
     args: &[&str],
     input: Option<&[u8]>,
 ) -> Result<String, GitInspectionError> {
-    let command_label = args.join(" ");
-    let mut command = Command::new("git");
-    // Two global flags on every invocation, both closing a gap between what a
-    // path *is* and what git will do with it.
-    //
-    // `--literal-pathspecs`: a path is a filename here, never a pattern. `--`
-    // stops option parsing and does nothing about pathspec magic, so a tracked
-    // file genuinely named `:(glob)*.txt` turned one Stage click into
-    // `git add` over every matching file -- staging things the row never named,
-    // which is the exact outcome the app-layer "path must be in the projection"
-    // check exists to prevent.
-    //
-    // `core.quotePath=false`: by default git renders non-ASCII bytes in a
-    // filename as C-style escapes inside quotes (`"caf\303\251.txt"`) in diff
-    // headers, while porcelain `-z` reports the raw bytes. The two then disagree
-    // about the same file, and a file whose hunks cannot be matched to its
-    // status row is treated as hunkless -- which offers whole-path staging
-    // beside its own hunk controls.
-    command
-        .current_dir(root)
-        .arg("--literal-pathspecs")
-        .args(["-c", "core.quotePath=false"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .args(args);
-    let output = if let Some(input) = input {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| GitInspectionError::Launch {
-                command: command_label.clone(),
-                source,
-            })?;
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            GitInspectionError::Parse("git stdin pipe was not available".to_string())
-        })?;
-        stdin
-            .write_all(input)
-            .map_err(|source| GitInspectionError::Launch {
-                command: command_label.clone(),
-                source,
-            })?;
-        drop(stdin);
-        child
-            .wait_with_output()
-            .map_err(|source| GitInspectionError::Launch {
-                command: command_label.clone(),
-                source,
-            })?
-    } else {
-        let mut child = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| GitInspectionError::Launch {
-                command: command_label.clone(),
-                source,
-            })?;
-        let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
-        loop {
-            if child
-                .try_wait()
-                .map_err(|source| GitInspectionError::Launch {
-                    command: command_label.clone(),
-                    source,
-                })?
-                .is_some()
-            {
-                break child
-                    .wait_with_output()
-                    .map_err(|source| GitInspectionError::Launch {
-                        command: command_label.clone(),
-                        source,
-                    })?;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(GitInspectionError::CommandFailed {
-                    command: command_label,
-                    stderr: format!("timed out after {}ms", GIT_COMMAND_TIMEOUT.as_millis()),
-                });
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    };
+    git_stdout_program(root, "git", &[], args, input)
+}
 
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+fn git_stdout_program(
+    root: &Path,
+    program: &str,
+    program_args: &[String],
+    args: &[&str],
+    input: Option<&[u8]>,
+) -> Result<String, GitInspectionError> {
+    let command_label = args.join(" ");
+    // The platform process service owns process groups/job objects and drains
+    // pipes off-thread, so a timed-out Git shim cannot leave descendants alive.
+    let mut request = ProcessRequest::new(program);
+    request.args = program_args
+        .iter()
+        .cloned()
+        .chain(std::iter::once("--literal-pathspecs".to_string()))
+        .chain(
+            ["-c", "core.quotePath=false"]
+                .into_iter()
+                .map(str::to_string),
+        )
+        .chain(args.iter().map(|arg| (*arg).to_string()))
+        .collect();
+    request.cwd = Some(root.to_path_buf());
+    request.env = vec![
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        ("GIT_OPTIONAL_LOCKS".to_string(), "0".to_string()),
+    ];
+    request.stdin = input.map(<[u8]>::to_vec);
+    request.timeout = Some(GIT_COMMAND_TIMEOUT);
+    let output = NativeProcessService
+        .execute(&request)
+        .map_err(|error| match error {
+            PlatformError::Timeout { duration, .. } => GitInspectionError::CommandFailed {
+                command: command_label.clone(),
+                stderr: format!("timed out after {}ms", duration.as_millis()),
+            },
+            other => GitInspectionError::Launch {
+                command: command_label.clone(),
+                source: std::io::Error::other(other.to_string()),
+            },
+        })?;
+    if output.exit_code == 0 {
+        Ok(output.stdout)
     } else {
         Err(GitInspectionError::CommandFailed {
             command: command_label,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            stderr: output.stderr.trim().to_string(),
         })
     }
 }
@@ -8092,6 +8046,8 @@ impl legion_protocol::ProjectInfoPort for WorkspaceActor {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
     /// The header forms git emits, decoded back to filenames.
     ///
     /// `core.quotePath=false` covers high bytes and nothing else: a double
@@ -9684,6 +9640,63 @@ mod tests {
             "hit must be from match_me.rs, got {path}"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_inspection_hung_shim_timeout_kills_descendants() {
+        let root = std::env::temp_dir().join(format!(
+            "legion-git-shim-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create shim root");
+        let marker = root.join("descendant-alive.txt");
+
+        #[cfg(windows)]
+        let (program, program_args) = {
+            let script = root.join("shim.ps1");
+            let marker_text = marker.to_string_lossy().replace('\'', "''");
+            std::fs::write(
+                &script,
+                format!(
+                    "$child = \"Start-Sleep -Seconds 3; Set-Content -LiteralPath '{}' -Value alive\"; Start-Process -FilePath powershell -ArgumentList @('-NoProfile','-Command',$child) -WindowStyle Hidden; Start-Sleep -Seconds 30",
+                    marker_text
+                ),
+            )
+            .expect("write PowerShell shim");
+            (
+                "powershell",
+                vec![
+                    "-NoProfile".to_string(),
+                    "-File".to_string(),
+                    script.to_string_lossy().into_owned(),
+                ],
+            )
+        };
+        #[cfg(unix)]
+        let (program, program_args) = {
+            let script = format!(
+                "(sleep 3; printf alive > '{}') & sleep 30",
+                marker.to_string_lossy()
+            );
+            ("sh", vec!["-c".to_string(), script])
+        };
+
+        let error = super::git_stdout_program(&root, program, &program_args, &["status"], None)
+            .expect_err("hung shim must time out");
+        assert!(
+            error.to_string().contains("timed out"),
+            "unexpected error: {error}"
+        );
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !marker.exists(),
+            "timed-out Git shim descendant survived process-tree cleanup"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -2,15 +2,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::{Arc, Barrier},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use legion_app::AppComposition;
+use legion_app::{AppComposition, GitInspectionRunner};
 use legion_editor::{TextEdit, TextPosition};
 use legion_ui::{
     CommandDispatchIntent, GitConflictChoiceProjection, GitDiffStrategyProjection,
-    GitHunkStageProjection, SearchStatusKindProjection,
+    GitHunkStageProjection, GitRefreshState, SearchStatusKindProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -127,6 +128,71 @@ fn projected_path_matches(path: &str, expected: &Path) -> bool {
     Path::new(path)
         .canonicalize()
         .is_ok_and(|actual| actual == expected)
+}
+
+#[test]
+fn git_refresh_rejects_stale_generation_and_eventually_leaves_refreshing() {
+    let repo = TempGitRepo::new();
+    let first_started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(Barrier::new(2));
+    let runner: GitInspectionRunner = {
+        let first_started = Arc::clone(&first_started);
+        let release_first = Arc::clone(&release_first);
+        Arc::new(move |generation, _root, _active_file, _options| {
+            if generation == 1 {
+                first_started.store(true, Ordering::Release);
+                release_first.wait();
+            }
+            Err(legion_project::GitInspectionError::Parse(format!(
+                "synthetic generation {generation} failure"
+            )))
+        })
+    };
+    let mut app = AppComposition::new_with_git_runner_for_test(runner);
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-generation-test".to_string()),
+    )
+    .expect("workspace should open");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("first refresh should dispatch");
+    for _ in 0..100 {
+        if first_started.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        first_started.load(Ordering::Acquire),
+        "first refresh did not start"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("second refresh should dispatch");
+    let pending = app
+        .shell_projection_snapshot("git-generation")
+        .expect("pending snapshot");
+    assert_eq!(
+        pending.git_projection.refresh_state,
+        GitRefreshState::Refreshing
+    );
+    assert!(
+        pending.git_projection.stale,
+        "pending refresh must mark rows stale"
+    );
+
+    release_first.wait();
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, GitRefreshState::Failed);
+    assert!(!settled.stale, "latest failure must settle stale state");
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("generation 2"))
+    );
 }
 
 #[test]

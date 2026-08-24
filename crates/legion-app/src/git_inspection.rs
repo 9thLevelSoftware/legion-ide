@@ -1,12 +1,27 @@
 //! Background Git inspection worker and app-thread drain seam.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, SyncSender, TrySendError},
+};
 use std::thread;
 
 use legion_project::{
     GitInspectionError, GitSnapshotOptions, ProjectGitSnapshot, collect_git_snapshot,
 };
+
+/// Testable worker execution seam; production uses [`collect_git_snapshot`].
+pub type GitInspectionRunner = Arc<
+    dyn Fn(
+            u64,
+            &std::path::Path,
+            Option<&std::path::Path>,
+            GitSnapshotOptions,
+        ) -> Result<ProjectGitSnapshot, GitInspectionError>
+        + Send
+        + Sync,
+>;
 
 /// A Git snapshot request issued by the app thread.
 #[derive(Debug, Clone)]
@@ -45,13 +60,22 @@ pub struct GitWorker {
 impl GitWorker {
     /// Spawn the worker thread and return its app-thread handle.
     pub fn new() -> Self {
+        Self::new_with_runner(Arc::new(|_, root, active_file, options| {
+            collect_git_snapshot(root, active_file, options)
+        }))
+    }
+
+    /// Spawn a worker with an injected runner for deterministic acceptance tests.
+    pub fn new_with_runner(runner: GitInspectionRunner) -> Self {
         let (request_tx, request_rx) = mpsc::sync_channel::<GitInspectionRequest>(1);
         let (result_tx, result_rx) = mpsc::sync_channel::<GitInspectionResult>(4);
+        let worker_runner = Arc::clone(&runner);
         thread::Builder::new()
             .name("legion-git-inspection".to_string())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
-                    let result = collect_git_snapshot(
+                    let result = worker_runner(
+                        request.generation,
                         &request.root,
                         request.active_file.as_deref(),
                         request.options,

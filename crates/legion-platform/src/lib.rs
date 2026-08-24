@@ -676,6 +676,8 @@ pub struct ProcessRequest {
     pub cwd: Option<PathBuf>,
     /// Optional environment map.
     pub env: Vec<(String, String)>,
+    /// Optional bytes written to the child stdin before waiting.
+    pub stdin: Option<Vec<u8>>,
     /// Optional timeout.
     pub timeout: Option<Duration>,
     /// Cancellation flag.
@@ -690,6 +692,7 @@ impl ProcessRequest {
             args: Vec::new(),
             cwd: None,
             env: Vec::new(),
+            stdin: None,
             timeout: None,
             cancelled: false,
         }
@@ -1005,7 +1008,7 @@ impl FileSystemService for NativeFileSystem {
 
 impl ProcessService for NativeProcessService {
     fn execute(&self, request: &ProcessRequest) -> Result<ProcessResult, PlatformError> {
-        use std::io::Read;
+        use std::io::{Read, Write};
         use std::process::Stdio;
 
         if request.cancelled {
@@ -1028,7 +1031,11 @@ impl ProcessService for NativeProcessService {
         }
 
         command
-            .stdin(Stdio::null())
+            .stdin(if request.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -1057,6 +1064,26 @@ impl ProcessService for NativeProcessService {
                 message: err.to_string(),
             })?;
 
+        if let Some(input) = request.stdin.as_deref() {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                PlatformError::from_io_error(
+                    "write process stdin",
+                    PathBuf::from(&request.command),
+                    io::Error::new(io::ErrorKind::BrokenPipe, "stdin pipe unavailable"),
+                )
+            })?;
+            stdin.write_all(input).map_err(|err| {
+                PlatformError::from_io_error(
+                    "write process stdin",
+                    PathBuf::from(&request.command),
+                    err,
+                )
+            })?;
+        }
+
+        #[cfg(windows)]
+        let mut process_job = assign_windows_process_job(&child);
+
         // Drain stdout/stderr on dedicated threads so a child that fills its pipe
         // buffers cannot deadlock against the timeout polling loop below.
         let stdout_reader = child.stdout.take().map(|mut pipe| {
@@ -1081,6 +1108,8 @@ impl ProcessService for NativeProcessService {
                     Ok(Some(status)) => break status,
                     Ok(None) => {
                         if started.elapsed() > timeout {
+                            #[cfg(windows)]
+                            process_job.take();
                             terminate_timed_out_process(&mut child);
                             return Err(PlatformError::Timeout {
                                 operation: format!("process `{}`", request.command),
@@ -1105,6 +1134,9 @@ impl ProcessService for NativeProcessService {
                 PlatformError::from_io_error("execute", PathBuf::from(&request.command), err)
             })?
         };
+
+        #[cfg(windows)]
+        process_job.take();
 
         let elapsed = started.elapsed();
         let stdout = stdout_reader
@@ -1136,8 +1168,61 @@ fn terminate_timed_out_process(child: &mut std::process::Child) {
             nix::sys::signal::Signal::SIGKILL,
         );
     }
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .status();
+    }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn assign_windows_process_job(child: &std::process::Child) -> Option<WindowsProcessJob> {
+    use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use ::windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use ::windows::core::PCWSTR;
+    use std::os::windows::io::AsRawHandle;
+
+    unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &limits as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        let process = HANDLE(child.as_raw_handle());
+        if AssignProcessToJobObject(job, process).is_err() {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(WindowsProcessJob(job))
+    }
+}
+
+#[cfg(windows)]
+struct WindowsProcessJob(::windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for WindowsProcessJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ::windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
 
 const PTY_OUTPUT_LIMIT: usize = 256 * 1024;
@@ -2407,6 +2492,7 @@ mod tests {
             args: vec!["hello".to_string()],
             cwd: None,
             env: Vec::new(),
+            stdin: None,
             timeout: None,
             cancelled: true,
         });
@@ -2464,6 +2550,7 @@ mod tests {
                     ("KEEP_ME".to_string(), "visible".to_string()),
                     ("OPENAI_API_KEY".to_string(), "sk-secret".to_string()),
                 ],
+                stdin: None,
                 timeout: None,
                 cancelled: false,
             })
@@ -2494,6 +2581,7 @@ mod tests {
             args,
             cwd: None,
             env: Vec::new(),
+            stdin: None,
             timeout: Some(Duration::from_millis(200)),
             cancelled: false,
         });

@@ -37,6 +37,8 @@ mod git_inspection;
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
 use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use git_inspection::GitInspectionRunner;
 use git_inspection::{GitInspectionRequest, GitWorker};
 
 pub mod terminal_policy;
@@ -14322,6 +14324,14 @@ impl AppComposition {
         Self::with_event_sink(SharedEventSink::new(
             legion_observability::RedactingEventSink::new(),
         ))
+    }
+
+    /// Build composition with an injected Git runner for deterministic worker tests.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new_with_git_runner_for_test(runner: GitInspectionRunner) -> Self {
+        let mut app = Self::new();
+        app.git_worker = GitWorker::new_with_runner(runner);
+        app
     }
 
     /// Build composition with native platform adapters and an injected event sink.
