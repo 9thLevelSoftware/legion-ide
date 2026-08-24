@@ -31,11 +31,11 @@ The local evidence packet covers launch, input/output, kill/orphan cleanup, and 
 
 #### Workspace search
 
-Search operates on the active file or across the entire workspace.
-The search scan itself does not write files. Multi-file search/replace exists
-as a proposal (`P2.F4.T2`): matches become a `WorkspaceEditProposalPayload` and
-stop at `Previewed`. Applying is a separate, explicit proposal-pipeline step.
-There is no search-panel Replace All control for this path.
+Search operates on the active file or across the entire workspace without mutating any files.
+Dispatch returns immediately; the scan runs on an app-owned worker and the desktop drains the
+latest completed generation without blocking the frame. Repeated queries coalesce to the newest
+request, so an older result may be discarded rather than replacing the latest query.
+Multi-file search/replace is explicitly out of scope until M9; the search surface is read-only.
 
 Options available in workspace search:
 
@@ -47,10 +47,10 @@ Options available in workspace search:
 Binary files are detected by a NUL-byte heuristic (first 8 KiB window) and skipped automatically;
 the search report includes a `skipped_binary_count` field that records how many were bypassed.
 
-`run_search` is synchronous: it sets previous rows stale and then overwrites
-the projection in the same call (`search.rs` STALE-MARKER VISIBILITY
-LIMITATION). There is no practical window in which a `[stale]` tag is visible
-between queries. Do not treat the search panel as showing live stale rows.
+When a new query begins, results from the previous query are marked **stale** until the new
+results arrive. The projection reports **Running** while work is in flight, and stale rows remain
+observable and rendered de-emphasised (tagged `[outdated]` in the desktop projection) until a
+newer generation settles.
 
 #### Command palette
 

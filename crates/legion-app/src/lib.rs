@@ -14109,7 +14109,7 @@ pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
 
 /// Root application composition.
 pub struct AppComposition {
-    workspace: WorkspaceActor,
+    workspace: Arc<WorkspaceActor>,
     editor: EditorEngine,
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
@@ -14200,6 +14200,8 @@ pub struct AppComposition {
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
     search_projection: SearchProjection,
+    search_worker: crate::search::SearchWorker,
+    search_generation: u64,
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
     git_worker: GitWorker,
@@ -14496,14 +14498,15 @@ impl AppComposition {
             SecurityPolicy::default(),
             CapabilityNamespace("app".to_string()),
         );
+        let workspace = Arc::new(WorkspaceActor::with_event_sink(
+            fs,
+            watcher,
+            security,
+            Box::new(event_sink.clone()),
+        ));
 
         Self {
-            workspace: WorkspaceActor::with_event_sink(
-                fs,
-                watcher,
-                security,
-                Box::new(event_sink.clone()),
-            ),
+            workspace: Arc::clone(&workspace),
             editor: EditorEngine::new(),
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
@@ -14563,6 +14566,8 @@ impl AppComposition {
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
             search_projection: SearchProjection::idle(),
+            search_worker: crate::search::SearchWorker::new(Arc::clone(&workspace)),
+            search_generation: 0,
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
             git_worker: GitWorker::new(),
@@ -15225,6 +15230,11 @@ impl AppComposition {
     /// Whether a progressive / background product AI stream is still in flight.
     pub fn product_ai_stream_in_flight(&self) -> bool {
         self.live_product_ai_stream.is_in_flight()
+    }
+
+    /// Whether a search worker request is still settling.
+    pub fn search_worker_in_flight(&self) -> bool {
+        self.search_projection.status.kind == SearchStatusKindProjection::Running
     }
 
     /// Poll live stream into `last_product_ai_stream` and apply finished background jobs.
@@ -16934,7 +16944,7 @@ impl AppComposition {
         };
 
         let recent_bonus = self.palette_recent_path_bonus_map();
-        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?
+        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?
             .into_iter()
             .filter(workspace_node_is_regular_file)
             .map(|node| node.identity.canonical_path.0)
@@ -18237,7 +18247,7 @@ impl AppComposition {
         if let Some(outcome) = CommandExecutionService::execute(
             &request,
             &mut self.editor,
-            &self.workspace,
+            &*self.workspace,
             &mut state,
         )? {
             state.apply_to_active(&mut self.active_documents);
@@ -29931,7 +29941,7 @@ impl AppComposition {
     /// Build explorer projection from workspace tree snapshot.
     pub fn explorer_projection(&self) -> Result<ExplorerProjection, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let nodes = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?;
+        let nodes = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?;
         Ok(ProjectionBuilder::explorer_projection(
             &self.active_documents,
             nodes,

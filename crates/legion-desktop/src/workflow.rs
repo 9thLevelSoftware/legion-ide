@@ -1466,6 +1466,11 @@ impl DesktopRuntime {
         self.app.product_ai_stream_in_flight()
     }
 
+    /// Whether the app-owned search worker still has a request settling.
+    pub fn search_worker_in_flight(&self) -> bool {
+        self.app.search_worker_in_flight()
+    }
+
     /// Whether the audit trail still owes a route record a write.
     pub fn has_pending_route_audits(&self) -> bool {
         self.app.has_pending_route_audits()
@@ -3363,6 +3368,9 @@ impl DesktopRuntime {
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
         self.app.drain_git_inspection();
+        // Search work is also app-owned and worker-backed; drain only completed
+        // results so stale rows and the Running state remain observable.
+        self.app.drain_search_worker();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
 
         // T6: auto-open popup when new completions arrive from the LSP worker.
@@ -4129,6 +4137,7 @@ impl DesktopEframeApp {
         // turn would read as `Streaming` for as long as that took.
         if self.runtime.poll_product_ai_stream()
             || self.runtime.product_ai_stream_in_flight()
+            || self.runtime.search_worker_in_flight()
             || self.runtime.has_pending_route_audits()
         {
             ui.ctx()
