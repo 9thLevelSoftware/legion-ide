@@ -20,8 +20,13 @@ Treat the labels as the product source of truth for the current profile and plat
 | Debug session | Step into | `F11` | |
 | Debug session | Step out | `Shift+F11` | |
 | Debug | Toggle breakpoint at cursor | `F9` | Zero-based projected cursor line on the active buffer. |
-| Problems panel | Next problem | `F8` | Move the focused diagnostic row forward, wrapping at the end. |
-| Problems panel | Previous problem | `Shift+F8` | Move the focused diagnostic row backward, wrapping at the beginning. |
+| Problems panel | Next problem | `F8` | Move the focused diagnostic row forward; projected navigation only. |
+| Problems panel | Previous problem | `Shift+F8` | Move the focused diagnostic row backward; projected navigation only. |
+| Debug panel | Select previous stack frame | `Alt+ArrowUp` | Select a rendered stack frame; navigation remains bounded to the projected rows. |
+| Debug panel | Select next stack frame | `Alt+ArrowDown` | Select a rendered stack frame; navigation remains bounded to the projected rows. |
+| Editor | Rename symbol | `F2` | Opens the proposal-mediated language rename command. |
+| Editor | Format document | `Shift+Alt+F` | Opens the proposal-mediated formatting command. |
+| Editor | Organize imports | `Ctrl+Shift+O` | Opens the proposal-mediated organize-imports command. |
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
 | Completion popup | Navigate next | `↓` (Down Arrow) | Move selection down in the completion list. |
@@ -48,6 +53,14 @@ Treat the labels as the product source of truth for the current profile and plat
 | SCM diff panel | Stage Focused Hunk | `Ctrl+Shift+G` | Stage the focused unstaged hunk through the existing `StageGitHunk` intent; the same action is available from the command palette as `Git: Stage Focused Hunk`. |
 
 Navigation state (`focused_hunk_id`) is owned by the application layer and reflected in `GitProjection`; the desktop shell is projection-only.
+
+## Product command coverage
+
+The command palette also exposes `Tests: Refresh`, `Tests: Run Item`, `Tests: Run Group`,
+`Language: Format Document`, `Language: Rename Symbol`, `Language: Organize Imports`, and
+`Language: Code Action`. Test commands use worker-backed projected states; language commands
+remain proposal-mediated. These labels are covered by the desktop palette regression and do not
+claim renderer-backed 3-OS or manual dogfood evidence.
 
 ## Mode controls
 

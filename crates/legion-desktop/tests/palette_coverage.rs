@@ -86,6 +86,11 @@ fn canonical_display(path: &Path) -> String {
         .into_owned()
 }
 
+fn repository_doc(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs").join(name);
+    fs::read_to_string(path).expect("repository documentation should be readable")
+}
+
 fn command_key_input(key: egui::Key) -> egui::RawInput {
     egui::RawInput {
         focused: true,
@@ -437,4 +442,49 @@ fn command_palette_coverage_report_resolves_catalog_commands() {
         coverage_percent >= 95.0,
         "command coverage report: {resolved_cases}/13 commands resolved ({coverage_percent:.1}%)"
     );
+}
+
+#[test]
+fn product_loop_commands_have_documented_palette_and_keymap_coverage() {
+    let _guard = test_guard();
+    let user_guide = repository_doc("USER_GUIDE.md");
+    let keyboard_reference = repository_doc("KEYBOARD_REFERENCE.md");
+
+    let documented_commands = [
+        "Git: Stage Focused Hunk",
+        "Git: Next Hunk",
+        "Git: Previous Hunk",
+        "Git: Next File",
+        "Git: Previous File",
+        "Tests: Refresh",
+        "Tests: Run Item",
+        "Tests: Run Group",
+        "Language: Format Document",
+        "Language: Rename Symbol",
+        "Language: Organize Imports",
+        "Language: Code Action",
+    ];
+    for command in documented_commands {
+        assert!(
+            user_guide.contains(command) || keyboard_reference.contains(command),
+            "product command `{command}` must be documented"
+        );
+    }
+
+    let documented_shortcuts = [
+        ("Stage Focused Hunk", "Ctrl+Shift+G"),
+        ("Next problem", "F8"),
+        ("Previous problem", "Shift+F8"),
+        ("Select previous stack frame", "Alt+ArrowUp"),
+        ("Select next stack frame", "Alt+ArrowDown"),
+        ("Rename symbol", "F2"),
+        ("Format document", "Shift+Alt+F"),
+        ("Organize imports", "Ctrl+Shift+O"),
+    ];
+    for (label, shortcut) in documented_shortcuts {
+        assert!(
+            keyboard_reference.contains(label) && keyboard_reference.contains(shortcut),
+            "keymap entry `{label}` must document `{shortcut}`"
+        );
+    }
 }

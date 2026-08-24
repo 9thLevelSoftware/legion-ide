@@ -73,6 +73,26 @@ and the existing delegated workflow are unchanged. If the host cannot start or e
 the app reports an error rather than fabricating a successful run. Use the command again with the
 desired program to replace the attached host; restart the app to clear the opt-in configuration.
 
+The command dispatcher is the reachable entry point for the product loops covered by the current
+desktop tests. Git actions remain projection- and policy-mediated; debug actions expose projected
+session state; test discovery and runs expose worker-backed `discovering`/`running` states; and
+language write requests create proposal previews rather than silently editing files.
+
+The covered command names are:
+
+- **Git:** `Git: Stage Focused Hunk`, `Git: Next Hunk`, `Git: Previous Hunk`, `Git: Next File`,
+  and `Git: Previous File`.
+- **Debug:** `Debug: Start`, `Debug: Stop`, `Debug: Step Over`, `Debug: Step Into`, and
+  `Debug: Step Out` when the projected session state permits them.
+- **Tests:** `Tests: Refresh`, `Tests: Run Item`, and `Tests: Run Group`; discovery and execution
+  run off the UI dispatch path.
+- **Language:** `Language: Format Document`, `Language: Rename Symbol`,
+  `Language: Organize Imports`, and `Language: Code Action`; each remains proposal-mediated.
+
+These labels describe the command and projection contracts exercised in tests. They are not a
+claim of renderer-backed 3-OS dogfood, coverage support, or automatic mutation outside an
+approved proposal path.
+
 ### Assist
 
 Assist mode keeps the human in control while exposing AI-backed suggestions.
@@ -128,16 +148,11 @@ file, and for non-Rust workspaces that happen to be trusted.
   `BackingOff` (with countdown), `Unavailable`, or `Failed` states from
   `lsp_session_status` in the `LanguageToolingProjection`.
 
-**Write-side (P2.F1.T5; apply via P3.F1.T2):**
-Rename, format, code actions, and organize imports are proposal-mediated.
-Proposal generation is complete, and apply is live through the proposal
-pipeline (`P3.F1.T2`). See `plans/product-readiness-ledger.md` PR-LANG-001
-for the current gate status (still Substrate validated).
-**Write-side language proposals:**
-Rename (`F2`), format (`Shift+Alt+F`), organize imports (`Ctrl+Shift+O`), and code actions are
-reachable from the command palette and remain proposal-mediated. Each request creates, validates,
-and previews an edit through the existing proposal card before any apply step. The readiness ledger
-still records the separate evidence gate for PR-LANG-001; a local preview is not a 3-OS promotion.
+**What is deferred (write-side, P2.F1.T5):**
+Rename, format, code actions, and organize imports are reachable from the command palette and
+generate proposal previews, but they are not direct edits. Apply activation remains gated by
+the existing proposal workflow and kanban task P3.F1.T2.
+See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Support and release surfaces
 
@@ -159,6 +174,7 @@ When a diff is open, use the following palette commands (or their projected key 
 | Git: Previous Hunk | Move focus to the previous changed hunk in the current file. |
 | Git: Next File | Move focus to the next changed file in the diff. |
 | Git: Previous File | Move focus to the previous changed file in the diff. |
+| Git: Stage Focused Hunk | Stage the focused unstaged hunk through the existing proposal/policy path. |
 
 Focus state is tracked in the application layer; the desktop projection reflects the current `focused_hunk_id` from `GitProjection`.
 
