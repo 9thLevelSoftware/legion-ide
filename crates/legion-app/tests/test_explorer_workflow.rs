@@ -23,6 +23,64 @@ use uuid::Uuid;
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn refresh_until_settled(app: &mut AppComposition) -> legion_ui::TestExplorerProjection {
+    for _ in 0..120 {
+        let outcome = app
+            .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
+            .expect("refresh should not fail");
+        let AppCommandOutcome::TestExplorerUpdated(projection) = outcome else {
+            panic!("unexpected refresh outcome");
+        };
+        if projection.status_label != "discovering" {
+            return projection;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("test explorer discovery did not settle");
+}
+
+fn run_item_until_settled(
+    app: &mut AppComposition,
+    item_id: &str,
+) -> legion_ui::TestExplorerProjection {
+    for _ in 0..240 {
+        let outcome = app
+            .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
+                item_id: item_id.to_string(),
+            })
+            .expect("run should not fail");
+        let AppCommandOutcome::TestExplorerUpdated(projection) = outcome else {
+            panic!("unexpected run outcome");
+        };
+        if projection.last_run_status.as_deref() != Some("running") {
+            return projection;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("test explorer item run did not settle");
+}
+
+fn run_group_until_settled(
+    app: &mut AppComposition,
+    parent_label: &str,
+) -> legion_ui::TestExplorerProjection {
+    for _ in 0..240 {
+        let outcome = app
+            .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerGroup {
+                parent_label: parent_label.to_string(),
+            })
+            .expect("group run should not fail");
+        let AppCommandOutcome::TestExplorerUpdated(projection) = outcome else {
+            panic!("unexpected group run outcome");
+        };
+        if projection.last_run_status.as_deref() != Some("running") {
+            return projection;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("test explorer group run did not settle");
+}
+
 fn create_fixture_crate() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
         "legion-test-explorer-{}-{}",
@@ -114,39 +172,30 @@ fn test_explorer_refresh_discovers_fixture_or_reports_honest_error() {
     )
     .expect("open workspace");
 
-    let outcome = app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
-        .expect("refresh should not panic");
-    match outcome {
-        AppCommandOutcome::TestExplorerUpdated(projection) => {
-            assert_eq!(projection.controller_label, "cargo-test");
-            assert!(!projection.status_label.is_empty());
-            assert!(projection.items.len() <= 500);
-            if projection.status_label == "ready" {
-                assert!(
-                    projection
-                        .items
-                        .iter()
-                        .any(|item| item.item_id.contains("fixture_ok")
-                            || item.label.contains("fixture_ok")),
-                    "expected fixture_ok among {:?}",
-                    projection
-                        .items
-                        .iter()
-                        .map(|i| i.item_id.as_str())
-                        .collect::<Vec<_>>()
-                );
-            }
-            let snap = app
-                .shell_projection_snapshot("test-explorer")
-                .expect("snapshot");
-            assert_eq!(
-                snap.test_explorer_projection.status_label,
-                projection.status_label
-            );
-        }
-        other => panic!("unexpected outcome: {other:?}"),
+    let projection = refresh_until_settled(&mut app);
+    assert_eq!(projection.controller_label, "cargo-test");
+    assert!(!projection.status_label.is_empty());
+    assert!(projection.items.len() <= 500);
+    if projection.status_label == "ready" {
+        assert!(
+            projection.items.iter().any(
+                |item| item.item_id.contains("fixture_ok") || item.label.contains("fixture_ok")
+            ),
+            "expected fixture_ok among {:?}",
+            projection
+                .items
+                .iter()
+                .map(|i| i.item_id.as_str())
+                .collect::<Vec<_>>()
+        );
     }
+    let snap = app
+        .shell_projection_snapshot("test-explorer")
+        .expect("snapshot");
+    assert_eq!(
+        snap.test_explorer_projection.status_label,
+        projection.status_label
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -254,57 +303,42 @@ fn test_explorer_run_fixture_records_last_run_and_verification_row() {
     .expect("open workspace");
 
     // Discover first so items exist; run may still work without list if id is known.
-    let _ = app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
-        .expect("refresh");
+    let _ = refresh_until_settled(&mut app);
 
     let item_id = "tests::fixture_ok".to_string();
-    let outcome = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
-            item_id: item_id.clone(),
-        })
-        .expect("run should not panic");
-    match outcome {
-        AppCommandOutcome::TestExplorerUpdated(projection) => {
-            assert_eq!(
-                projection.last_run_item_id.as_deref(),
-                Some(item_id.as_str())
-            );
-            assert!(projection.last_run_status.is_some());
-            // When cargo is available, fixture_ok should pass.
-            if projection.last_run_status.as_deref() == Some("passed") {
-                assert_eq!(projection.last_run_exit_code, Some(0));
-            }
-            let snap = app
-                .shell_projection_snapshot("test-explorer-run")
-                .expect("snapshot");
-            assert!(
-                snap.verification_run_projection
-                    .rows
-                    .iter()
-                    .any(|row| row.command_class_label == "cargo-test-exact"
-                        && row.target_labels.iter().any(|t| t == &item_id)
-                        && row.evidence_artifact_id.is_some()),
-                "expected verification row for exact run, got {:?}",
-                snap.verification_run_projection.rows
-            );
-            assert!(
-                !app.test_explorer_run_summaries().is_empty(),
-                "expected protocol test-run summaries for agent evidence"
-            );
-            let artifacts = app
-                .test_explorer_evidence_artifacts()
-                .expect("evidence artifacts");
-            assert!(!artifacts.is_empty());
-            assert!(artifacts.iter().all(|a| !a.raw_payload_retained));
-            assert!(
-                artifacts
-                    .iter()
-                    .all(|a| a.artifact_id.starts_with("artifact:evidence:test-run:"))
-            );
-        }
-        other => panic!("unexpected outcome: {other:?}"),
+    let projection = run_item_until_settled(&mut app, &item_id);
+    assert_eq!(
+        projection.last_run_item_id.as_deref(),
+        Some(item_id.as_str())
+    );
+    assert!(projection.last_run_status.is_some());
+    if projection.last_run_status.as_deref() == Some("passed") {
+        assert_eq!(projection.last_run_exit_code, Some(0));
     }
+    let snap = app
+        .shell_projection_snapshot("test-explorer-run")
+        .expect("snapshot");
+    assert!(
+        snap.verification_run_projection
+            .rows
+            .iter()
+            .any(|row| row.command_class_label == "cargo-test-exact"
+                && row.target_labels.iter().any(|t| t == &item_id)
+                && row.evidence_artifact_id.is_some()),
+        "expected verification row for exact run, got {:?}",
+        snap.verification_run_projection.rows
+    );
+    assert!(!app.test_explorer_run_summaries().is_empty());
+    let artifacts = app
+        .test_explorer_evidence_artifacts()
+        .expect("evidence artifacts");
+    assert!(!artifacts.is_empty());
+    assert!(artifacts.iter().all(|a| !a.raw_payload_retained));
+    assert!(
+        artifacts
+            .iter()
+            .all(|a| a.artifact_id.starts_with("artifact:evidence:test-run:"))
+    );
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -377,11 +411,7 @@ fn test_explorer_attach_and_export_includes_agent_evidence() {
     .expect("open workspace");
 
     // Produce at least one explorer run summary.
-    let _ = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
-            item_id: "tests::fixture_ok".to_string(),
-        })
-        .expect("run fixture");
+    let _ = run_item_until_settled(&mut app, "tests::fixture_ok");
     assert!(!app.test_explorer_run_summaries().is_empty());
 
     let session = minimal_workflow_session("test-explorer-attach");
@@ -448,25 +478,16 @@ fn test_explorer_run_group_records_filter_mode_and_summary() {
         PrincipalId("principal-test-explorer-group".to_string()),
     )
     .expect("open workspace");
-    let outcome = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerGroup {
-            parent_label: "tests".to_string(),
-        })
-        .expect("group run");
-    match outcome {
-        AppCommandOutcome::TestExplorerUpdated(projection) => {
-            assert_eq!(projection.last_run_item_id.as_deref(), Some("tests"));
-            assert!(
-                projection
-                    .diagnostics
-                    .iter()
-                    .any(|d| d.contains("filter-mode=group") || d.starts_with("last-run:tests:")),
-                "diagnostics={:?}",
-                projection.diagnostics
-            );
-            assert!(!app.test_explorer_run_summaries().is_empty());
-        }
-        other => panic!("unexpected outcome: {other:?}"),
-    }
+    let projection = run_group_until_settled(&mut app, "tests");
+    assert_eq!(projection.last_run_item_id.as_deref(), Some("tests"));
+    assert!(
+        projection
+            .diagnostics
+            .iter()
+            .any(|d| d.contains("filter-mode=group") || d.starts_with("last-run:tests:")),
+        "diagnostics={:?}",
+        projection.diagnostics
+    );
+    assert!(!app.test_explorer_run_summaries().is_empty());
     let _ = fs::remove_dir_all(&root);
 }

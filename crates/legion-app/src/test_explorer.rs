@@ -4,8 +4,11 @@
 //! back to `cargo test -- --list`. Per-item run uses the lens command label or
 //! `cargo test -- --exact <id>`. Projections stay metadata-only.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use legion_protocol::{
@@ -25,6 +28,42 @@ pub const MAX_PROJECTED_ITEMS: usize = 500;
 
 /// Maximum retained per-item run rows for the verification projection.
 pub const MAX_RECENT_RUNS: usize = 20;
+
+struct DiscoveryWorker {
+    handle: Option<JoinHandle<TestExplorerProjection>>,
+    result: Option<TestExplorerProjection>,
+}
+
+struct RunWorker {
+    handle: JoinHandle<Result<CargoTestItemRunResult, String>>,
+}
+
+static DISCOVERY_WORKER: OnceLock<Mutex<HashMap<PathBuf, DiscoveryWorker>>> = OnceLock::new();
+static RUN_WORKER: OnceLock<Mutex<HashMap<String, RunWorker>>> = OnceLock::new();
+
+fn discovery_worker() -> &'static Mutex<HashMap<PathBuf, DiscoveryWorker>> {
+    DISCOVERY_WORKER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn run_worker() -> &'static Mutex<HashMap<String, RunWorker>> {
+    RUN_WORKER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_projection(
+    status_label: &str,
+    controller_label: &str,
+    generated_at: TimestampMillis,
+    diagnostic: &str,
+) -> TestExplorerProjection {
+    let mut projection = projection_from_items(
+        Vec::new(),
+        vec![diagnostic.to_string()],
+        status_label,
+        generated_at,
+    );
+    projection.controller_label = controller_label.to_string();
+    projection
+}
 
 /// Maximum stdout bytes retained transiently for summary parsing (not projected).
 const MAX_PARSE_STDOUT_BYTES: usize = 16 * 1024;
@@ -313,6 +352,61 @@ pub fn run_cargo_test_filter(
         });
     }
 
+    let key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        workspace_root.to_string_lossy(),
+        filter,
+        exact
+    );
+    let mut worker = run_worker()
+        .lock()
+        .map_err(|_| "test-worker-lock-poisoned".to_string())?;
+    if let Some(existing) = worker.get(&key) {
+        if existing.handle.is_finished() {
+            let existing = worker.remove(&key).expect("worker still present");
+            return existing
+                .handle
+                .join()
+                .map_err(|_| "test-worker-panicked".to_string())?;
+        }
+        return Ok(CargoTestItemRunResult {
+            item_id: filter.to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: vec!["worker=background".to_string()],
+        });
+    }
+    let workspace_root = workspace_root.to_path_buf();
+    let filter_owned = filter.to_string();
+    let handle = std::thread::Builder::new()
+        .name("legion-test-runner".to_string())
+        .spawn(move || {
+            run_cargo_test_filter_blocking(&workspace_root, &filter_owned, exact, timeout)
+        })
+        .map_err(|err| format!("spawn-failed:{err}"))?;
+    worker.insert(key, RunWorker { handle });
+    Ok(CargoTestItemRunResult {
+        item_id: filter.to_string(),
+        status_label: "running".to_string(),
+        exit_code: None,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        duration_ms: 0,
+        diagnostics: vec!["worker=background".to_string()],
+    })
+}
+
+fn run_cargo_test_filter_blocking(
+    workspace_root: &Path,
+    filter: &str,
+    exact: bool,
+    timeout: Duration,
+) -> Result<CargoTestItemRunResult, String> {
     let started = Instant::now();
     let mut args = vec!["test".to_string(), "--".to_string()];
     if exact {
@@ -460,6 +554,70 @@ pub fn push_recent_run(runs: &mut Vec<VerificationRunRow>, row: VerificationRunR
 ///
 /// Metadata-only: stdout is parsed for names/kinds; raw logs are not retained.
 pub fn discover_cargo_tests(
+    workspace_root: &Path,
+    timeout: Duration,
+    generated_at: TimestampMillis,
+) -> TestExplorerProjection {
+    let mut worker = match discovery_worker().lock() {
+        Ok(worker) => worker,
+        Err(_) => {
+            return pending_projection("error", "cargo-test", generated_at, "worker-lock-poisoned");
+        }
+    };
+    let workspace_root_key = workspace_root.to_path_buf();
+    if let Some(existing) = worker.get_mut(&workspace_root_key) {
+        if let Some(result) = existing.result.as_ref() {
+            return result.clone();
+        }
+        if existing
+            .handle
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let handle = existing.handle.take().expect("discovery worker handle");
+            existing.result = Some(handle.join().unwrap_or_else(|_| {
+                pending_projection("error", "cargo-test", generated_at, "worker-panicked")
+            }));
+            return existing.result.clone().expect("discovery result");
+        }
+        return pending_projection(
+            "discovering",
+            "cargo-test",
+            generated_at,
+            "worker=background",
+        );
+    }
+    let root = workspace_root.to_path_buf();
+    let handle = match std::thread::Builder::new()
+        .name("legion-test-discoverer".to_string())
+        .spawn(move || discover_cargo_tests_blocking(&root, timeout, generated_at))
+    {
+        Ok(handle) => handle,
+        Err(err) => {
+            return pending_projection(
+                "error",
+                "cargo-test",
+                generated_at,
+                &format!("spawn-failed:{err}"),
+            );
+        }
+    };
+    worker.insert(
+        workspace_root_key,
+        DiscoveryWorker {
+            handle: Some(handle),
+            result: None,
+        },
+    );
+    pending_projection(
+        "discovering",
+        "cargo-test",
+        generated_at,
+        "worker=background",
+    )
+}
+
+fn discover_cargo_tests_blocking(
     workspace_root: &Path,
     timeout: Duration,
     generated_at: TimestampMillis,
@@ -704,5 +862,38 @@ nested::deep::case: test
                 .iter()
                 .any(|d| d.starts_with("last-run:t::one:passed"))
         );
+    }
+
+    #[test]
+    fn discovery_and_run_start_as_background_operations() {
+        let root = std::env::temp_dir().join(format!(
+            "legion-test-explorer-worker-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create worker root");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"worker_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write manifest");
+
+        let discovery = discover_cargo_tests(&root, Duration::from_secs(10), TimestampMillis(1));
+        assert_eq!(discovery.status_label, "discovering");
+        let run = run_cargo_test_item(&root, "tests::fixture", Duration::from_secs(10))
+            .expect("start test worker");
+        assert_eq!(run.status_label, "running");
+
+        for _ in 0..120 {
+            let discovery =
+                discover_cargo_tests(&root, Duration::from_secs(10), TimestampMillis(2));
+            let run = run_cargo_test_item(&root, "tests::fixture", Duration::from_secs(10))
+                .expect("poll test worker");
+            if discovery.status_label != "discovering" && run.status_label != "running" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
