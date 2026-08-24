@@ -11232,7 +11232,8 @@ mod tests {
     };
     use legion_ui::{
         DebugStackFrameProjection, DebugVariableProjection, GitBlameLineProjection,
-        GitHunkProjection, GitHunkStageProjection, Shell,
+        GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
+        GitHunkStageProjection, Shell,
     };
 
     #[test]
@@ -11618,6 +11619,72 @@ mod tests {
                 utf16_offset: None,
             })
         );
+    }
+
+    #[test]
+    fn stage_focused_git_hunk_routes_only_an_unstaged_focus() {
+        let mut snapshot = Shell::empty("focused hunk").projection_snapshot();
+        snapshot.git_projection.focused_hunk_id = Some("git-hunk:focused".to_string());
+        snapshot.git_projection.hunks = vec![GitHunkProjection {
+            hunk_id: "git-hunk:focused".to_string(),
+            path: "src/lib.rs".to_string(),
+            stage: GitHunkStageProjection::Unstaged,
+            header: "@@ -1 +1 @@".to_string(),
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            added_lines: 1,
+            deleted_lines: 1,
+            submodule_dirty_only: false,
+            context: None,
+        }];
+
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            Some(DesktopAction::StageGitHunk {
+                hunk_id: "git-hunk:focused".to_string(),
+            })
+        );
+
+        snapshot.git_projection.hunks[0].stage = GitHunkStageProjection::Staged;
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            None
+        );
+    }
+
+    #[test]
+    fn git_rows_group_changed_files_without_dropping_file_details() {
+        let mut snapshot = Shell::empty("grouped git rows").projection_snapshot();
+        let file = |path: &str| GitFileProjection {
+            path: path.to_string(),
+            status: " M".to_string(),
+            inserted_lines: 1,
+            deleted_lines: 0,
+            unstaged_hunk_count: 1,
+            staged_hunk_count: 0,
+            stageable: true,
+            diff_strategy: GitDiffStrategyProjection::Syntactic,
+            fallback_reason: None,
+            conflict: false,
+        };
+        snapshot.git_projection.changed_files = vec![
+            file("src/lib.rs"),
+            file("src/bin/main.rs"),
+            file("README.md"),
+        ];
+
+        let rows = git_rows(&snapshot);
+        assert!(rows.iter().any(|row| row == "git group src"));
+        assert!(rows.iter().any(|row| row == "git group src/bin"));
+        assert!(rows.iter().any(|row| row == "git group <root>"));
+        for path in ["src/lib.rs", "src/bin/main.rs", "README.md"] {
+            assert!(
+                rows.iter().any(|row| row.contains(path)),
+                "grouped Git rows dropped {path}: {rows:?}"
+            );
+        }
     }
 
     #[test]

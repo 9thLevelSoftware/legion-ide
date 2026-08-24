@@ -786,19 +786,31 @@ pub(super) fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             git.worktrees.len()
         ));
     }
-    rows.extend(git.changed_files.iter().take(16).map(|file| {
-        format!(
-            "git file {} status={} diff={:?} +{} -{} hunks={}/{} conflict={}",
-            file.path,
-            file.status,
-            file.diff_strategy,
-            file.inserted_lines,
-            file.deleted_lines,
-            file.staged_hunk_count,
-            file.unstaged_hunk_count,
-            file.conflict
-        )
-    }));
+    let mut grouped_files = std::collections::BTreeMap::<String, Vec<_>>::new();
+    for file in git.changed_files.iter().take(16) {
+        let group = file
+            .path
+            .rsplit_once('/')
+            .map(|(directory, _)| directory.to_string())
+            .unwrap_or_else(|| "<root>".to_string());
+        grouped_files.entry(group).or_default().push(file);
+    }
+    for (group, files) in grouped_files {
+        rows.push(format!("git group {group}"));
+        rows.extend(files.into_iter().map(|file| {
+            format!(
+                "git file {} status={} diff={:?} +{} -{} hunks={}/{} conflict={}",
+                file.path,
+                file.status,
+                file.diff_strategy,
+                file.inserted_lines,
+                file.deleted_lines,
+                file.staged_hunk_count,
+                file.unstaged_hunk_count,
+                file.conflict
+            )
+        }));
+    }
     rows.extend(git.hunks.iter().take(20).map(|hunk| {
         format!(
             "git hunk {} {} stage={:?} +{} -{} {}",

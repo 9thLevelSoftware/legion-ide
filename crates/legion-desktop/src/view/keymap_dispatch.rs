@@ -52,6 +52,21 @@ pub(crate) fn action_label_to_desktop_action(
             query: "Language: Organize Imports".to_string(),
             scope: SearchScopeProjection::ActiveFile,
         }),
+        "StageFocusedGitHunk" => snapshot
+            .git_projection
+            .focused_hunk_id
+            .as_deref()
+            .and_then(|focused_id| {
+                snapshot
+                    .git_projection
+                    .hunks
+                    .iter()
+                    .find(|hunk| hunk.hunk_id == focused_id)
+            })
+            .filter(|hunk| hunk.stage == legion_ui::GitHunkStageProjection::Unstaged)
+            .map(|hunk| DesktopAction::StageGitHunk {
+                hunk_id: hunk.hunk_id.clone(),
+            }),
         "GoToLine" => Some(DesktopAction::OpenPalette {
             mode: PaletteMode::Command,
             query: "Go to line".to_string(),

@@ -45,6 +45,7 @@ Treat the labels as the product source of truth for the current profile and plat
 | SCM diff panel | Previous Hunk | `[h` | Move focus to the previous changed hunk. Projected from `GitNavPrevHunk` intent. |
 | SCM diff panel | Next File | `]f` | Move focus to the next changed file. Projected from `GitNavNextFile` intent. |
 | SCM diff panel | Previous File | `[f` | Move focus to the previous changed file. Projected from `GitNavPrevFile` intent. |
+| SCM diff panel | Stage Focused Hunk | `Ctrl+Shift+G` | Stage the focused unstaged hunk through the existing `StageGitHunk` intent; the same action is available from the command palette as `Git: Stage Focused Hunk`. |
 
 Navigation state (`focused_hunk_id`) is owned by the application layer and reflected in `GitProjection`; the desktop shell is projection-only.
 

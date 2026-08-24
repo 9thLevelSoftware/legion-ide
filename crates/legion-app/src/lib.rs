@@ -9437,6 +9437,8 @@ pub enum AppCommandRequest {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage the hunk currently focused in the Git review surface.
+    StageFocusedGitHunk,
     /// Stage every change to one path, hunk or not.
     StageGitPath {
         /// Repository-relative path to stage.
@@ -10153,6 +10155,7 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelSearch { .. }
             | AppCommandRequest::RefreshGit
             | AppCommandRequest::StageGitHunk { .. }
+            | AppCommandRequest::StageFocusedGitHunk
             | AppCommandRequest::UnstageGitHunk { .. }
             | AppCommandRequest::StageGitPath { .. }
             | AppCommandRequest::UnstageGitPath { .. }
@@ -13148,6 +13151,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-stage-focused-hunk",
+            title: "Git: Stage Focused Hunk",
+            detail: "Stage the currently focused unstaged hunk",
+            shortcut_label: Some("Ctrl+Shift+G"),
+        },
+        PaletteCommandSpec {
             id: "git-switch-branch",
             title: "Git: Switch Branch",
             detail: "Switch to another Git branch",
@@ -13320,6 +13329,7 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "save-all" => Some(CommandDispatchIntent::SaveAll),
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "git-stage-focused-hunk" => Some(CommandDispatchIntent::StageFocusedGitHunk),
         "refresh-tests" => Some(CommandDispatchIntent::RefreshTestExplorer),
         "run-test" => None, // requires item id via :test-run <id>
         "git-switch-branch" => None,
@@ -17273,6 +17283,9 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "git-stage-focused-hunk" => {
+                            Some(CommandDispatchIntent::StageFocusedGitHunk)
+                        }
                         "git-switch-branch" => {
                             match parse_palette_command_operands(
                                 command_id,
@@ -18431,6 +18444,14 @@ impl AppComposition {
             AppCommandRequest::StageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
             )),
+            AppCommandRequest::StageFocusedGitHunk => {
+                let Some(hunk_id) = self.focused_git_hunk_id.clone() else {
+                    return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
+                };
+                Ok(AppCommandOutcome::GitUpdated(
+                    self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
+                ))
+            }
             AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
             )),

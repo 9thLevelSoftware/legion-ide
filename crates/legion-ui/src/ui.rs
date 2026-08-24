@@ -1458,6 +1458,10 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "GoToLine".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("G", true, true, false),
+            action_label: "StageFocusedGitHunk".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("P", true, false, false),
             action_label: "OpenPalette".into(),
         },
@@ -3273,6 +3277,8 @@ pub enum CommandDispatchIntent {
     GitNavNextFile,
     /// Navigate to the first hunk in the previous changed file.
     GitNavPrevFile,
+    /// Stage the hunk currently focused in the Git review surface.
+    StageFocusedGitHunk,
     /// Request local history entries for the given canonical file path.
     RequestLocalHistoryEntries {
         /// Canonical path of the file to fetch history for.

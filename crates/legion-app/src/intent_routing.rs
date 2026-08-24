@@ -244,6 +244,9 @@ impl CommandDispatcher {
             CommandDispatchIntent::StageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::StageGitHunk { hunk_id })
             }
+            CommandDispatchIntent::StageFocusedGitHunk => {
+                Ok(AppCommandRequest::StageFocusedGitHunk)
+            }
             CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
             }
