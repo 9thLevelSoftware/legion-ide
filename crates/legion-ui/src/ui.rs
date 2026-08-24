@@ -1832,6 +1832,21 @@ pub struct LocalHistoryEntryProjection {
     pub size_bytes: u64,
 }
 
+/// Background Git projection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefreshState {
+    /// No Git job is pending.
+    Idle,
+    /// A Git snapshot or mutation is running.
+    Refreshing,
+    /// The worker exceeded its bounded command timeout.
+    TimedOut,
+    /// The worker returned a non-timeout failure.
+    Failed,
+    /// Git requested credentials or another interactive action.
+    AuthRequired,
+}
+
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitRefreshState {

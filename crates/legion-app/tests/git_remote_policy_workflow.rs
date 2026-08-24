@@ -11,7 +11,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -192,13 +195,17 @@ fn dispatch_git(
     app: &mut AppComposition,
     intent: CommandDispatchIntent,
 ) -> legion_ui::GitProjection {
-    match app
+    let outcome = match app
         .dispatch_ui_intent(intent)
         .expect("git remote intent should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected a git projection, got {other:?}"),
-    }
+    };
+    app.drain_git_until_idle();
+    app.shell_projection_snapshot("git-remote-policy")
+        .map(|snapshot| snapshot.git_projection)
+        .unwrap_or(outcome)
 }
 
 #[test]
@@ -280,6 +287,51 @@ fn push_to_a_network_remote_is_denied_by_the_air_gapped_default_policy() {
     assert!(!row.allowed);
     assert_eq!(row.target, "ssh://github.com");
     assert!(row.detail.contains("air-gap"), "got: {}", row.detail);
+}
+
+#[test]
+fn denied_remote_does_not_start_a_git_worker_job() {
+    let repo = RemotePair::new();
+    repo.use_network_origin();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let runner_calls = Arc::clone(&calls);
+    let runner: legion_app::GitInspectionRunner =
+        Arc::new(move |generation, root, active_file, options| {
+            runner_calls.fetch_add(1, Ordering::SeqCst);
+            legion_project::collect_git_snapshot(root, active_file, options).map_err(|error| {
+                legion_project::GitInspectionError::Parse(format!(
+                    "generation {generation}: {error}"
+                ))
+            })
+        });
+    let mut app = AppComposition::new_with_git_runner_for_test(runner);
+    app.open_workspace(
+        &repo.work,
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-worker-denial-test".to_string()),
+    )
+    .expect("workspace should open");
+    app.drain_git_until_idle();
+    calls.store(0, Ordering::SeqCst);
+
+    let projection = dispatch_git(
+        &mut app,
+        CommandDispatchIntent::PushGitRemote {
+            remote: "origin".to_string(),
+        },
+    );
+    assert!(
+        !projection
+            .remote_policy_audit
+            .last()
+            .expect("audit row")
+            .allowed
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "denied push must not enqueue a worker snapshot"
+    );
 }
 
 #[test]

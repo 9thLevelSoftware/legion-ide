@@ -39,7 +39,7 @@ pub mod language;
 use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use git_inspection::GitInspectionRunner;
-use git_inspection::{GitInspectionRequest, GitWorker};
+use git_inspection::{GitMutateOp, GitWorkRequest, GitWorkResult, GitWorker};
 
 pub mod terminal_policy;
 
@@ -14097,6 +14097,9 @@ pub struct AppComposition {
     git_projection: GitProjection,
     git_worker: GitWorker,
     git_latest_generation: u64,
+    git_applied_generation: u64,
+    git_in_flight: bool,
+    pending_mutation: Option<GitWorkRequest>,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
@@ -14458,6 +14461,9 @@ impl AppComposition {
             git_projection: GitProjection::idle(),
             git_worker: GitWorker::new(),
             git_latest_generation: 0,
+            git_applied_generation: 0,
+            git_in_flight: false,
+            pending_mutation: None,
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             git_remote_policy_audit: Vec::new(),
@@ -18368,12 +18374,15 @@ impl AppComposition {
                     self.git_projection.commit_validation_warnings = validation.warnings;
                     return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
                 }
-                commit_git_changes(Path::new(root_path), &message)
-                    .map_err(git_inspection_protocol_error)?;
                 // Clear stale validation state after a successful commit.
                 self.git_projection.commit_validation_errors = Vec::new();
                 self.git_projection.commit_validation_warnings = Vec::new();
-                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+                Ok(AppCommandOutcome::GitUpdated(self.enqueue_git_mutation(
+                    GitMutateOp::Commit {
+                        root: PathBuf::from(root_path),
+                        message,
+                    },
+                )?))
             }
             AppCommandRequest::SwitchGitBranch { branch } => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -26097,73 +26106,176 @@ impl AppComposition {
         self.git_latest_generation = self.git_latest_generation.saturating_add(1);
         self.git_projection.refresh_state = GitRefreshState::Refreshing;
         self.git_projection.stale = true;
-        self.git_worker.request(GitInspectionRequest {
-            root: PathBuf::from(root_path),
-            active_file,
-            options: GitSnapshotOptions::default(),
-            generation: self.git_latest_generation,
-        });
+        if !self.git_in_flight && self.pending_mutation.is_none() {
+            let request = GitWorkRequest::Snapshot {
+                generation: self.git_latest_generation,
+                root: PathBuf::from(root_path),
+                active_file,
+                options: GitSnapshotOptions::default(),
+            };
+            self.git_in_flight = self.git_worker.try_send(request);
+        }
         self.drain_git_inspection();
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
+        self.sync_git_projection_overlay();
         self.git_projection.clone()
     }
 
-    /// Drain completed Git inspections without blocking the UI thread.
+    fn enqueue_git_mutation(
+        &mut self,
+        operation: GitMutateOp,
+    ) -> Result<GitProjection, AppCompositionError> {
+        if self.pending_mutation.is_some() {
+            return Err(git_protocol_error(
+                "git_mutation_pending",
+                "another Git mutation is already waiting for the worker",
+            ));
+        }
+        let active_file = self
+            .active_documents
+            .active_file_path
+            .as_deref()
+            .map(PathBuf::from);
+        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
+        self.git_projection.refresh_state = GitRefreshState::Refreshing;
+        self.git_projection.stale = true;
+        let request = GitWorkRequest::Mutate {
+            generation: self.git_latest_generation,
+            operation,
+            active_file,
+            options: GitSnapshotOptions::default(),
+        };
+        if self.git_in_flight {
+            self.pending_mutation = Some(request);
+        } else {
+            self.git_in_flight = self.git_worker.try_send(request);
+        }
+        self.sync_git_projection_overlay();
+        Ok(self.git_projection.clone())
+    }
+
+    pub(crate) fn enqueue_git_remote(
+        &mut self,
+        operation: GitRemoteOperation,
+        remote: String,
+        branch: String,
+    ) -> Result<GitProjection, AppCompositionError> {
+        if self.pending_mutation.is_some() {
+            return Err(git_protocol_error(
+                "git_mutation_pending",
+                "another Git mutation is already waiting for the worker",
+            ));
+        }
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        let active_file = self
+            .active_documents
+            .active_file_path
+            .as_deref()
+            .map(PathBuf::from);
+        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
+        self.git_projection.refresh_state = GitRefreshState::Refreshing;
+        self.git_projection.stale = true;
+        let request = GitWorkRequest::Remote {
+            generation: self.git_latest_generation,
+            root: PathBuf::from(root_path),
+            operation,
+            remote,
+            branch,
+            active_file,
+            options: GitSnapshotOptions::default(),
+        };
+        if self.git_in_flight {
+            self.pending_mutation = Some(request);
+        } else {
+            self.git_in_flight = self.git_worker.try_send(request);
+        }
+        self.sync_git_projection_overlay();
+        Ok(self.git_projection.clone())
+    }
+
+    /// Apply completed Git worker results without blocking.
     pub fn drain_git_inspection(&mut self) -> bool {
         let mut applied = false;
+        let mut received = false;
         for result in self.git_worker.drain() {
-            if result.generation != self.git_latest_generation {
+            received = true;
+            self.git_in_flight = false;
+            let (generation, snapshot, diagnostic) = match result {
+                GitWorkResult::SnapshotReady {
+                    generation,
+                    snapshot,
+                }
+                | GitWorkResult::MutateReady {
+                    generation,
+                    snapshot,
+                } => (generation, Some(snapshot), None),
+                GitWorkResult::Failed {
+                    generation,
+                    diagnostic,
+                } => (generation, None, Some(diagnostic)),
+            };
+            if generation != self.git_latest_generation {
                 continue;
             }
+            self.git_applied_generation = generation;
             applied = true;
-            match result.result {
-                Ok(snapshot) => {
-                    self.git_hunk_cache = snapshot
-                        .hunks
-                        .iter()
-                        .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
-                        .collect();
-                    self.git_projection = git_projection_from_project(snapshot);
-                    self.git_projection.refresh_state = GitRefreshState::Idle;
-                    self.git_projection.stale = false;
+            if let Some(snapshot) = snapshot {
+                self.git_hunk_cache = snapshot
+                    .hunks
+                    .iter()
+                    .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
+                    .collect();
+                self.git_projection = git_projection_from_project(snapshot);
+                self.git_projection.refresh_state = GitRefreshState::Idle;
+                self.git_projection.stale = false;
+            } else if let Some(message) = diagnostic {
+                self.git_hunk_cache.clear();
+                let state = if message.to_ascii_lowercase().contains("authentication")
+                    || message.to_ascii_lowercase().contains("terminal prompts")
+                {
+                    GitRefreshState::AuthRequired
+                } else if message.to_ascii_lowercase().contains("timed out") {
+                    GitRefreshState::TimedOut
+                } else {
+                    GitRefreshState::Failed
+                };
+                self.git_projection.refresh_state = state;
+                self.git_projection.stale = false;
+                self.git_projection
+                    .diagnostics
+                    .push(format!("git.refresh_failed: {message}"));
+            }
+        }
+        if received && !self.git_in_flight {
+            if let Some(pending) = self.pending_mutation.take() {
+                if self.git_worker.try_send(pending.clone()) {
+                    self.git_in_flight = true;
+                } else {
+                    self.pending_mutation = Some(pending);
                 }
-                Err(error) => {
-                    self.git_hunk_cache.clear();
-                    let message = error.to_string();
-                    let refresh_state = if message.to_ascii_lowercase().contains("authentication")
-                        || message.to_ascii_lowercase().contains("terminal prompts")
-                    {
-                        GitRefreshState::AuthRequired
-                    } else if message.to_ascii_lowercase().contains("timed out") {
-                        GitRefreshState::TimedOut
-                    } else {
-                        GitRefreshState::Failed
+            } else if self.git_applied_generation < self.git_latest_generation {
+                let root_path = self.active_documents.workspace_root_path.clone();
+                if let Some(root_path) = root_path {
+                    let request = GitWorkRequest::Snapshot {
+                        generation: self.git_latest_generation,
+                        root: PathBuf::from(root_path),
+                        active_file: self
+                            .active_documents
+                            .active_file_path
+                            .as_deref()
+                            .map(PathBuf::from),
+                        options: GitSnapshotOptions::default(),
                     };
-                    self.git_projection.refresh_state = refresh_state;
-                    self.git_projection.stale = false;
-                    self.git_projection
-                        .diagnostics
-                        .push(format!("git.refresh_failed: {message}"));
+                    self.git_in_flight = self.git_worker.try_send(request);
                 }
             }
         }
-        // Inject app-side navigation state - focused_hunk_id lives in AppComposition,
-        // not in the project snapshot, so it must be injected after each build.
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        // Same for the remote-policy audit trail: a denied push refreshes the
-        // projection, and the user must still be able to read why it was denied.
-        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
-        // Propagate any local-history blob-write degradation as a diagnostic.
-        if let Some(ref err) = self.local_history_last_write_error {
-            self.git_projection
-                .diagnostics
-                .push(format!("local_history.write_degraded: {err}"));
-        }
+        self.sync_git_projection_overlay();
         applied
     }
 
-    /// Drain Git inspections to completion for deterministic tests and golden paths.
+    /// Drain Git worker results until no accepted job remains.
     pub fn drain_git_until_idle(&mut self) -> GitProjection {
         while !self.git_worker.is_idle() {
             self.drain_git_inspection();
@@ -26173,6 +26285,16 @@ impl AppComposition {
         }
         self.drain_git_inspection();
         self.git_projection.clone()
+    }
+
+    fn sync_git_projection_overlay(&mut self) {
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
+        if let Some(ref err) = self.local_history_last_write_error {
+            self.git_projection
+                .diagnostics
+                .push(format!("local_history.write_degraded: {err}"));
+        }
     }
 
     /// Navigate to the next or previous hunk in the diff review surface.
@@ -26597,14 +26719,11 @@ impl AppComposition {
         // `sub/blob.bin` and `git add -- sub/blob.bin` executed there resolves to
         // `/repo/sub/sub/blob.bin`. The control then failed for every file in
         // such a workspace, which is an ordinary way to open one.
-        let repo_root =
-            git_repository_root(Path::new(root_path)).map_err(git_inspection_protocol_error)?;
-        if stage {
-            stage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
-        } else {
-            unstage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
-        }
-        Ok(self.refresh_git_projection())
+        self.enqueue_git_mutation(GitMutateOp::Path {
+            root: PathBuf::from(root_path),
+            path: path.to_string(),
+            stage,
+        })
     }
 
     fn stage_or_unstage_git_hunk(
@@ -26630,13 +26749,11 @@ impl AppComposition {
                 ),
             ));
         }
-        match expected_stage {
-            GitHunkStage::Unstaged => stage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-            GitHunkStage::Staged => unstage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-        }
-        Ok(self.refresh_git_projection())
+        self.enqueue_git_mutation(GitMutateOp::Hunk {
+            root: PathBuf::from(root_path),
+            hunk,
+            stage: matches!(expected_stage, GitHunkStage::Unstaged),
+        })
     }
 
     /// Enable the real terminal runtime for app integration tests.

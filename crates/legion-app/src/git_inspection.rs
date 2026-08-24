@@ -1,6 +1,6 @@
-//! Background Git inspection worker and app-thread drain seam.
+//! Background Git inspection and mutation worker.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     mpsc::{self, Receiver, SyncSender, TrySendError},
@@ -8,85 +8,186 @@ use std::sync::{
 use std::thread;
 
 use legion_project::{
-    GitInspectionError, GitSnapshotOptions, ProjectGitSnapshot, collect_git_snapshot,
+    GitHunkStage, GitInspectionError, GitSnapshotOptions, ProjectGitHunk, ProjectGitSnapshot,
+    collect_git_snapshot, commit_git_changes, stage_git_hunk, stage_git_path, unstage_git_hunk,
+    unstage_git_path,
 };
+use legion_security::GitRemoteOperation;
 
-/// Testable worker execution seam; production uses [`collect_git_snapshot`].
+/// Injected snapshot runner used by deterministic worker tests.
 pub type GitInspectionRunner = Arc<
     dyn Fn(
             u64,
-            &std::path::Path,
-            Option<&std::path::Path>,
+            &Path,
+            Option<&Path>,
             GitSnapshotOptions,
         ) -> Result<ProjectGitSnapshot, GitInspectionError>
         + Send
         + Sync,
 >;
 
-/// A Git snapshot request issued by the app thread.
 #[derive(Debug, Clone)]
-pub struct GitInspectionRequest {
-    /// Workspace root used for inspection.
-    pub root: PathBuf,
-    /// Active file used for blame projection.
-    pub active_file: Option<PathBuf>,
-    /// Snapshot bounds.
-    pub options: GitSnapshotOptions,
-    /// Monotonic app generation for stale-result rejection.
-    pub generation: u64,
+pub enum GitMutateOp {
+    Path {
+        root: PathBuf,
+        path: String,
+        stage: bool,
+    },
+    Hunk {
+        root: PathBuf,
+        hunk: ProjectGitHunk,
+        stage: bool,
+    },
+    Commit {
+        root: PathBuf,
+        message: String,
+    },
 }
 
-/// Result returned by the background Git worker.
+impl GitMutateOp {
+    fn root(&self) -> &Path {
+        match self {
+            Self::Path { root, .. } | Self::Hunk { root, .. } | Self::Commit { root, .. } => root,
+        }
+    }
+
+    fn run(&self) -> Result<(), GitInspectionError> {
+        match self {
+            Self::Path { root, path, stage } => {
+                let repo_root = legion_project::git_repository_root(root)?;
+                if *stage {
+                    stage_git_path(repo_root, path)
+                } else {
+                    unstage_git_path(repo_root, path)
+                }
+            }
+            Self::Hunk { root, hunk, stage } => match (*stage, hunk.stage) {
+                (true, GitHunkStage::Unstaged) => stage_git_hunk(root, hunk),
+                (false, GitHunkStage::Staged) => unstage_git_hunk(root, hunk),
+                _ => Err(GitInspectionError::InvalidInput(
+                    "git hunk stage changed before the mutation ran".to_string(),
+                )),
+            },
+            Self::Commit { root, message } => commit_git_changes(root, message).map(|_| ()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum GitWorkRequest {
+    Snapshot {
+        generation: u64,
+        root: PathBuf,
+        active_file: Option<PathBuf>,
+        options: GitSnapshotOptions,
+    },
+    Mutate {
+        generation: u64,
+        operation: GitMutateOp,
+        active_file: Option<PathBuf>,
+        options: GitSnapshotOptions,
+    },
+    Remote {
+        generation: u64,
+        root: PathBuf,
+        operation: GitRemoteOperation,
+        remote: String,
+        branch: String,
+        active_file: Option<PathBuf>,
+        options: GitSnapshotOptions,
+    },
+}
+
 #[derive(Debug)]
-pub struct GitInspectionResult {
-    /// Request generation that produced this result.
-    pub generation: u64,
-    /// Snapshot or failure returned by Git.
-    pub result: Result<ProjectGitSnapshot, GitInspectionError>,
+pub enum GitWorkResult {
+    SnapshotReady {
+        generation: u64,
+        snapshot: ProjectGitSnapshot,
+    },
+    MutateReady {
+        generation: u64,
+        snapshot: ProjectGitSnapshot,
+    },
+    Failed {
+        generation: u64,
+        diagnostic: String,
+    },
 }
 
-/// Single-worker Git inspector.
-///
-/// The app thread owns the latest request and never waits for the worker. A
-/// second refresh while a request is running replaces the pending request; the
-/// worker receives the replacement only after the current result is drained.
 pub struct GitWorker {
-    request_tx: SyncSender<GitInspectionRequest>,
-    result_rx: Receiver<GitInspectionResult>,
-    latest_request: Option<GitInspectionRequest>,
+    request_tx: SyncSender<GitWorkRequest>,
+    result_rx: Receiver<GitWorkResult>,
     in_flight: bool,
 }
 
 impl GitWorker {
-    /// Spawn the worker thread and return its app-thread handle.
     pub fn new() -> Self {
         Self::new_with_runner(Arc::new(|_, root, active_file, options| {
             collect_git_snapshot(root, active_file, options)
         }))
     }
 
-    /// Spawn a worker with an injected runner for deterministic acceptance tests.
     pub fn new_with_runner(runner: GitInspectionRunner) -> Self {
-        let (request_tx, request_rx) = mpsc::sync_channel::<GitInspectionRequest>(1);
-        let (result_tx, result_rx) = mpsc::sync_channel::<GitInspectionResult>(4);
-        let worker_runner = Arc::clone(&runner);
+        let (request_tx, request_rx) = mpsc::sync_channel::<GitWorkRequest>(1);
+        let (result_tx, result_rx) = mpsc::sync_channel::<GitWorkResult>(4);
         thread::Builder::new()
             .name("legion-git-inspection".to_string())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
-                    let result = worker_runner(
-                        request.generation,
-                        &request.root,
-                        request.active_file.as_deref(),
-                        request.options,
-                    );
-                    if result_tx
-                        .send(GitInspectionResult {
-                            generation: request.generation,
-                            result,
-                        })
-                        .is_err()
-                    {
+                    let generation = request_generation(&request);
+                    let result = match request {
+                        GitWorkRequest::Snapshot {
+                            generation,
+                            root,
+                            active_file,
+                            options,
+                        } => runner(generation, &root, active_file.as_deref(), options).map(
+                            |snapshot| GitWorkResult::SnapshotReady {
+                                generation,
+                                snapshot,
+                            },
+                        ),
+                        GitWorkRequest::Mutate {
+                            generation,
+                            operation,
+                            active_file,
+                            options,
+                        } => operation
+                            .run()
+                            .and_then(|()| {
+                                runner(
+                                    generation,
+                                    operation.root(),
+                                    active_file.as_deref(),
+                                    options,
+                                )
+                            })
+                            .map(|snapshot| GitWorkResult::MutateReady {
+                                generation,
+                                snapshot,
+                            }),
+                        GitWorkRequest::Remote {
+                            generation,
+                            root,
+                            operation,
+                            remote,
+                            branch,
+                            active_file,
+                            options,
+                        } => run_remote(operation, &root, &remote, &branch)
+                            .and_then(|()| {
+                                runner(generation, &root, active_file.as_deref(), options)
+                            })
+                            .map(|snapshot| GitWorkResult::MutateReady {
+                                generation,
+                                snapshot,
+                            }),
+                    }
+                    .unwrap_or_else(|error| GitWorkResult::Failed {
+                        generation,
+                        diagnostic: error.to_string(),
+                    });
+                    if result_tx.send(result).is_err() {
                         break;
                     }
                 }
@@ -95,44 +196,63 @@ impl GitWorker {
         Self {
             request_tx,
             result_rx,
-            latest_request: None,
             in_flight: false,
         }
     }
 
-    /// Queue the newest request without blocking the caller.
-    pub fn request(&mut self, request: GitInspectionRequest) {
-        self.latest_request = Some(request);
-        self.try_send_latest();
+    pub fn try_send(&mut self, request: GitWorkRequest) -> bool {
+        if self.in_flight {
+            return false;
+        }
+        match self.request_tx.try_send(request) {
+            Ok(()) => {
+                self.in_flight = true;
+                true
+            }
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
+        }
     }
 
-    /// Drain all currently available results without blocking.
-    pub fn drain(&mut self) -> Vec<GitInspectionResult> {
+    pub fn drain(&mut self) -> Vec<GitWorkResult> {
         let mut results = Vec::new();
         while let Ok(result) = self.result_rx.try_recv() {
             self.in_flight = false;
             results.push(result);
-            self.try_send_latest();
         }
         results
     }
 
-    /// Whether no request is queued or executing.
     pub fn is_idle(&self) -> bool {
-        !self.in_flight && self.latest_request.is_none()
+        !self.in_flight
     }
+}
 
-    fn try_send_latest(&mut self) {
-        if self.in_flight {
-            return;
+fn request_generation(request: &GitWorkRequest) -> u64 {
+    match request {
+        GitWorkRequest::Snapshot { generation, .. }
+        | GitWorkRequest::Mutate { generation, .. }
+        | GitWorkRequest::Remote { generation, .. } => *generation,
+    }
+}
+
+fn run_remote(
+    operation: GitRemoteOperation,
+    root: &Path,
+    remote: &str,
+    branch: &str,
+) -> Result<(), GitInspectionError> {
+    let resolved_branch = if branch.is_empty() {
+        legion_project::git_current_branch(root)?
+    } else {
+        branch.to_string()
+    };
+    match operation {
+        GitRemoteOperation::Push => {
+            legion_project::push_git_remote(root, remote, &resolved_branch).map(|_| ())
         }
-        let Some(request) = self.latest_request.take() else {
-            return;
-        };
-        match self.request_tx.try_send(request) {
-            Ok(()) => self.in_flight = true,
-            Err(TrySendError::Full(request)) => self.latest_request = Some(request),
-            Err(TrySendError::Disconnected(_)) => self.in_flight = false,
+        GitRemoteOperation::Fetch => legion_project::fetch_git_remote(root, remote).map(|_| ()),
+        GitRemoteOperation::Pull => {
+            legion_project::pull_git_remote(root, remote, &resolved_branch).map(|_| ())
         }
     }
 }

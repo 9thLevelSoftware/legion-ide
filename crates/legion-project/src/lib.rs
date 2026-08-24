@@ -1680,6 +1680,15 @@ pub fn git_repository_root(root: impl AsRef<Path>) -> Result<PathBuf, GitInspect
     Ok(PathBuf::from(out.trim()))
 }
 
+/// Resolve the current branch without requiring the app thread to run Git.
+pub fn git_current_branch(root: impl AsRef<Path>) -> Result<String, GitInspectionError> {
+    Ok(
+        git_stdout(root.as_ref(), &["rev-parse", "--abbrev-ref", "HEAD"], None)?
+            .trim()
+            .to_string(),
+    )
+}
+
 /// Resolve one conflicted file by keeping the chosen side for every conflict block.
 pub fn resolve_git_conflict(
     root: impl AsRef<Path>,

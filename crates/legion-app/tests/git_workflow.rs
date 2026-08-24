@@ -196,6 +196,62 @@ fn git_refresh_rejects_stale_generation_and_eventually_leaves_refreshing() {
 }
 
 #[test]
+fn git_stage_runs_off_thread_and_publishes_one_fresh_snapshot() {
+    let repo = TempGitRepo::new();
+    let source = repo.write("src/lib.rs", "pub fn alpha() {\n    first();\n}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    repo.write("src/lib.rs", "pub fn alpha() {\n    first_changed();\n}\n");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-mutation-worker".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file(source.to_string_lossy())
+        .expect("source should open");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("refresh should dispatch");
+    let projection = app.drain_git_until_idle();
+    let hunk_id = projection
+        .hunks
+        .iter()
+        .find(|hunk| hunk.stage == GitHunkStageProjection::Unstaged)
+        .expect("unstaged hunk should exist")
+        .hunk_id
+        .clone();
+
+    let pending = match app
+        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
+        .expect("stage should dispatch")
+    {
+        legion_app::AppCommandOutcome::GitUpdated(projection) => projection,
+        other => panic!("expected GitUpdated, got {other:?}"),
+    };
+    assert!(pending.stale, "stage must return stale rows before drain");
+    assert_eq!(
+        pending.refresh_state,
+        legion_ui::GitRefreshState::Refreshing
+    );
+
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, legion_ui::GitRefreshState::Idle);
+    assert!(!settled.stale);
+    assert!(
+        settled
+            .hunks
+            .iter()
+            .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
+    );
+    assert!(
+        run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"])
+            .contains("first_changed")
+    );
+}
+
+#[test]
 fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
     let repo = TempGitRepo::new();
     let source = repo.write(
