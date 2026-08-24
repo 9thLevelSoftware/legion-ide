@@ -9,25 +9,27 @@
 | Linux | No committed OS-tree probe | Unobserved. |
 
 Run `scripts/a11y-platform-probe.sh` to produce a machine-readable status. It
-delegates Windows to the committed UIA walk and deliberately exits non-zero for
-macOS/Linux rather than implying an observation that was not made.
+executes the committed Windows UIA walk (using `LEGION_A11Y_PROCESS` or the
+default `legion-desktop`) and deliberately exits non-zero for macOS/Linux rather
+than implying an observation that was not made.
 
 ## Manual keyboard-only path
 
-This is the repeatable path to execute on a real desktop window. It is a
-checklist, not a claimed human transcript; no screen-reader session is claimed
-by this packet.
+This is a repeatable shell-command and projection checklist for a real desktop
+window. It is not a renderer-backed keyboard path or a claimed human transcript;
+no screen-reader session is claimed by this packet.
 
 1. Open a trusted Manual workspace and focus the editor without using a mouse.
-2. Use the published palette/keymap to run workspace search and keep focus in the results.
-3. Invoke the published go-to-definition action from the focused editor symbol.
-4. Focus a Git hunk and invoke `Git: Stage Focused Hunk` from its published key binding.
-5. Open the Git commit command from the palette, enter a message, and confirm the proposal-mediated commit.
-6. Launch the trusted terminal from its published keyboard action and verify the terminal receives focus.
+2. Use the available shell command `:search-workspace <query>` and inspect the resulting search projection. A published palette/keymap route for workspace search is pending.
+3. Use the available shell command `:definition <byte-offset>` from the focused editor symbol. A published palette/keymap route for go-to-definition is pending.
+4. Use `:git-nav-next-hunk` or `:git-nav-prev-hunk` to select a hunk, then the available shell command `:git-stage-hunk <hunk-id>`. `Git: Stage Focused Hunk` is not a published palette/keymap route in this commit and remains pending.
+5. `Git: Commit Staged Changes` is registered as a palette command. Its complete keyboard-only invocation and proposal confirmation are pending a renderer reachability regression.
+6. Use the available shell command `:term-launch <command>` to launch the trusted terminal. A published keyboard action and renderer-backed focus check are pending.
 
-The desktop accessibility tests cover the in-process projection and target
-geometry for these surfaces. They do not substitute for a human OS-level
-keyboard walk or NVDA/VoiceOver/Orca transcript.
+The desktop accessibility tests cover only in-process projection and target
+geometry. They do not verify shell-command dispatch, renderer palette/keymap
+reachability, a human OS-level keyboard walk, or an NVDA/VoiceOver/Orca
+transcript.
 
 ## Acceptance boundary
 

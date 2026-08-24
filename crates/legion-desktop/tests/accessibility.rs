@@ -1331,5 +1331,20 @@ fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
         )));
     }
     assert!(evidence_text.contains("Manual keyboard-only path"));
-    assert!(evidence_text.contains("Git: Stage Focused Hunk"));
+    for route in [
+        ":search-workspace <query>",
+        ":definition <byte-offset>",
+        ":git-stage-hunk <hunk-id>",
+        ":term-launch <command>",
+        "Git: Commit Staged Changes",
+    ] {
+        assert!(
+            evidence_text.contains(route),
+            "evidence should name the available route `{route}`"
+        );
+    }
+    assert!(evidence_text.contains("not a renderer-backed keyboard path"));
+    assert!(evidence_text.contains("remains pending"));
+    assert!(!evidence_text.contains("Use the published palette/keymap to"));
+    assert!(!evidence_text.contains("`Git: Stage Focused Hunk` from its published"));
 }
