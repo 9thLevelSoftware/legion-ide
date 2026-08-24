@@ -141,16 +141,17 @@ file, and for non-Rust workspaces that happen to be trusted.
 - **Hover tooltip** — appears after a 200 ms settle period when the cursor rests over a symbol.
   Dismiss with `Esc`. The tooltip stays closed after explicit dismiss until a new response
   arrives with a different hover id.
-- **Go to definition** — available through the command palette (`GoToDefinition`). Use
-  `NavigateToDefinition { index }` to open a specific result.
+- **Go to definition** — available with the default `F12` shortcut and through the typed
+  shell/dispatch-intent path. Use `NavigateToDefinition { index }` to open a specific result.
 - **Language health status** — the language status panel projects `Starting`, `Live`,
   `BackingOff` (with countdown), `Unavailable`, or `Failed` states from
   `lsp_session_status` in the `LanguageToolingProjection`.
 
 **What is deferred (write-side, P2.F1.T5):**
-Rename, format, code actions, and organize imports are reachable from the command palette and
-generate proposal previews, but they are not direct edits. Apply activation remains gated by
-the existing proposal workflow and kanban task P3.F1.T2.
+Rename, format, code actions, and organize imports are typed shell/dispatch-intent proposal
+surfaces rather than command-palette entries. They generate proposal previews, but they are not
+direct edits. Apply activation remains gated by the existing proposal workflow and kanban task
+P3.F1.T2.
 See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Support and release surfaces
