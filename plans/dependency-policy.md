@@ -58,6 +58,12 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `legion-protocol`
   - `legion-security`
 
+  The external `gix` dependency is limited to the Git inspection collector.
+  `GitInspectionBackend::Auto` remains CLI-equivalent by default; each
+  operation must use a typed gix path only when parity is proven, otherwise it
+  must name and retain an explicit CLI fallback. Git mutation and remote
+  operations remain CLI-backed.
+
 - `legion-editor` may depend on:
   - `legion-observability`
   - `legion-protocol`

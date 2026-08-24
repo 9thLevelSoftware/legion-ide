@@ -971,8 +971,40 @@ pub struct ProjectGitSnapshot {
 pub enum GitInspectionBackend {
     /// Existing `git` CLI implementation.
     Cli,
-    /// Pure-Rust `gix` implementation.
+    /// Per-operation typed `gix` implementation with an explicit CLI fallback.
     Gix,
+    /// Select the product default without changing the CLI-equivalent behavior.
+    Auto,
+}
+
+impl GitInspectionBackend {
+    /// Parse `LEGION_GIT_BACKEND` without reading process state.
+    ///
+    /// Unknown and unset values intentionally resolve to `Auto`, whose current
+    /// effective backend is `Cli`. This keeps the product default equivalent to
+    /// the shipped CLI collector until a parity fixture can fail and then pass.
+    pub fn from_env_value(value: Option<&str>) -> Self {
+        match value.map(str::trim).map(|value| value.to_ascii_lowercase()) {
+            Some(value) if value == "cli" => Self::Cli,
+            Some(value) if value == "gix" => Self::Gix,
+            Some(value) if value == "auto" => Self::Auto,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Read `LEGION_GIT_BACKEND`, defaulting to the CLI-equivalent auto mode.
+    pub fn from_environment() -> Self {
+        let value = std::env::var("LEGION_GIT_BACKEND").ok();
+        Self::from_env_value(value.as_deref())
+    }
+
+    /// Resolve the product default to its currently proven implementation.
+    pub fn resolve_for_inspection(self) -> Self {
+        match self {
+            Self::Auto => Self::Cli,
+            backend => backend,
+        }
+    }
 }
 
 /// Collect deterministic git metadata with an explicit backend.
@@ -982,6 +1014,7 @@ pub fn collect_git_snapshot_with_backend(
     options: GitSnapshotOptions,
     backend: GitInspectionBackend,
 ) -> Result<ProjectGitSnapshot, GitInspectionError> {
+    let backend = backend.resolve_for_inspection();
     let root = root.as_ref();
     let repository_root = git_stdout(root, &["rev-parse", "--show-toplevel"], None)?;
     let repository_root = PathBuf::from(repository_root.trim());
@@ -1005,6 +1038,7 @@ pub fn collect_git_snapshot_with_backend(
         GitInspectionBackend::Cli => git_status_entries(&repository_root)?,
         GitInspectionBackend::Gix => git_status_entries_gix(&repository_root)
             .or_else(|_| git_status_entries(&repository_root))?,
+        GitInspectionBackend::Auto => unreachable!("auto backend is resolved before collection"),
     };
     let unstaged_numstat = git_numstat(&repository_root, false)?;
     let staged_numstat = git_numstat(&repository_root, true)?;
@@ -1078,6 +1112,9 @@ pub fn collect_git_snapshot_with_backend(
                 git_blame_lines_gix(&repository_root, path, options.max_blame_lines)
                     .or_else(|_| git_blame_lines(&repository_root, path, options.max_blame_lines))?
             }
+            GitInspectionBackend::Auto => {
+                unreachable!("auto backend is resolved before collection")
+            }
         },
         None => Vec::new(),
     };
@@ -1110,7 +1147,12 @@ pub fn collect_git_snapshot(
     active_file: Option<&Path>,
     options: GitSnapshotOptions,
 ) -> Result<ProjectGitSnapshot, GitInspectionError> {
-    collect_git_snapshot_with_backend(root, active_file, options, GitInspectionBackend::Gix)
+    collect_git_snapshot_with_backend(
+        root,
+        active_file,
+        options,
+        GitInspectionBackend::from_environment(),
+    )
 }
 
 /// Classify a worktree path as agent-owned or human-managed.
@@ -2084,11 +2126,11 @@ fn parse_git_porcelain_status(output: &str) -> HashMap<String, String> {
 }
 
 fn git_status_entries_gix(root: &Path) -> Result<HashMap<String, String>, GitInspectionError> {
-    // The previous implementation scraped paths and status codes out of the
-    // `gix` status item `Debug` representation, which is an unstable format with
-    // no cross-version contract (it silently breaks on rename/copy/delete and on
-    // any gix upgrade). Until a typed `gix` status mapping exists, defer to the
-    // authoritative CLI porcelain parser (mirroring `git_blame_lines_gix`).
+    // Explicit leftover CLI for this operation. The previous implementation
+    // scraped paths and status codes out of the `gix` status item `Debug`
+    // representation, which is an unstable format with no cross-version
+    // contract. Keep the authoritative porcelain parser until a typed status
+    // mapping exists; the caller still has a per-operation fallback if it fails.
     git_status_entries(root)
 }
 
@@ -2097,6 +2139,8 @@ fn git_blame_lines_gix(
     path: &str,
     limit: usize,
 ) -> Result<Vec<ProjectGitBlameLine>, GitInspectionError> {
+    // Explicit leftover CLI for blame. Do not claim typed gix parity until the
+    // operation has a stable typed mapping and a parity fixture can fail.
     git_blame_lines(root, path, limit)
 }
 

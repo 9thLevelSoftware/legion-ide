@@ -269,6 +269,34 @@ fn git_snapshot_gix_backend_matches_cli_backend() {
 }
 
 #[test]
+fn git_backend_selector_keeps_auto_cli_equivalent() {
+    assert_eq!(
+        GitInspectionBackend::from_env_value(None),
+        GitInspectionBackend::Auto
+    );
+    assert_eq!(
+        GitInspectionBackend::from_env_value(Some("cli")),
+        GitInspectionBackend::Cli
+    );
+    assert_eq!(
+        GitInspectionBackend::from_env_value(Some("GIX")),
+        GitInspectionBackend::Gix
+    );
+    assert_eq!(
+        GitInspectionBackend::from_env_value(Some("auto")),
+        GitInspectionBackend::Auto
+    );
+    assert_eq!(
+        GitInspectionBackend::from_env_value(Some("unsupported")),
+        GitInspectionBackend::Auto
+    );
+    assert_eq!(
+        GitInspectionBackend::Auto.resolve_for_inspection(),
+        GitInspectionBackend::Cli
+    );
+}
+
+#[test]
 fn git_snapshot_projects_worktrees_and_orphan_prunable_entries() {
     let repo = TempGitRepo::new();
     repo.write("src/lib.rs", "pub fn alpha() {}\n");
