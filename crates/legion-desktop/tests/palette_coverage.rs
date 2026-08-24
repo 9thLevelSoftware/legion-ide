@@ -87,7 +87,9 @@ fn canonical_display(path: &Path) -> String {
 }
 
 fn repository_doc(name: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs").join(name);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs")
+        .join(name);
     fs::read_to_string(path).expect("repository documentation should be readable")
 }
 
