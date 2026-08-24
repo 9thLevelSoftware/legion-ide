@@ -7,7 +7,9 @@ use std::{
 
 use legion_desktop::{
     platform::{
-        DesktopPlatformAdapterChecks, NativePlatformObservation, build_platform_smoke_snapshot,
+        DesktopPlatformAdapterChecks, NativePlatformObservation, WindowsUiaProbeObservation,
+        build_platform_smoke_snapshot, committed_windows_uia_probe_script,
+        parse_windows_uia_probe_output, probe_windows_uia_tree,
     },
     view::ProjectionView,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
@@ -1204,9 +1206,106 @@ fn live_regions_surface_status_message_counts_in_the_accessibility_projection() 
         .expect("status live region should be projected");
 
     assert_eq!(status_node.label, "2 status messages");
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+#[test]
+fn committed_windows_uia_probe_output_parses_the_captured_walk() {
+    let script = committed_windows_uia_probe_script()
+        .expect("scripts/a11y-uia-walk.ps1 must be locatable from the crate");
     assert!(
-        smoke
-            .accessibility_tree_smoke
-            .contains("metadata-only projection accessibility nodes 2; OS tree not observed")
+        script.ends_with(std::path::Path::new("scripts/a11y-uia-walk.ps1")),
+        "probe path should resolve to the committed script, got {script:?}"
     );
+
+    let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt");
+    let stdout = fs::read_to_string(&evidence).expect("committed Windows UIA walk should exist");
+    let observation =
+        parse_windows_uia_probe_output(&stdout).expect("captured walk printed UIA_WALK_OK");
+    assert_eq!(observation.descendant_count, 138);
+
+    assert!(parse_windows_uia_probe_output("PROCESS_NOT_FOUND: legion-desktop").is_none());
+    assert!(parse_windows_uia_probe_output("UIA_LOAD_FAILED: missing assemblies").is_none());
+    assert!(parse_windows_uia_probe_output("NO_TOPLEVEL_WINDOW_FOR_PROCESS").is_none());
+}
+
+#[test]
+fn accessibility_tree_status_reports_injected_windows_uia_observation() {
+    let mut snapshot = Shell::empty("Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation {
+            os_accessibility_tree: Some(WindowsUiaProbeObservation {
+                descendant_count: 138,
+            }),
+            ..NativePlatformObservation::default()
+        },
+    );
+
+    assert_eq!(
+        smoke.accessibility_tree_smoke,
+        "metadata-only projection accessibility nodes 2; Windows UIA observed 138 descendants"
+    );
+    assert!(!smoke.accessibility_tree_smoke.contains("macOS"));
+    assert!(!smoke.accessibility_tree_smoke.contains("Linux"));
+}
+
+#[test]
+fn accessibility_tree_status_matches_the_live_windows_uia_probe() {
+    let mut snapshot = Shell::empty("Live Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation::default(),
+    );
+
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+fn assert_os_tree_status_matches_probe(status: &str, node_count: usize) {
+    assert!(
+        status.starts_with(&format!(
+            "metadata-only projection accessibility nodes {node_count}; "
+        )),
+        "unexpected accessibility tree status: {status}"
+    );
+    assert!(
+        !status.contains("macOS")
+            && !status.contains("Linux")
+            && !status.contains("AT-SPI")
+            && !status.contains("AXUIElement")
+            && !status.contains("VoiceOver")
+            && !status.contains("Orca"),
+        "must not claim a macOS or Linux probe: {status}"
+    );
+    if let Some(rest) = status.rsplit_once("Windows UIA observed ") {
+        let count = rest
+            .1
+            .strip_suffix(" descendants")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                panic!("Windows UIA status must include a descendant count: {status}")
+            });
+        let observed = probe_windows_uia_tree()
+            .expect("status claimed a Windows UIA walk, so the committed probe must succeed");
+        assert_eq!(observed.descendant_count, count);
+        assert!(!status.contains("OS tree not observed"));
+    } else {
+        assert!(
+            status.contains("OS tree not observed"),
+            "absent Windows UIA walk must stay an honest miss, got {status}"
+        );
+    }
 }
