@@ -7,7 +7,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-helpers"))]
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
@@ -512,6 +511,10 @@ enum PaletteCommandOperands {
     StashMessage(Option<String>),
     RenameName(String),
     CodeActionId(String),
+    AcpHost {
+        program: String,
+        args: Vec<String>,
+    },
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -546,6 +549,13 @@ impl PaletteCommandOperands {
             ("language-code-action", Self::CodeActionId(action_id)) => {
                 format!("Preview code action `{action_id}'")
             }
+            ("acp-attach-host", Self::AcpHost { program, args }) => {
+                if args.is_empty() {
+                    format!("Attach ACP host `{program}'")
+                } else {
+                    format!("Attach ACP host `{program} {}'", args.join(" "))
+                }
+            }
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -565,6 +575,9 @@ impl PaletteCommandOperands {
             Self::StashMessage(message) => message.iter().cloned().collect(),
             Self::RenameName(name) => vec![name.clone()],
             Self::CodeActionId(action_id) => vec![action_id.clone()],
+            Self::AcpHost { program, args } => std::iter::once(program.clone())
+                .chain(args.iter().cloned())
+                .collect(),
             Self::NewWorktree {
                 branch,
                 worktree_path,
@@ -584,6 +597,7 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-stash" => &["git stash", "git: stash changes"],
         "language-rename" => &["language rename", "rename symbol", "rename"],
         "language-code-action" => &["language code action", "code action"],
+        "acp-attach-host" => &["acp attach host", "acp: attach host"],
         _ => &[],
     }
 }
@@ -622,6 +636,7 @@ fn parse_palette_command_operands(
         "git-stash" => "Enter a stash message",
         "language-rename" => "Enter the new symbol name",
         "language-code-action" => "Enter a code-action id",
+        "acp-attach-host" => "Enter an ACP host program, optionally followed by arguments",
         _ => return None,
     };
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
@@ -659,6 +674,16 @@ fn parse_palette_command_operands(
                     worktree_path: worktree_path.to_string(),
                 })
             }
+        }
+        "acp-attach-host" => {
+            let mut parts = operands.split_whitespace();
+            let Some(program) = parts.next() else {
+                return Some(Err(missing));
+            };
+            Ok(PaletteCommandOperands::AcpHost {
+                program: program.to_string(),
+                args: parts.map(ToString::to_string).collect(),
+            })
         }
         _ => unreachable!("argument commands are matched above"),
     })
@@ -2755,13 +2780,11 @@ pub trait AppAutomateMcpToolRuntime: Send + Sync {
 
 /// ACP host command configured by the app.
 #[derive(Debug, Clone)]
-#[cfg(any(test, feature = "test-helpers"))]
 struct AcpHostCommand {
     program: PathBuf,
     args: Vec<String>,
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
 impl AcpHostCommand {
     fn new(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
         Self {
@@ -9206,6 +9229,13 @@ pub enum AppCommandRequest {
     },
     /// Open the app-owned Settings projection.
     OpenSettings,
+    /// Attach an optional local ACP adapter host for delegated proposal work.
+    AttachAcpHost {
+        /// Executable or program path.
+        program: String,
+        /// Arguments passed to the local adapter host.
+        args: Vec<String>,
+    },
     /// Update the app-owned theme preference.
     SetThemePreference {
         /// Requested theme preference.
@@ -10029,6 +10059,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ConfirmPaletteSelection { .. }
             | AppCommandRequest::CancelPaletteConfirmation { .. }
             | AppCommandRequest::OpenSettings
+            | AppCommandRequest::AttachAcpHost { .. }
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
             | AppCommandRequest::SetEditorFontSize { .. }
@@ -13127,6 +13158,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "acp-attach-host",
+            title: "ACP: Attach Host",
+            detail: "Attach an optional local ACP adapter bridge",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "close-palette",
             title: "Close Command Palette",
             detail: "Close the command palette",
@@ -13219,6 +13256,7 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "git-create-branch" => None,
         "git-delete-branch" => None,
         "git-stash" => None,
+        "acp-attach-host" => None,
         "git-push" => Some(CommandDispatchIntent::PushGitRemote {
             remote: "origin".to_string(),
         }),
@@ -14081,7 +14119,6 @@ pub struct AppComposition {
     #[cfg(feature = "ai")]
     in_flight_delegated_task: Option<InFlightDelegatedTaskRun>,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
-    #[cfg(any(test, feature = "test-helpers"))]
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
     legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
@@ -14445,7 +14482,6 @@ impl AppComposition {
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
-            #[cfg(any(test, feature = "test-helpers"))]
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
             legion_workflow_plan_artifacts: HashMap::new(),
@@ -15420,9 +15456,13 @@ impl AppComposition {
     }
 
     /// Configure the optional ACP host command used by delegated tasks.
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_acp_host_command(&mut self, program: impl Into<PathBuf>, args: Vec<String>) {
         self.acp_host_command = Some(AcpHostCommand::new(program, args));
+    }
+
+    /// Clear the optional ACP host command and return to manual behavior.
+    pub fn clear_acp_host_command(&mut self) {
+        self.acp_host_command = None;
     }
 
     /// Removes delegated-task sandbox directories left behind by crashed or
@@ -17197,6 +17237,17 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "acp-attach-host" => {
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::AcpHost { program, args })) => {
+                                    Some(CommandDispatchIntent::AttachAcpHost { program, args })
+                                }
+                                _ => None,
+                            }
+                        }
                         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
                         "git-remove-worktree" => {
                             match parse_palette_command_operands(
@@ -18199,6 +18250,10 @@ impl AppComposition {
             ),
             AppCommandRequest::OpenSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
+            }
+            AppCommandRequest::AttachAcpHost { program, args } => {
+                self.set_acp_host_command(program.clone(), args.clone());
+                Ok(AppCommandOutcome::Noop)
             }
             AppCommandRequest::SetThemePreference { preference } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_theme_preference(preference)),

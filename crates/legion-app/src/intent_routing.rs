@@ -150,6 +150,9 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::CancelPaletteConfirmation { token })
             }
             CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
+            CommandDispatchIntent::AttachAcpHost { program, args } => {
+                Ok(AppCommandRequest::AttachAcpHost { program, args })
+            }
             CommandDispatchIntent::SetThemePreference { preference } => {
                 Ok(AppCommandRequest::SetThemePreference { preference })
             }

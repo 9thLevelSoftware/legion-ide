@@ -60,6 +60,19 @@ camelCase, path-segment, and filename-region bonuses) blended with a recency sig
 frequency bonus.  The frequency bonus accumulates metadata-only usage counts per workspace;
 no raw query text, AI context, or network I/O is involved.
 
+#### Optional ACP host bridge
+
+The command palette exposes **ACP: Attach Host** as an opt-in local adapter bridge. Enter the
+host program and any arguments after the command, for example `> acp attach host claude --print`.
+The configured host is invoked only from the delegated proposal workflow, with the sandbox,
+target proposal path, and plan id supplied through `LEGION_ACP_*` environment variables.
+
+This does not add an ACP workbench or completion-class MCP behavior: the host remains outside
+the editor and its work is still proposal/evidence mediated. If no host is attached, Manual mode
+and the existing delegated workflow are unchanged. If the host cannot start or exits unsuccessfully,
+the app reports an error rather than fabricating a successful run. Use the command again with the
+desired program to replace the attached host; restart the app to clear the opt-in configuration.
+
 ### Assist
 
 Assist mode keeps the human in control while exposing AI-backed suggestions.

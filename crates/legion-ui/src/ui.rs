@@ -3045,6 +3045,13 @@ pub enum CommandDispatchIntent {
     },
     /// Open the projected Settings surface.
     OpenSettings,
+    /// Attach an optional local ACP adapter host for delegated proposal work.
+    AttachAcpHost {
+        /// Executable or program path.
+        program: String,
+        /// Arguments passed to the local adapter host.
+        args: Vec<String>,
+    },
     /// Update the app-owned theme preference.
     SetThemePreference {
         /// Requested theme preference.
