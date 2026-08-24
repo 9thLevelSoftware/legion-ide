@@ -20,13 +20,6 @@ Treat the labels as the product source of truth for the current profile and plat
 | Debug session | Step into | `F11` | |
 | Debug session | Step out | `Shift+F11` | |
 | Debug | Toggle breakpoint at cursor | `F9` | Zero-based projected cursor line on the active buffer. |
-| Problems panel | Next problem | `F8` | Move the focused diagnostic row forward; projected navigation only. |
-| Problems panel | Previous problem | `Shift+F8` | Move the focused diagnostic row backward; projected navigation only. |
-| Debug panel | Select previous stack frame | `Alt+ArrowUp` | Select a rendered stack frame; navigation remains bounded to the projected rows. |
-| Debug panel | Select next stack frame | `Alt+ArrowDown` | Select a rendered stack frame; navigation remains bounded to the projected rows. |
-| Editor | Rename symbol | `F2` | Opens the proposal-mediated language rename command. |
-| Editor | Format document | `Shift+Alt+F` | Opens the proposal-mediated formatting command. |
-| Editor | Organize imports | `Ctrl+Shift+O` | Opens the proposal-mediated organize-imports command. |
 | App command palette | Close Command Palette | `Esc` | Dismiss the foreground command palette. |
 | Palette result confirm | Confirm selection | `Enter` | Confirm file, symbol, or recent-item palette results. |
 | Completion popup | Navigate next | `↓` (Down Arrow) | Move selection down in the completion list. |
@@ -56,11 +49,22 @@ Navigation state (`focused_hunk_id`) is owned by the application layer and refle
 
 ## Product command coverage
 
-The command palette also exposes `Tests: Refresh`, `Tests: Run Item`, `Tests: Run Group`,
-`Language: Format Document`, `Language: Rename Symbol`, `Language: Organize Imports`, and
-`Language: Code Action`. Test commands use worker-backed projected states; language commands
-remain proposal-mediated. These labels are covered by the desktop palette regression and do not
-claim renderer-backed 3-OS or manual dogfood evidence.
+The command palette registry currently exposes the core file, settings, Git lifecycle/remote,
+and language-server commands exercised by the app projection, including `Git: Push`, `Git: Fetch`,
+`Git: Pull`, `Language Server: Start`, and `Language Server: Restart`. Git hunk navigation/staging,
+test discovery/run, and language write requests are not palette entries or default key bindings.
+They are available through the typed shell command surface and dispatch intents:
+
+- `:git-nav-next-hunk`, `:git-nav-prev-hunk`, `:git-nav-next-file`, and `:git-nav-prev-file`
+  emit projection-only Git navigation intents.
+- `:git-stage-hunk <hunk-id>` emits the existing policy-mediated staging intent.
+- `:test-refresh`, `:test-run <item-id>`, and `:test-run-group <label>` emit worker-backed test intents.
+- `:format`, `:rename <position>,<name>`, `:organize-imports`, and `:code-action <id>` emit
+  proposal-mediated language intents.
+
+Problems navigation currently uses plain `ArrowUp`/`ArrowDown` in the desktop workflow. Debug
+stack-frame navigation and the F8/Shift+F8, Alt+ArrowUp/Down, F2, Shift+Alt+F, Ctrl+Shift+O,
+and Ctrl+Shift+G bindings are not part of the default keymap.
 
 ## Mode controls
 

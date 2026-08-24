@@ -74,24 +74,23 @@ the app reports an error rather than fabricating a successful run. Use the comma
 desired program to replace the attached host; restart the app to clear the opt-in configuration.
 
 The command dispatcher is the reachable entry point for the product loops covered by the current
-desktop tests. Git actions remain projection- and policy-mediated; debug actions expose projected
-session state; test discovery and runs expose worker-backed `discovering`/`running` states; and
-language write requests create proposal previews rather than silently editing files.
+desktop tests. The command palette registry exposes the commands listed by the app projection,
+including `Git: Push`, `Git: Fetch`, `Git: Pull`, `Language Server: Start`, and
+`Language Server: Restart`;
+other product loops use typed shell commands that become app-owned dispatch intents.
 
-The covered command names are:
+Git hunk navigation/staging, test discovery/run, and language write requests are typed shell
+surfaces rather than command-palette entries:
 
-- **Git:** `Git: Stage Focused Hunk`, `Git: Next Hunk`, `Git: Previous Hunk`, `Git: Next File`,
-  and `Git: Previous File`.
-- **Debug:** `Debug: Start`, `Debug: Stop`, `Debug: Step Over`, `Debug: Step Into`, and
-  `Debug: Step Out` when the projected session state permits them.
-- **Tests:** `Tests: Refresh`, `Tests: Run Item`, and `Tests: Run Group`; discovery and execution
-  run off the UI dispatch path.
-- **Language:** `Language: Format Document`, `Language: Rename Symbol`,
-  `Language: Organize Imports`, and `Language: Code Action`; each remains proposal-mediated.
+- **Git:** `:git-nav-next-hunk`, `:git-nav-prev-hunk`, `:git-nav-next-file`,
+  `:git-nav-prev-file`, and `:git-stage-hunk <hunk-id>`.
+- **Tests:** `:test-refresh`, `:test-run <item-id>`, and `:test-run-group <label>`;
+  discovery and execution remain worker-backed.
+- **Language:** `:format`, `:rename <position>,<name>`, `:organize-imports`, and
+  `:code-action <id>`; each remains proposal-mediated.
 
-These labels describe the command and projection contracts exercised in tests. They are not a
-claim of renderer-backed 3-OS dogfood, coverage support, or automatic mutation outside an
-approved proposal path.
+These are typed-intent/projection contracts, not claims of palette reachability, default-keymap
+bindings, renderer-backed 3-OS dogfood, or automatic mutation outside an approved proposal path.
 
 ### Assist
 
@@ -162,19 +161,20 @@ See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Source control (SCM)
 
-Legion integrates with Git through the command palette and the SCM panel.
+Legion integrates with Git through the command palette's Git lifecycle/remote entries, typed
+shell intents, and the SCM projection.
 
 ### Diff review navigation
 
-When a diff is open, use the following palette commands (or their projected key bindings) to move through changes:
+When a diff is open, the typed shell commands below emit projection-only navigation intents:
 
-| Command | Description |
+| Typed command | Description |
 | --- | --- |
-| Git: Next Hunk | Move focus to the next changed hunk in the current file. |
-| Git: Previous Hunk | Move focus to the previous changed hunk in the current file. |
-| Git: Next File | Move focus to the next changed file in the diff. |
-| Git: Previous File | Move focus to the previous changed file in the diff. |
-| Git: Stage Focused Hunk | Stage the focused unstaged hunk through the existing proposal/policy path. |
+| `:git-nav-next-hunk` | Move focus to the next changed hunk in the current file. |
+| `:git-nav-prev-hunk` | Move focus to the previous changed hunk in the current file. |
+| `:git-nav-next-file` | Move focus to the next changed file in the diff. |
+| `:git-nav-prev-file` | Move focus to the previous changed file in the diff. |
+| `:git-stage-hunk <hunk-id>` | Stage the focused unstaged hunk through the existing policy path. |
 
 Focus state is tracked in the application layer; the desktop projection reflects the current `focused_hunk_id` from `GitProjection`.
 

@@ -18,8 +18,10 @@ use legion_desktop::{
     bridge::DesktopAction,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
-use legion_protocol::{PrincipalId, TextCoordinate, WorkspaceTrustState};
-use legion_ui::{PaletteMode, PaletteResultKind, SearchScopeProjection};
+use legion_protocol::{BufferId, PrincipalId, TextCoordinate, WorkspaceTrustState};
+use legion_ui::{
+    CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection, Shell,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -447,46 +449,158 @@ fn command_palette_coverage_report_resolves_catalog_commands() {
 }
 
 #[test]
-fn product_loop_commands_have_documented_palette_and_keymap_coverage() {
+fn product_loop_commands_match_live_registry_shell_and_keymap_surfaces() {
     let _guard = test_guard();
     let user_guide = repository_doc("USER_GUIDE.md");
     let keyboard_reference = repository_doc("KEYBOARD_REFERENCE.md");
 
-    let documented_commands = [
-        "Git: Stage Focused Hunk",
-        "Git: Next Hunk",
-        "Git: Previous Hunk",
-        "Git: Next File",
-        "Git: Previous File",
-        "Tests: Refresh",
-        "Tests: Run Item",
-        "Tests: Run Group",
-        "Language: Format Document",
-        "Language: Rename Symbol",
-        "Language: Organize Imports",
-        "Language: Code Action",
-    ];
-    for command in documented_commands {
+    for command in [
+        "Language Server: Start",
+        "Language Server: Restart",
+        "Git: Push",
+        "Git: Fetch",
+        "Git: Pull",
+    ] {
         assert!(
             user_guide.contains(command) || keyboard_reference.contains(command),
-            "product command `{command}` must be documented"
+            "palette command `{command}` must be documented"
         );
     }
 
-    let documented_shortcuts = [
-        ("Stage Focused Hunk", "Ctrl+Shift+G"),
-        ("Next problem", "F8"),
-        ("Previous problem", "Shift+F8"),
-        ("Select previous stack frame", "Alt+ArrowUp"),
-        ("Select next stack frame", "Alt+ArrowDown"),
-        ("Rename symbol", "F2"),
-        ("Format document", "Shift+Alt+F"),
-        ("Organize imports", "Ctrl+Shift+O"),
-    ];
-    for (label, shortcut) in documented_shortcuts {
+    let workspace = TempWorkspace::new("palette_coverage_registry");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        workspace.path(),
+        WorkspaceTrustState::Trusted,
+        PrincipalId("palette-registry".to_string()),
+    )
+    .expect("workspace should open");
+    for (query, title) in [
+        (">git push", "Git: Push"),
+        (">git fetch", "Git: Fetch"),
+        (">git pull", "Git: Pull"),
+        (">language server start", "Language Server: Start"),
+        (">language server restart", "Language Server: Restart"),
+    ] {
+        app.dispatch_ui_intent(legion_ui::CommandDispatchIntent::OpenPalette {
+            mode: PaletteMode::Command,
+            query: query.to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("palette should open");
+        let palette = app
+            .shell_projection_snapshot("palette")
+            .expect("palette projection should build")
+            .palette_projection;
         assert!(
-            keyboard_reference.contains(label) && keyboard_reference.contains(shortcut),
-            "keymap entry `{label}` must document `{shortcut}`"
+            palette
+                .results
+                .iter()
+                .any(|result| result.kind == PaletteResultKind::Command && result.title == title),
+            "palette registry must expose `{title}` for `{query}`"
         );
     }
+
+    for command in [
+        ":git-nav-next-hunk",
+        ":git-nav-prev-hunk",
+        ":git-nav-next-file",
+        ":git-nav-prev-file",
+        ":git-stage-hunk <hunk-id>",
+        ":test-refresh",
+        ":test-run <item-id>",
+        ":test-run-group <label>",
+        ":format",
+        ":rename <position>,<name>",
+        ":organize-imports",
+        ":code-action <id>",
+    ] {
+        assert!(
+            user_guide.contains(command) || keyboard_reference.contains(command),
+            "typed surface `{command}` must be documented"
+        );
+    }
+
+    let default_keymap = legion_ui::ui::default_keymap();
+    for combo in [
+        ("F8", false, false, false),
+        ("F8", false, true, false),
+        ("ArrowUp", false, false, true),
+        ("ArrowDown", false, false, true),
+        ("F2", false, false, false),
+        ("F", false, true, true),
+        ("O", true, true, false),
+        ("G", true, true, false),
+    ] {
+        assert!(
+            !default_keymap.iter().any(|entry| {
+                entry.combo == legion_ui::ui::KeyCombo::new(combo.0, combo.1, combo.2, combo.3)
+            }),
+            "unsupported default keymap entry {:?} must stay absent",
+            combo
+        );
+    }
+
+    let mut shell = Shell::empty("palette coverage");
+    shell.active_buffer_projection.buffer_id = Some(BufferId(1));
+    shell.active_buffer_projection.small_buffer_preview = Some("fn main() {}\n".to_string());
+    let typed_cases = [
+        (":git-nav-next-hunk", CommandDispatchIntent::GitNavNextHunk),
+        (":git-nav-prev-hunk", CommandDispatchIntent::GitNavPrevHunk),
+        (":git-nav-next-file", CommandDispatchIntent::GitNavNextFile),
+        (":git-nav-prev-file", CommandDispatchIntent::GitNavPrevFile),
+        (
+            ":git-stage-hunk h1",
+            CommandDispatchIntent::StageGitHunk {
+                hunk_id: "h1".into(),
+            },
+        ),
+        (":test-refresh", CommandDispatchIntent::RefreshTestExplorer),
+        (
+            ":test-run item-1",
+            CommandDispatchIntent::RunTestExplorerItem {
+                item_id: "item-1".into(),
+            },
+        ),
+        (
+            ":test-run-group crate",
+            CommandDispatchIntent::RunTestExplorerGroup {
+                parent_label: "crate".into(),
+            },
+        ),
+        (
+            ":format",
+            CommandDispatchIntent::RequestFormattingProposal {
+                buffer_id: BufferId(1),
+            },
+        ),
+        (
+            ":organize-imports",
+            CommandDispatchIntent::RequestOrganizeImportsProposal {
+                buffer_id: BufferId(1),
+            },
+        ),
+        (
+            ":code-action fix",
+            CommandDispatchIntent::RequestCodeActionProposal {
+                buffer_id: BufferId(1),
+                action_id: "fix".into(),
+            },
+        ),
+    ];
+    for (input, expected) in typed_cases {
+        assert_eq!(
+            shell.handle_command(input).expect("typed command parses"),
+            Some(expected)
+        );
+    }
+
+    let rename = shell
+        .handle_command(":rename 0,new_name")
+        .expect("rename command parses")
+        .expect("rename emits an intent");
+    assert!(matches!(
+        rename,
+        CommandDispatchIntent::RequestRenameProposal { .. }
+    ));
 }
