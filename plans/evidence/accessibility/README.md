@@ -16,6 +16,11 @@ Record the accessibility evidence for the Legion desktop shell and the golden-pa
 
 Part of this evidence is product-facing rather than projection-only. One of the three supported OSes (Windows) now has a reproducible product-facing observation; macOS has an unreproducible one; Linux has none.
 
+PR-15 adds `scripts/a11y-platform-probe.sh` as a deterministic status
+contract and `PR-15-manual-keyboard-path.md` as the honest keyboard-only path.
+The contract delegates Windows to the committed UIA walk and reports macOS and
+Linux as unobserved until committed platform probes exist.
+
 ## Source evidence
 
 - OS accessibility-tree inspection for the product window, **Windows, repeatable**: `scripts/a11y-uia-walk.ps1` → `plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt`
@@ -39,6 +44,7 @@ Read these as label inventories of the accessible surface, not as screen-reader 
 - `plans/evidence/accessibility/gp-1-manual-walkthrough.md`
 - `plans/evidence/accessibility/gp-2-assist-walkthrough.md`
 - `plans/evidence/accessibility/gp-3-delegate-walkthrough.md`
+- `plans/evidence/accessibility/PR-15-manual-keyboard-path.md`
 
 ## Acceptance note
 

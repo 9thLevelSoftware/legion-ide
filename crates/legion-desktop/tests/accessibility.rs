@@ -1309,3 +1309,27 @@ fn assert_os_tree_status_matches_probe(status: &str, node_count: usize) {
         );
     }
 }
+
+#[test]
+fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let probe = root.join("scripts/a11y-platform-probe.sh");
+    let evidence = root.join("plans/evidence/accessibility/PR-15-manual-keyboard-path.md");
+
+    let probe_text = fs::read_to_string(probe).expect("PR-15 probe contract");
+    assert!(probe_text.contains("observation=unobserved"));
+    assert!(probe_text.contains("a11y-uia-walk.ps1"));
+
+    let evidence_text = fs::read_to_string(evidence).expect("PR-15 evidence packet");
+    for platform in ["macOS", "Linux"] {
+        assert!(evidence_text.contains(&format!("| {platform} |")));
+        assert!(evidence_text.contains(&format!(
+            "| {platform} | No committed OS-tree probe | Unobserved. |"
+        )));
+    }
+    assert!(evidence_text.contains("Manual keyboard-only path"));
+    assert!(evidence_text.contains("Git: Stage Focused Hunk"));
+}
