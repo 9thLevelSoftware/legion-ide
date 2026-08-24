@@ -19,7 +19,7 @@ use legion_agent::{
     dag::{WorkflowDag, workflow_dag_from_approved_plan},
     plan::editable_plan_from_workflow_artifacts,
 };
-#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+#[cfg(feature = "ai")]
 use legion_agent::{DelegatedTaskProposalGenerator, DelegatedTaskProposalInput};
 #[cfg(feature = "ai")]
 use legion_ai::{InlinePredictionRequest, ProviderRegistry, ProviderRouter};
@@ -2381,6 +2381,7 @@ impl Drop for InFlightDelegatedTaskRun {
 struct DelegatedTaskRunCompletion {
     audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
     loop_result: Option<legion_agent::agent_loop::DelegatedTaskLoopResult>,
+    acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     sandbox_allocation_failure: Option<String>,
     sandbox_enforcement_label: Option<String>,
 }
@@ -2818,6 +2819,75 @@ impl AcpHostCommand {
         );
         command.output()
     }
+}
+
+#[cfg(feature = "ai")]
+fn run_acp_host_proposal(
+    command: &AcpHostCommand,
+    sandbox_path: &Path,
+    target_file: &Path,
+    task_id: &str,
+    correlation_id: CorrelationId,
+    causality_id: CausalityId,
+) -> Result<legion_protocol::AssistedAiEditProposalOutput, AppCompositionError> {
+    let Some(parent) = target_file.parent() else {
+        return Err(AppCompositionError::AiRuntime(
+            "ACP proposal target has no parent directory".to_string(),
+        ));
+    };
+    std::fs::create_dir_all(parent).map_err(|error| {
+        AppCompositionError::AiRuntime(format!("failed to prepare ACP proposal target: {error}"))
+    })?;
+    std::fs::write(
+        target_file,
+        format!("delegated-task-proposal\ntask_id={task_id}\n"),
+    )
+    .map_err(|error| {
+        AppCompositionError::AiRuntime(format!("failed to seed ACP proposal target: {error}"))
+    })?;
+
+    let output = command
+        .run(sandbox_path, target_file, task_id)
+        .map_err(|error| {
+            AppCompositionError::AiRuntime(format!("ACP host command failed to start: {error}"))
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppCompositionError::AiRuntime(format!(
+            "ACP host command exited unsuccessfully: {}",
+            stderr.trim()
+        )));
+    }
+
+    let proposal_content = std::fs::read_to_string(target_file).map_err(|error| {
+        AppCompositionError::AiRuntime(format!("failed to read ACP host proposal: {error}"))
+    })?;
+    let generator = DelegatedTaskProposalGenerator::new(sandbox_path.to_path_buf());
+    generator
+        .generate_proposal(DelegatedTaskProposalInput {
+            target_path: target_file,
+            modified_content: &proposal_content,
+            output_id: format!("acp-output:{task_id}"),
+            request_id: format!("acp:{task_id}"),
+            provider_id: "acp.local-adapter".to_string(),
+            proposal_id: ProposalId(0),
+            principal: PrincipalId(format!("delegate-task:{task_id}")),
+            capability: CapabilityId("delegated.runtime.allocate".to_string()),
+            correlation_id,
+            causality_id,
+            created_at: TimestampMillis::now(),
+            context_manifest: trust_reference(
+                &format!("delegate:acp-context:{task_id}"),
+                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
+            ),
+            approval_checklist: trust_reference(
+                &format!("delegate:acp-approval:{task_id}"),
+                legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
+            ),
+        })
+        .map_err(|error| {
+            AppCompositionError::AiRuntime(format!("ACP proposal generation failed: {error}"))
+        })
 }
 
 /// App adapter that invokes a `legion-ai-providers` MCP client from Automate workflows.
@@ -20053,6 +20123,8 @@ impl AppComposition {
         #[cfg(any(test, feature = "test-helpers"))]
         let inject_spawn_failure = std::mem::take(&mut self.injected_delegated_spawn_failure);
         let worker_cancellation = cancellation_flag.clone();
+        let acp_host_command = self.acp_host_command.clone();
+        let worker_task_id = task_id.clone();
         let mut sandbox_guard =
             DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
         let worker = move || {
@@ -20087,6 +20159,7 @@ impl AppComposition {
                         loop_result: Some(
                             legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled,
                         ),
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: None,
                         sandbox_enforcement_label: None,
                     });
@@ -20095,10 +20168,27 @@ impl AppComposition {
                     return Ok(DelegatedTaskRunCompletion {
                         audit_steps: Vec::new(),
                         loop_result: None,
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: Some(error.to_string()),
                         sandbox_enforcement_label: None,
                     });
                 }
+                let acp_proposals = if let Some(command) = acp_host_command.as_ref() {
+                    let target_file = config.worktree_root.join(format!(
+                        "delegated-task/{}.proposal.txt",
+                        safe_path_component(&worker_task_id, "task")
+                    ));
+                    vec![run_acp_host_proposal(
+                        command,
+                        &config.worktree_root,
+                        &target_file,
+                        &worker_task_id,
+                        correlation_id,
+                        causality_id,
+                    )?]
+                } else {
+                    Vec::new()
+                };
                 let tool_host = AppDelegatedToolHost::new(
                     config.worktree_root.clone(),
                     std::collections::BTreeSet::new(),
@@ -20118,6 +20208,7 @@ impl AppComposition {
                 Ok(DelegatedTaskRunCompletion {
                     audit_steps: audit_sink.steps,
                     loop_result: Some(loop_result),
+                    acp_proposals,
                     sandbox_allocation_failure: None,
                     sandbox_enforcement_label: tool_host.last_enforcement_summary(),
                 })
@@ -20239,6 +20330,7 @@ impl AppComposition {
         Ok(Some(self.finish_background_delegated_task(
             loop_result,
             completion.audit_steps,
+            completion.acp_proposals,
         )?))
     }
 
@@ -20247,6 +20339,7 @@ impl AppComposition {
         &mut self,
         loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
         audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+        acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
         use legion_agent::agent_loop::DelegatedTaskLoopResult;
         match &loop_result {
@@ -20262,8 +20355,10 @@ impl AppComposition {
         Ok(match loop_result {
             DelegatedTaskLoopResult::Completed {
                 final_message,
-                proposals,
+                proposals: loop_proposals,
             } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -20286,10 +20381,15 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
                 // Register before reporting: these proposals are reviewable on
                 // the same terms as a completed run's, and the run is still
                 // waiting on a human either way.
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -21085,6 +21185,34 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = sandbox_guard.orchestrator.sandbox_path().to_path_buf();
+        let acp_proposals = if let Some(command) = self.acp_host_command.as_ref() {
+            let target_file = sandbox_path.join(format!(
+                "delegated-task/{}.proposal.txt",
+                safe_path_component(&task_id, "task")
+            ));
+            match run_acp_host_proposal(
+                command,
+                &sandbox_path,
+                &target_file,
+                &task_id,
+                correlation_id,
+                causality_id,
+            ) {
+                Ok(proposal) => vec![proposal],
+                Err(error) => {
+                    let cleanup_result = sandbox_guard.cleanup();
+                    let message = match cleanup_result {
+                        Ok(()) => error.to_string(),
+                        Err(cleanup_error) => format!("{error}; {cleanup_error}"),
+                    };
+                    self.delegate_workflow
+                        .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
         // Build the tool host backed by `spawn_sandboxed`.
         let tool_host =
@@ -21238,7 +21366,9 @@ impl AppComposition {
                 final_message,
                 proposals: loop_proposals,
             } => {
-                let registered = self.register_delegated_task_proposals(loop_proposals)?;
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
+                let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
                     proposals: registered,
@@ -21257,7 +21387,12 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::StoppedNoProgress {
                     reason,
