@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
+    io::Write,
     path::Path,
     process,
 };
@@ -1994,10 +1995,9 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
 
 /// Workloads that must produce a measurement on every host.
 ///
-/// All headless: any machine that can build Legion can run them, so a missing
-/// measurement is a defect and not a property of the runner. The
-/// renderer-backed Manual measurement is deliberately absent — it needs a
-/// display, and a headless CI runner cannot supply one.
+/// All headless product workloads must run on every host. The renderer-backed
+/// large-file row is also required, but a headless host records it as an
+/// honest unmeasured skip because no desktop renderer is available.
 fn required_measured_workloads() -> Vec<String> {
     let mut names: Vec<String> = xtask::perf_workloads::product_workload_policies()
         .into_iter()
@@ -2113,49 +2113,22 @@ fn append_large_file_measurement(
     report: &mut xtask::perf_harness::PerfReport,
 ) {
     let descriptor = xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb();
-    let report_path = out_dir.join("large-file-perf.toml");
     let _ = std::fs::create_dir_all(out_dir);
-
-    let output = std::process::Command::new("cargo")
-        .current_dir(workspace_root)
-        .args([
-            "run",
-            "--release",
-            "-q",
-            "-p",
-            "legion-app",
-            "--bin",
-            "large_file_perf",
-            "--",
-            "--report",
-        ])
-        .arg(&report_path)
-        .output();
-
-    let measurement = match output {
-        Err(err) => placeholder_large_file_measurement(
-            &descriptor,
-            format!("100MB measurement blocked: cannot spawn subprocess: {err}"),
+    let fixture_path = out_dir.join("large-file-100mb.txt");
+    let measurement = match write_large_file_fixture(&fixture_path, descriptor.fixture_bytes) {
+        Ok(()) => xtask::perf_harness::run_renderer_backed_large_file_measurement(
+            workspace_root,
+            out_dir,
+            &fixture_path,
+            descriptor.fixture_bytes,
+            descriptor.budget_millis,
         ),
-        Ok(output) if !output.status.success() => placeholder_large_file_measurement(
-            &descriptor,
-            format!(
-                "100MB measurement subprocess exited with status {}",
-                output.status
-            ),
+        Err(err) => xtask::perf_harness::placeholder_large_file_manual_measurement(
+            xtask::perf_harness::SkeletonStatus::Skipped,
+            descriptor.fixture_bytes,
+            descriptor.budget_millis,
+            format!("renderer-backed 100MB fixture unavailable: {err}"),
         ),
-        Ok(_) => match std::fs::read_to_string(&report_path)
-            .map_err(|err| err.to_string())
-            .and_then(|body| {
-                toml::from_str::<xtask::perf_harness::LargeFilePerfReport>(&body)
-                    .map_err(|err| err.to_string())
-            }) {
-            Ok(parsed) => xtask::perf_harness::large_file_perf_measurement(&descriptor, &parsed),
-            Err(err) => placeholder_large_file_measurement(
-                &descriptor,
-                format!("100MB measurement report unreadable: {err}"),
-            ),
-        },
     };
 
     // Replace the planned placeholder rather than appending beside it, so the
@@ -2169,26 +2142,22 @@ fn append_large_file_measurement(
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }
 
-/// A skipped measurement carrying why the real one could not be taken.
-fn placeholder_large_file_measurement(
-    descriptor: &xtask::perf_harness::SkeletonDescriptor,
-    message: String,
-) -> xtask::perf_harness::SkeletonMeasurement {
-    xtask::perf_harness::SkeletonMeasurement {
-        name: descriptor.name.clone(),
-        kind: descriptor.kind,
-        fixture_bytes: descriptor.fixture_bytes,
-        sample_count: descriptor.sample_count,
-        total_micros: 0,
-        p50_micros: 0,
-        p95_micros: 0,
-        budget_millis: descriptor.budget_millis,
-        status: xtask::perf_harness::SkeletonStatus::Skipped,
-        message,
-        measured: false,
-        bytes_value: 0,
-        synthetic_stand_in: false,
+fn write_large_file_fixture(path: &Path, byte_len: usize) -> Result<(), String> {
+    let mut file = fs::File::create(path)
+        .map_err(|err| format!("unable to create 100MB fixture `{}`: {err}", path.display()))?;
+    let line = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
+    let mut chunk = Vec::with_capacity(64 * 1024);
+    while chunk.len() + line.len() <= chunk.capacity() {
+        chunk.extend_from_slice(line);
     }
+    let mut remaining = byte_len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(chunk.len());
+        file.write_all(&chunk[..chunk_len])
+            .map_err(|err| format!("unable to write 100MB fixture `{}`: {err}", path.display()))?;
+        remaining -= chunk_len;
+    }
+    Ok(())
 }
 
 fn append_manual_renderer_measurement(
