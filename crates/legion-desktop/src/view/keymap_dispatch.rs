@@ -223,15 +223,40 @@ fn debug_stack_navigation_action(
     direction: isize,
 ) -> Option<DesktopAction> {
     let frame_count = snapshot.debug_projection.stack_frames.len();
-    if frame_count == 0 {
-        return None;
-    }
-    let current = debug_selected_stack_frame_index(ctx, frame_count);
-    let next = (current as isize + direction).clamp(0, frame_count as isize - 1) as usize;
+    let current =
+        debug_selected_stack_frame_index(ctx, frame_count.min(DEBUG_STACK_FRAME_RENDER_LIMIT));
+    let next = debug_stack_navigation_index(current, frame_count, direction)?;
     set_debug_selected_stack_frame_index(ctx, next);
     snapshot
         .debug_projection
         .stack_frames
         .get(next)
         .and_then(debug_frame_navigation_action)
+}
+
+fn debug_stack_navigation_index(
+    current: usize,
+    total_frame_count: usize,
+    direction: isize,
+) -> Option<usize> {
+    let frame_count = total_frame_count.min(DEBUG_STACK_FRAME_RENDER_LIMIT);
+    if frame_count == 0 {
+        return None;
+    }
+    Some(
+        (current.min(frame_count - 1) as isize + direction).clamp(0, frame_count as isize - 1)
+            as usize,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::debug_stack_navigation_index;
+
+    #[test]
+    fn debug_stack_navigation_stays_within_rendered_frame_limit() {
+        assert_eq!(debug_stack_navigation_index(31, 40, 1), Some(31));
+        assert_eq!(debug_stack_navigation_index(40, 40, -1), Some(30));
+        assert_eq!(debug_stack_navigation_index(0, 0, 1), None);
+    }
 }

@@ -31,6 +31,8 @@ pub mod agent_comm;
 /// Files as draggable cards in an infinite 2D space.
 pub mod canvas_workspace;
 mod keymap_dispatch;
+
+const DEBUG_STACK_FRAME_RENDER_LIMIT: usize = 32;
 pub(crate) use keymap_dispatch::*;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
 pub mod assist_rail_commands;
@@ -10590,9 +10592,16 @@ fn render_debug_inspector(
             if debug.stack_frames.is_empty() {
                 ui.label(theme::muted("No stack frames"));
             } else {
-                let selected_index =
-                    debug_selected_stack_frame_index(ui.ctx(), debug.stack_frames.len());
-                for (index, frame) in debug.stack_frames.iter().take(32).enumerate() {
+                let selected_index = debug_selected_stack_frame_index(
+                    ui.ctx(),
+                    debug.stack_frames.len().min(DEBUG_STACK_FRAME_RENDER_LIMIT),
+                );
+                for (index, frame) in debug
+                    .stack_frames
+                    .iter()
+                    .take(DEBUG_STACK_FRAME_RENDER_LIMIT)
+                    .enumerate()
+                {
                     let response = ui.selectable_label(
                         index == selected_index,
                         debug_stack_frame_label(frame, index),
@@ -10628,7 +10637,9 @@ fn render_debug_inspector(
                     ui.ctx().accesskit_node_builder(response.id, |node| {
                         node.set_role(egui::accesskit::Role::TreeItem);
                         node.set_label(label);
-                        node.set_expanded(variable.has_children);
+                        if let Some(expanded) = debug_variable_accesskit_expanded(variable) {
+                            node.set_expanded(expanded);
+                        }
                     });
                 }
             }
@@ -10687,6 +10698,12 @@ fn debug_variable_label(variable: &legion_ui::DebugVariableProjection) -> String
             .map(|type_label| format!(" · {type_label}"))
             .unwrap_or_default()
     )
+}
+
+fn debug_variable_accesskit_expanded(
+    variable: &legion_ui::DebugVariableProjection,
+) -> Option<bool> {
+    (!variable.has_children).then_some(false)
 }
 
 fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
@@ -11197,6 +11214,16 @@ mod tests {
             has_children: false,
         };
         assert_eq!(debug_variable_label(&variable), "count = 3 · i32");
+        assert_eq!(debug_variable_accesskit_expanded(&variable), Some(false));
+
+        let expandable_variable = DebugVariableProjection {
+            has_children: true,
+            ..variable
+        };
+        assert_eq!(
+            debug_variable_accesskit_expanded(&expandable_variable),
+            None
+        );
     }
 
     #[test]
