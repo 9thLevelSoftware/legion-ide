@@ -3131,6 +3131,7 @@ fn key_label_to_egui(label: &str) -> Option<egui::Key> {
         "Tab" => Some(egui::Key::Tab),
         "F3" => Some(egui::Key::F3),
         "F5" => Some(egui::Key::F5),
+        "F8" => Some(egui::Key::F8),
         "F9" => Some(egui::Key::F9),
         "F10" => Some(egui::Key::F10),
         "F11" => Some(egui::Key::F11),
@@ -11078,6 +11079,32 @@ mod tests {
                 scope: SearchScopeProjection::ActiveFile,
             }) if query == "/"
         ));
+    }
+
+    #[test]
+    fn problem_keybindings_route_to_navigation_actions() {
+        let snapshot = Shell::empty("Problem keybinding test").projection_snapshot();
+        assert_eq!(
+            action_label_to_desktop_action("ProblemNext", &snapshot),
+            Some(DesktopAction::ProblemNext)
+        );
+        assert_eq!(
+            action_label_to_desktop_action("ProblemPrev", &snapshot),
+            Some(DesktopAction::ProblemPrev)
+        );
+        assert_eq!(key_label_to_egui("F8"), Some(egui::Key::F8));
+
+        let bindings = legion_ui::ui::default_keymap();
+        assert!(bindings.iter().any(|binding| {
+            binding.combo.key == "F8"
+                && !binding.combo.shift
+                && binding.action_label == "ProblemNext"
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding.combo.key == "F8"
+                && binding.combo.shift
+                && binding.action_label == "ProblemPrev"
+        }));
     }
 
     #[test]

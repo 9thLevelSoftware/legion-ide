@@ -1501,6 +1501,14 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "GoToDefinition".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("F8", false, false, false),
+            action_label: "ProblemNext".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F8", false, true, false),
+            action_label: "ProblemPrev".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("F5", false, false, false),
             action_label: "DebugStart".into(),
         },

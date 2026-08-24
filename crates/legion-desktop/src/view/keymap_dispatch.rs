@@ -58,6 +58,8 @@ pub(crate) fn action_label_to_desktop_action(
             .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
         "PrevTab" => adjacent_tab_for_keybinding(snapshot, -1)
             .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "ProblemNext" => Some(DesktopAction::ProblemNext),
+        "ProblemPrev" => Some(DesktopAction::ProblemPrev),
         "DebugStart" => {
             if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
                 Some(DesktopAction::DebugStep {
