@@ -37,6 +37,21 @@ pub(crate) fn action_label_to_desktop_action(
         "GoToDefinition" => Some(DesktopAction::GoToDefinition {
             position: projected_cursor(snapshot),
         }),
+        "RenameSymbol" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "language rename ".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "FormatDocument" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "Language: Format Document".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "OrganizeImports" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "Language: Organize Imports".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
         "GoToLine" => Some(DesktopAction::OpenPalette {
             mode: PaletteMode::Command,
             query: "Go to line".to_string(),

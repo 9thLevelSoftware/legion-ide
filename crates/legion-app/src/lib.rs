@@ -510,6 +510,8 @@ enum PaletteCommandOperands {
     WorktreePath(String),
     CommitMessage(String),
     StashMessage(Option<String>),
+    RenameName(String),
+    CodeActionId(String),
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -538,6 +540,12 @@ impl PaletteCommandOperands {
                 format!("Stash changes as ‘{message}’")
             }
             ("git-stash", Self::StashMessage(None)) => "Stash local changes".to_string(),
+            ("language-rename", Self::RenameName(name)) => {
+                format!("Rename symbol to `{name}'")
+            }
+            ("language-code-action", Self::CodeActionId(action_id)) => {
+                format!("Preview code action `{action_id}'")
+            }
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -555,6 +563,8 @@ impl PaletteCommandOperands {
             Self::WorktreePath(path) => vec![path.clone()],
             Self::CommitMessage(message) => vec![message.clone()],
             Self::StashMessage(message) => message.iter().cloned().collect(),
+            Self::RenameName(name) => vec![name.clone()],
+            Self::CodeActionId(action_id) => vec![action_id.clone()],
             Self::NewWorktree {
                 branch,
                 worktree_path,
@@ -572,6 +582,8 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-new-worktree" => &["git new worktree", "git: new worktree"],
         "git-commit" => &["git commit", "git: commit staged changes"],
         "git-stash" => &["git stash", "git: stash changes"],
+        "language-rename" => &["language rename", "rename symbol", "rename"],
+        "language-code-action" => &["language code action", "code action"],
         _ => &[],
     }
 }
@@ -608,6 +620,8 @@ fn parse_palette_command_operands(
         "git-new-worktree" => "Enter a branch and worktree path",
         "git-commit" => "Enter a commit message",
         "git-stash" => "Enter a stash message",
+        "language-rename" => "Enter the new symbol name",
+        "language-code-action" => "Enter a code-action id",
         _ => return None,
     };
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
@@ -628,6 +642,8 @@ fn parse_palette_command_operands(
         "git-stash" => Ok(PaletteCommandOperands::StashMessage(Some(
             operands.to_string(),
         ))),
+        "language-rename" => Ok(PaletteCommandOperands::RenameName(operands.to_string())),
+        "language-code-action" => Ok(PaletteCommandOperands::CodeActionId(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -13165,6 +13181,30 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Restart the language server",
             shortcut_label: None,
         },
+        PaletteCommandSpec {
+            id: "language-format",
+            title: "Language: Format Document",
+            detail: "Create a formatting proposal preview",
+            shortcut_label: Some("Shift+Alt+F"),
+        },
+        PaletteCommandSpec {
+            id: "language-rename",
+            title: "Language: Rename Symbol",
+            detail: "Enter a new name and create a proposal preview",
+            shortcut_label: Some("F2"),
+        },
+        PaletteCommandSpec {
+            id: "language-organize-imports",
+            title: "Language: Organize Imports",
+            detail: "Create an organize-imports proposal preview",
+            shortcut_label: Some("Ctrl+Shift+O"),
+        },
+        PaletteCommandSpec {
+            id: "language-code-action",
+            title: "Language: Code Action",
+            detail: "Enter an action id and create a proposal preview",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -13211,6 +13251,10 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         // PKT-LSP-C T1: language server lifecycle palette commands.
         "lsp-start-session" => Some(CommandDispatchIntent::LspStartSession),
         "lsp-restart-session" => Some(CommandDispatchIntent::LspRestartSession),
+        "language-format"
+        | "language-rename"
+        | "language-organize-imports"
+        | "language-code-action" => None,
         _ => None,
     }
 }
@@ -17183,6 +17227,64 @@ impl AppComposition {
                             (!path.is_empty()).then_some(
                                 CommandDispatchIntent::RequestLocalHistoryEntries { path },
                             )
+                        }
+                        "language-format" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestFormattingProposal { buffer_id }
+                            })
+                        }
+                        "language-organize-imports" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
+                            })
+                        }
+                        "language-rename" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let Some(Ok(PaletteCommandOperands::RenameName(new_name))) =
+                                parse_palette_command_operands(
+                                    command_id,
+                                    palette_query_body(PaletteMode::Command, &self.palette.query),
+                                )
+                            else {
+                                return None;
+                            };
+                            let cursor = self.editor.primary_cursor(buffer_id).ok()?;
+                            let text = self.editor.text(buffer_id).ok()?.to_string();
+                            let line_start = text
+                                .split_inclusive('\n')
+                                .take(cursor.line)
+                                .map(str::len)
+                                .sum::<usize>();
+                            let byte_offset = line_start.saturating_add(cursor.column);
+                            let character = text
+                                .get(line_start..byte_offset)
+                                .map(|line| line.chars().count() as u32)
+                                .unwrap_or(0);
+                            Some(CommandDispatchIntent::RequestRenameProposal {
+                                buffer_id,
+                                position: TextCoordinate {
+                                    line: cursor.line as u32,
+                                    character,
+                                    byte_offset: Some(byte_offset as u64),
+                                    utf16_offset: None,
+                                },
+                                new_name,
+                            })
+                        }
+                        "language-code-action" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let Some(Ok(PaletteCommandOperands::CodeActionId(action_id))) =
+                                parse_palette_command_operands(
+                                    command_id,
+                                    palette_query_body(PaletteMode::Command, &self.palette.query),
+                                )
+                            else {
+                                return None;
+                            };
+                            Some(CommandDispatchIntent::RequestCodeActionProposal {
+                                buffer_id,
+                                action_id,
+                            })
                         }
                         _ => palette_command_intent(command_id),
                     })
@@ -35930,6 +36032,33 @@ mod lsp_explicit_start_tests {
         assert!(
             specs.iter().any(|s| s.id == "lsp-restart-session"),
             "lsp-restart-session palette command must be registered"
+        );
+        for command_id in [
+            "language-format",
+            "language-rename",
+            "language-organize-imports",
+            "language-code-action",
+        ] {
+            assert!(
+                specs.iter().any(|spec| spec.id == command_id),
+                "{command_id} palette command must be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn pr12_language_palette_operands_are_parsed() {
+        assert_eq!(
+            parse_palette_command_operands("language-rename", "language rename NewName"),
+            Some(Ok(PaletteCommandOperands::RenameName(
+                "NewName".to_string(),
+            )))
+        );
+        assert_eq!(
+            parse_palette_command_operands("language-code-action", "code action quick-fix"),
+            Some(Ok(PaletteCommandOperands::CodeActionId(
+                "quick-fix".to_string()
+            )))
         );
     }
 

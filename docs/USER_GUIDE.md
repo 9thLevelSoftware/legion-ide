@@ -120,6 +120,11 @@ Rename, format, code actions, and organize imports are proposal-mediated.
 Proposal generation is complete, and apply is live through the proposal
 pipeline (`P3.F1.T2`). See `plans/product-readiness-ledger.md` PR-LANG-001
 for the current gate status (still Substrate validated).
+**Write-side language proposals:**
+Rename (`F2`), format (`Shift+Alt+F`), organize imports (`Ctrl+Shift+O`), and code actions are
+reachable from the command palette and remain proposal-mediated. Each request creates, validates,
+and previews an edit through the existing proposal card before any apply step. The readiness ledger
+still records the separate evidence gate for PR-LANG-001; a local preview is not a 3-OS promotion.
 
 ## Support and release surfaces
 

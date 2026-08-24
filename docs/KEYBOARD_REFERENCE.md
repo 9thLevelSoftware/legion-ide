@@ -30,6 +30,9 @@ Treat the labels as the product source of truth for the current profile and plat
 | Completion popup | Dismiss | `Esc` | Close the popup without inserting. |
 | Hover tooltip | Dismiss | `Esc` | Close the hover tooltip (re-opens only when new hover data arrives). |
 | Editor | Go to definition | Command palette → `GoToDefinition` | Navigate to the definition site for the symbol under the cursor. |
+| Editor | Rename symbol | `F2` | Opens the language rename command; enter the replacement name and review the proposal before applying. |
+| Editor | Format document | `Shift+Alt+F` | Opens the formatting proposal preview for the active buffer. |
+| Editor | Organize imports | `Ctrl+Shift+O` | Opens the organize-imports proposal preview for the active buffer. |
 | Editor | Add cursor above | `Ctrl+Alt+↑` | Adds a cursor one line above each existing one. A cursor on the first line adds nothing rather than stacking a duplicate. |
 | Editor | Add cursor below | `Ctrl+Alt+↓` | Adds a cursor one line below each existing one. Columns are clamped per line, so a cursor in a long line lands at a short line's end. |
 | Editor | Collapse to one cursor | `Esc` | Only while more than one cursor is active; otherwise `Esc` is left for the completion popup, hover tooltip, and Vim mode exit. |

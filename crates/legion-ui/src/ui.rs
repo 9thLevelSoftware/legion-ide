@@ -1509,6 +1509,18 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "ProblemPrev".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("F2", false, false, false),
+            action_label: "RenameSymbol".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F", false, true, true),
+            action_label: "FormatDocument".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("O", true, true, false),
+            action_label: "OrganizeImports".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("F5", false, false, false),
             action_label: "DebugStart".into(),
         },
