@@ -1476,6 +1476,14 @@ impl DesktopRuntime {
         self.shell.projection_snapshot()
     }
 
+    /// Drain Git inspections to completion for deterministic tests and golden paths.
+    pub fn drain_git_until_idle(&mut self) {
+        self.app.drain_git_until_idle();
+        if let Ok(snapshot) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+            self.shell.replace_projection_snapshot(snapshot);
+        }
+    }
+
     /// Return durable checkpoint summaries from the app-owned checkpoint store.
     ///
     /// Usable by callers that cannot depend on `legion-storage` directly.
@@ -3354,6 +3362,7 @@ impl DesktopRuntime {
 
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
+        self.app.drain_git_inspection();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
 
         // T6: auto-open popup when new completions arrive from the LSP worker.

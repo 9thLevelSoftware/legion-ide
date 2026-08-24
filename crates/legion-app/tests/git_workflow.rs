@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use legion_app::{AppCommandOutcome, AppComposition};
+use legion_app::AppComposition;
 use legion_editor::{TextEdit, TextPosition};
 use legion_ui::{
     CommandDispatchIntent, GitConflictChoiceProjection, GitDiffStrategyProjection,
@@ -153,13 +153,9 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert_eq!(projection.changed_files.len(), 1);
     assert_eq!(
@@ -204,15 +200,11 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         .expect("unstaged hunk should exist")
         .hunk_id
         .clone();
-    let staged = match app
-        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk {
-            hunk_id: hunk_id.clone(),
-        })
-        .expect("stage hunk should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::StageGitHunk {
+        hunk_id: hunk_id.clone(),
+    })
+    .expect("stage hunk should dispatch");
+    let staged = app.drain_git_until_idle();
     assert!(
         staged
             .hunks
@@ -230,15 +222,11 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         .expect("staged hunk should exist")
         .hunk_id
         .clone();
-    let unstaged = match app
-        .dispatch_ui_intent(CommandDispatchIntent::UnstageGitHunk {
-            hunk_id: staged_hunk_id,
-        })
-        .expect("unstage hunk should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::UnstageGitHunk {
+        hunk_id: staged_hunk_id,
+    })
+    .expect("unstage hunk should dispatch");
+    let unstaged = app.drain_git_until_idle();
     assert!(
         unstaged
             .hunks
@@ -278,13 +266,9 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
     let hunk_id = projection
         .hunks
         .iter()
@@ -292,13 +276,9 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
         .expect("unstaged hunk should exist")
         .hunk_id
         .clone();
-    let staged = match app
-        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
-        .expect("stage hunk should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
+        .expect("stage hunk should dispatch");
+    let staged = app.drain_git_until_idle();
     assert!(
         staged
             .hunks
@@ -306,15 +286,11 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
             .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
     );
 
-    let committed = match app
-        .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
-            message: "feat: update alpha".to_string(),
-        })
-        .expect("commit should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
+        message: "feat: update alpha".to_string(),
+    })
+    .expect("commit should dispatch");
+    let committed = app.drain_git_until_idle();
     assert!(
         committed
             .hunks
@@ -370,13 +346,9 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -396,16 +368,12 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
         "accept_incoming action should be present"
     );
 
-    let resolved = match app
-        .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
-            path: "src/lib.rs".to_string(),
-            choice: GitConflictChoiceProjection::AcceptCurrent,
-        })
-        .expect("resolve conflict should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
+        path: "src/lib.rs".to_string(),
+        choice: GitConflictChoiceProjection::AcceptCurrent,
+    })
+    .expect("resolve conflict should dispatch");
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),
@@ -470,13 +438,9 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -493,16 +457,12 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
     );
 
     // Accept incoming side to verify the buffer is synchronized.
-    let resolved = match app
-        .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
-            path: "src/lib.rs".to_string(),
-            choice: GitConflictChoiceProjection::AcceptIncoming,
-        })
-        .expect("resolve conflict should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
+        path: "src/lib.rs".to_string(),
+        choice: GitConflictChoiceProjection::AcceptIncoming,
+    })
+    .expect("resolve conflict should dispatch");
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),
@@ -616,13 +576,9 @@ fn git_workflow_rejects_conflict_resolution_when_buffer_is_dirty() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -727,13 +683,9 @@ fn git_workflow_rejects_conflict_resolution_from_subdirectory_when_buffer_dirty(
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -847,13 +799,9 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("git refresh should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("git refresh should dispatch");
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -870,16 +818,12 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
     );
 
     // Resolve with repo-relative path should succeed and sync the open buffer.
-    let resolved = match app
-        .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
-            path: "src/lib.rs".to_string(),
-            choice: GitConflictChoiceProjection::AcceptCurrent,
-        })
-        .expect("resolve conflict should dispatch")
-    {
-        AppCommandOutcome::GitUpdated(projection) => projection,
-        other => panic!("expected git projection, got {other:?}"),
-    };
+    app.dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
+        path: "src/lib.rs".to_string(),
+        choice: GitConflictChoiceProjection::AcceptCurrent,
+    })
+    .expect("resolve conflict should dispatch");
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),

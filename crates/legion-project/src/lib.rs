@@ -8,7 +8,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobSet};
 use ignore::WalkBuilder;
@@ -80,6 +81,7 @@ const WORKSPACE_SEARCH_MAX_FILE_BYTES: u64 = 256 * 1024;
 /// Number of bytes inspected by the binary sniff in the streaming search path.
 /// Matches the 8 KiB heuristic used by `git diff --stat` and GNU `grep`.
 const SEARCH_BINARY_SNIFF_WINDOW: usize = 8192;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 
 type WorkspaceScanResult = (
     Vec<FileTreeNode>,
@@ -1945,6 +1947,8 @@ fn git_stdout(
         .current_dir(root)
         .arg("--literal-pathspecs")
         .args(["-c", "core.quotePath=false"])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .args(args);
     let output = if let Some(input) = input {
         let mut child = command
@@ -1973,12 +1977,41 @@ fn git_stdout(
                 source,
             })?
     } else {
-        command
-            .output()
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|source| GitInspectionError::Launch {
                 command: command_label.clone(),
                 source,
-            })?
+            })?;
+        let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+        loop {
+            if child
+                .try_wait()
+                .map_err(|source| GitInspectionError::Launch {
+                    command: command_label.clone(),
+                    source,
+                })?
+                .is_some()
+            {
+                break child
+                    .wait_with_output()
+                    .map_err(|source| GitInspectionError::Launch {
+                        command: command_label.clone(),
+                        source,
+                    })?;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitInspectionError::CommandFailed {
+                    command: command_label,
+                    stderr: format!("timed out after {}ms", GIT_COMMAND_TIMEOUT.as_millis()),
+                });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
     };
 
     if output.status.success() {

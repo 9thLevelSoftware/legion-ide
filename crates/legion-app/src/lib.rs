@@ -31,9 +31,13 @@ use legion_ai_providers::{
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
 
+mod assist_proposal;
+mod git_inspection;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
+use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
+use git_inspection::{GitInspectionRequest, GitWorker};
 
 pub mod terminal_policy;
 
@@ -165,8 +169,8 @@ use legion_project::{
     WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
     WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
     WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
-    WorkspaceRestoreFileOp, WorkspaceSaveRequest, collect_git_snapshot, commit_git_changes,
-    create_git_branch, delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
+    WorkspaceRestoreFileOp, WorkspaceSaveRequest, commit_git_changes, create_git_branch,
+    delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
     prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
     stage_git_hunk, stage_git_path, stash_git_changes, switch_git_branch, unstage_git_hunk,
     unstage_git_path,
@@ -302,12 +306,12 @@ use legion_ui::ui::{
     EditorViewportStateProjection, ExcerptSurfaceLineProjection, ExcerptSurfaceProjection,
     ExcerptSurfaceSectionProjection, GitBlameLineProjection, GitCommitProjection,
     GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
-    PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
-    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    TestExplorerProjection, ThemePreferenceProjection, ToastVerbosityProjection,
-    WorkspaceSessionRecordProjection,
+    GitHunkStageProjection, GitProjection, GitRefreshState, GitWorktreeKindProjection,
+    GitWorktreeProjection, PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind,
+    SearchProjection, SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection,
+    SettingsProjection, StructuralSearchCaptureProjection, StructuralSearchMatchProjection,
+    StructuralSearchProjection, TestExplorerProjection, ThemePreferenceProjection,
+    ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
@@ -12691,6 +12695,8 @@ fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
         commit_validation_errors: Vec::new(),
         local_history_entries: Vec::new(),
         remote_policy_audit: Vec::new(),
+        refresh_state: GitRefreshState::Idle,
+        stale: false,
     }
 }
 
@@ -14043,6 +14049,8 @@ pub struct AppComposition {
     search_projection: SearchProjection,
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
+    git_worker: GitWorker,
+    git_latest_generation: u64,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
@@ -14394,6 +14402,8 @@ impl AppComposition {
             search_projection: SearchProjection::idle(),
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
+            git_worker: GitWorker::new(),
+            git_latest_generation: 0,
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             git_remote_policy_audit: Vec::new(),
@@ -17737,6 +17747,7 @@ impl AppComposition {
         &mut self,
         intent: CommandDispatchIntent,
     ) -> Result<AppCommandOutcome, AppCompositionError> {
+        self.drain_git_inspection();
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
@@ -25960,6 +25971,8 @@ impl AppComposition {
                 diagnostics: vec!["git.workspace_not_open".to_string()],
                 generated_at: TimestampMillis::now(),
                 worktrees: Vec::new(),
+                refresh_state: GitRefreshState::Idle,
+                stale: false,
                 ..GitProjection::idle()
             };
             return self.git_projection.clone();
@@ -25969,31 +25982,61 @@ impl AppComposition {
             .active_file_path
             .as_deref()
             .map(PathBuf::from);
-        match collect_git_snapshot(
-            Path::new(root_path),
-            active_file.as_deref(),
-            GitSnapshotOptions::default(),
-        ) {
-            Ok(snapshot) => {
-                self.git_hunk_cache = snapshot
-                    .hunks
-                    .iter()
-                    .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
-                    .collect();
-                self.git_projection = git_projection_from_project(snapshot);
+        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
+        self.git_projection.refresh_state = GitRefreshState::Refreshing;
+        self.git_projection.stale = true;
+        self.git_worker.request(GitInspectionRequest {
+            root: PathBuf::from(root_path),
+            active_file,
+            options: GitSnapshotOptions::default(),
+            generation: self.git_latest_generation,
+        });
+        self.drain_git_inspection();
+        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
+        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
+        self.git_projection.clone()
+    }
+
+    /// Drain completed Git inspections without blocking the UI thread.
+    pub fn drain_git_inspection(&mut self) -> bool {
+        let mut applied = false;
+        for result in self.git_worker.drain() {
+            if result.generation != self.git_latest_generation {
+                continue;
             }
-            Err(error) => {
-                self.git_hunk_cache.clear();
-                self.git_projection = GitProjection {
-                    root_label: Some(root_path.to_string()),
-                    diagnostics: vec![format!("git.refresh_failed: {error}")],
-                    generated_at: TimestampMillis::now(),
-                    worktrees: Vec::new(),
-                    ..GitProjection::idle()
-                };
+            applied = true;
+            match result.result {
+                Ok(snapshot) => {
+                    self.git_hunk_cache = snapshot
+                        .hunks
+                        .iter()
+                        .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
+                        .collect();
+                    self.git_projection = git_projection_from_project(snapshot);
+                    self.git_projection.refresh_state = GitRefreshState::Idle;
+                    self.git_projection.stale = false;
+                }
+                Err(error) => {
+                    self.git_hunk_cache.clear();
+                    let message = error.to_string();
+                    let refresh_state = if message.to_ascii_lowercase().contains("authentication")
+                        || message.to_ascii_lowercase().contains("terminal prompts")
+                    {
+                        GitRefreshState::AuthRequired
+                    } else if message.to_ascii_lowercase().contains("timed out") {
+                        GitRefreshState::TimedOut
+                    } else {
+                        GitRefreshState::Failed
+                    };
+                    self.git_projection.refresh_state = refresh_state;
+                    self.git_projection.stale = false;
+                    self.git_projection
+                        .diagnostics
+                        .push(format!("git.refresh_failed: {message}"));
+                }
             }
         }
-        // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
+        // Inject app-side navigation state - focused_hunk_id lives in AppComposition,
         // not in the project snapshot, so it must be injected after each build.
         self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
         // Same for the remote-policy audit trail: a denied push refreshes the
@@ -26005,6 +26048,18 @@ impl AppComposition {
                 .diagnostics
                 .push(format!("local_history.write_degraded: {err}"));
         }
+        applied
+    }
+
+    /// Drain Git inspections to completion for deterministic tests and golden paths.
+    pub fn drain_git_until_idle(&mut self) -> GitProjection {
+        while !self.git_worker.is_idle() {
+            self.drain_git_inspection();
+            if !self.git_worker.is_idle() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.drain_git_inspection();
         self.git_projection.clone()
     }
 

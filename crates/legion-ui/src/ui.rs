@@ -1813,6 +1813,21 @@ pub struct LocalHistoryEntryProjection {
 }
 
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefreshState {
+    /// No Git inspection is pending.
+    Idle,
+    /// A background Git inspection is running.
+    Refreshing,
+    /// The worker exceeded its bounded command timeout.
+    TimedOut,
+    /// The worker returned a non-timeout failure.
+    Failed,
+    /// Git requested credentials or another interactive action.
+    AuthRequired,
+}
+
+/// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
     /// Repository root label.
@@ -1871,6 +1886,10 @@ pub struct GitProjection {
     /// Retained across refreshes so the verdict stays visible after the
     /// projection rebuilds; empty until a push/fetch/pull is attempted.
     pub remote_policy_audit: Vec<GitRemotePolicyProjection>,
+    /// Current background inspection state.
+    pub refresh_state: GitRefreshState,
+    /// Whether the displayed rows predate the latest refresh request.
+    pub stale: bool,
 }
 
 impl GitProjection {
@@ -1898,6 +1917,8 @@ impl GitProjection {
             commit_validation_errors: Vec::new(),
             local_history_entries: Vec::new(),
             remote_policy_audit: Vec::new(),
+            refresh_state: GitRefreshState::Idle,
+            stale: false,
         }
     }
 }
