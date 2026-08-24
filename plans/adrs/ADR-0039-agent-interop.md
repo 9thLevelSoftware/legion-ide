@@ -1904,3 +1904,18 @@ expansion, never a GA blocker.
   forward-compatibility
   gate, not a
   regression guard.
+
+## Amendment - PR-21 local stdio MCP server
+
+**Date:** 2026-08-24
+**Status:** Accepted for local substrate validation; no GA promotion.
+
+PR-21 activates a deliberately narrow Legion-as-MCP-server slice:
+
+- `legion-ai-providers::mcp_server::McpStdioServer` serves newline-delimited JSON-RPC over local stdio only.
+- The server exposes only app-registered workbench tool descriptors. `tools/call` requires an injected app-owned capability gate and the default gate denies every invocation.
+- The callback boundary is proposal-mediated: this module owns protocol dispatch only and has no filesystem, terminal, process, network, VSIX, or Node authority.
+- Completion-class MCP behavior, listen sockets, HTTP serving, broad registry/install flows, and direct mutation remain out of scope.
+- App composition is responsible for mapping approved calls to existing capabilities and proposal/evidence paths; a descriptor alone never grants runtime authority.
+
+The post-GA expansion, registry marketplace, and any transport/runtime migration remain separately gated and are not implied by this amendment.
