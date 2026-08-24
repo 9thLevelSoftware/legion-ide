@@ -55,6 +55,8 @@ const REFERENCE_DOCUMENT: &str = "crates/legion-app/src/lib.rs";
 /// Keystrokes sampled for the input-to-paint percentiles.
 const INPUT_SAMPLES: usize = 64;
 
+const GIT_DISPATCH_SAMPLES: usize = 64;
+
 /// Viewport projections sampled for the scroll percentiles.
 const SCROLL_SAMPLES: usize = 64;
 
@@ -148,6 +150,7 @@ fn main() {
             records.push(measure_scroll(&mut ready));
             records.push(measure_memory_ceiling(&ready));
             records.push(measure_legion_repo_search(&mut ready));
+            records.extend(measure_git_dispatch(&mut ready));
         }
         None => {
             for name in [
@@ -155,6 +158,8 @@ fn main() {
                 "p8.scroll_jank",
                 "p8.memory_ceiling",
                 "p8.legion_repo",
+                "git.ui_dispatch_refresh",
+                "git.remote_push_does_not_block_dispatch",
             ] {
                 records.push(WorkloadRecord::unmeasured(
                     name,
@@ -205,6 +210,71 @@ fn main() {
     if records.iter().any(|record| !record.measured) {
         std::process::exit(3);
     }
+}
+
+fn measure_git_dispatch(ready: &mut ReadyWorkspace) -> Vec<WorkloadRecord> {
+    let mut refresh_samples = Vec::with_capacity(GIT_DISPATCH_SAMPLES);
+    for _ in 0..GIT_DISPATCH_SAMPLES {
+        let start = Instant::now();
+        let outcome = ready
+            .app
+            .dispatch_ui_intent(CommandDispatchIntent::RefreshGit);
+        let elapsed = start.elapsed();
+        if let Err(err) = outcome {
+            return vec![
+                WorkloadRecord::unmeasured(
+                    "git.ui_dispatch_refresh",
+                    format!("RefreshGit dispatch failed: {err:?}"),
+                ),
+                WorkloadRecord::unmeasured(
+                    "git.remote_push_does_not_block_dispatch",
+                    "RefreshGit dispatch failed before remote measurement",
+                ),
+            ];
+        }
+        refresh_samples.push(elapsed);
+    }
+
+    let mut remote_samples = Vec::with_capacity(GIT_DISPATCH_SAMPLES);
+    for _ in 0..GIT_DISPATCH_SAMPLES {
+        let start = Instant::now();
+        let outcome = ready
+            .app
+            .dispatch_ui_intent(CommandDispatchIntent::PushGitRemote {
+                remote: "perf-denied-remote".to_string(),
+            });
+        let elapsed = start.elapsed();
+        if let Err(err) = outcome {
+            return vec![
+                finish_duration_workload(
+                    "git.ui_dispatch_refresh",
+                    refresh_samples,
+                    0,
+                    "RefreshGit intent-to-return samples; no next paint or worker completion included".to_string(),
+                ),
+                WorkloadRecord::unmeasured(
+                    "git.remote_push_does_not_block_dispatch",
+                    format!("policy-denied PushGitRemote dispatch failed: {err:?}"),
+                ),
+            ];
+        }
+        remote_samples.push(elapsed);
+    }
+
+    vec![
+        finish_duration_workload(
+            "git.ui_dispatch_refresh",
+            refresh_samples,
+            0,
+            "RefreshGit intent-to-return samples on the cheap projection path; no next paint or worker completion included".to_string(),
+        ),
+        finish_duration_workload(
+            "git.remote_push_does_not_block_dispatch",
+            remote_samples,
+            0,
+            "policy-denied PushGitRemote intent-to-return samples; no remote process or network allowed".to_string(),
+        ),
+    ]
 }
 
 fn parse_args() -> Result<Args, String> {

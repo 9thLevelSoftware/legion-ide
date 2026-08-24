@@ -6,8 +6,9 @@
 
 use xtask::perf_harness::{SkeletonKind, SkeletonStatus};
 use xtask::perf_workloads::{
-    ProductBudget, ProductWorkloadRow, classify_product_row, parse_product_perf_report,
-    product_measurements, product_workload_policies, regate_with_ceiling,
+    ProductBudget, ProductWorkloadRow, classify_product_row, git_report_only_measurements,
+    parse_product_perf_report, product_measurements, product_workload_policies,
+    regate_with_ceiling,
 };
 
 fn policy(name: &str) -> xtask::perf_workloads::ProductWorkloadPolicy {
@@ -50,11 +51,43 @@ fn product_policies_cover_every_named_reference_workload() {
         "p8.memory_ceiling",
         "p8.legion_repo",
         "p8.fixture_100k_files",
+        "git.ui_dispatch_refresh",
+        "git.remote_push_does_not_block_dispatch",
     ] {
         assert!(
             names.contains(&expected),
             "product workload `{expected}` must be enforced; got {names:?}"
         );
+    }
+}
+
+#[test]
+fn git_dispatch_policies_gate_four_milliseconds_p95() {
+    for name in [
+        "git.ui_dispatch_refresh",
+        "git.remote_push_does_not_block_dispatch",
+    ] {
+        match policy(name).budget {
+            ProductBudget::Latency {
+                p50_millis,
+                p95_millis,
+            } => {
+                assert_eq!(p50_millis, 4);
+                assert_eq!(p95_millis, 4);
+            }
+            other => panic!("{name} must be a latency budget, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn git_follow_up_rows_are_explicitly_report_only() {
+    let rows = git_report_only_measurements();
+    assert_eq!(rows.len(), 3);
+    for row in rows {
+        assert!(!row.measured, "{} must not claim a measurement", row.name);
+        assert_eq!(row.status, SkeletonStatus::Skipped);
+        assert!(row.message.contains("report-only"));
     }
 }
 

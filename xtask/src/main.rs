@@ -2098,6 +2098,9 @@ fn append_product_workload_measurements(
 ) {
     let measurements = xtask::perf_workloads::run_product_workloads(workspace_root, out_dir);
     report.skeletons.extend(measurements);
+    report
+        .skeletons
+        .extend(xtask::perf_workloads::git_report_only_measurements());
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }
 
