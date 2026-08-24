@@ -112,9 +112,8 @@ impl DebugWorkflow {
         self.projection.live_adapter = false;
         self.projection.status = DebugStatusProjection {
             kind: DebugStatusKindProjection::Idle,
-            message:
-                "Debug runtime enabled (auto: live adapter if resolved, else simulated fixture)"
-                    .to_string(),
+            message: "Debug runtime enabled (auto requires a live adapter; fixture is explicit)"
+                .to_string(),
         };
         self.projection.generated_at = TimestampMillis::now();
     }
@@ -364,9 +363,8 @@ impl DebugWorkflow {
                                     "live DAP required (LEGION_DAP_MODE=live) but launch failed: {message}"
                                 ));
                             }
-                            self.projection.diagnostics.push(bounded_label(
-                                format!("live DAP unavailable, falling back to fixture: {message}"),
-                                160,
+                            return self.fail(format!(
+                                "debug adapter launch failed; no session started: {message}. Install lldb-dap or codelldb, or set LEGION_DAP_ADAPTER"
                             ));
                         }
                     }
@@ -378,7 +376,12 @@ impl DebugWorkflow {
                             .to_string(),
                     );
                 }
-                None => {}
+                None => {
+                    return self.fail(format!(
+                        "no debug adapter found for {}; install lldb-dap or codelldb, set LEGION_DAP_ADAPTER, or choose fixture mode for tests",
+                        config.adapter_type
+                    ));
+                }
             }
         }
 

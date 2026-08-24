@@ -26642,6 +26642,8 @@ impl AppComposition {
     /// Enable the DAP debug runtime for app integration tests.
     pub fn enable_debug_runtime_for_tests(&mut self) {
         self.debug_workflow.enable_runtime();
+        self.debug_workflow
+            .set_dap_mode_for_tests(legion_debug::DapMode::Fixture);
     }
 
     /// Compatibility alias for older debug integration tests.

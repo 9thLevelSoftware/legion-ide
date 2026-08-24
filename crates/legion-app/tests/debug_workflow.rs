@@ -59,7 +59,7 @@ fn debug_workflow_persists_breakpoints_launches_runtime_and_projects_docks() {
         .text(buffer_id)
         .expect("active text")
         .to_string();
-    // Fixture path (default): simulated DAP without requiring an adapter binary.
+    // Explicit fixture path: simulated DAP without requiring an adapter binary.
     app.enable_debug_runtime_for_tests();
 
     let configs = app
