@@ -361,7 +361,9 @@ fn cached_windows_uia_observation() -> Option<WindowsUiaProbeObservation> {
 }
 
 enum WindowsUiaProbeOutcome {
+    #[cfg_attr(not(windows), allow(dead_code))]
     Observed(WindowsUiaProbeObservation),
+    #[cfg_attr(not(windows), allow(dead_code))]
     RetryableMiss,
     TerminalMiss,
 }
