@@ -35,7 +35,7 @@
 //! `LEGION_DAP_MODE=fixture|live|auto` (default `auto`):
 //! - `fixture` — never resolve live (callers use simulated runtime)
 //! - `live` — require a resolution; callers must fail closed (no fixture)
-//! - `auto` — try live, fall back to fixture if unresolved or spawn fails
+//! - `auto` — try live, but report no session if unresolved or spawn fails
 //!
 //! ## Dogfood
 //!
@@ -64,7 +64,7 @@ pub enum DapMode {
     Fixture,
     /// Require live adapter; callers should fail if unresolved or spawn fails.
     Live,
-    /// Try live, otherwise fixture.
+    /// Try live; report an unavailable adapter instead of fabricating a session.
     Auto,
 }
 
@@ -354,6 +354,20 @@ mod tests {
                 "system resolve must not return fake adapter"
             );
         }
+    }
+
+    #[test]
+    fn auto_mode_does_not_resolve_an_unallowlisted_adapter() {
+        let grant = AdapterResolutionGrant::from_decision(
+            &granted_decision(DEBUG_ADAPTER_LAUNCH_CAPABILITY),
+            &["legion-test-adapter-that-is-not-installed".to_string()],
+        )
+        .expect("granted decision with a non-empty allowlist mints a grant");
+
+        assert!(
+            resolve_live_adapter(&grant, "legion-test-adapter-that-is-not-installed").is_none(),
+            "auto mode must leave the caller with no session when no permitted adapter resolves"
+        );
     }
 
     /// Granted decision for the adapters the default policy allows.

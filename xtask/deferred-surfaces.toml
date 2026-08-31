@@ -48,10 +48,10 @@ shipped composition path depends on it.
 """
 # Deliberately a file that does not exist: no ADR for the isolated extension
 # host has been written, which is precisely why the surface is frozen. The
-# number matters though — ADR-0047 is already taken by extension *distribution*,
-# a different topic, so naming it here would point whoever writes the real one
-# at a colliding number. 0050 is the next free slot.
-adr = "plans/adrs/ADR-0050-isolated-extension-host.md"
+# number matters though — ADR-0047 is extension *distribution*, ADR-0050 is
+# wasmtime runtime ratification, and ADR-0051 is canvas. 0052 is the next free
+# slot. Do not write that ADR from this pointer.
+adr = "plans/adrs/ADR-0052-isolated-extension-host.md"
 policy = "crates/legion-security/src/policy.rs"
 tests = "crates/legion-vscode-compat/tests"
 evidence = "plans/evidence/production/PR-VSC-002"

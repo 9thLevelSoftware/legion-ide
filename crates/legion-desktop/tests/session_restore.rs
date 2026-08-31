@@ -178,7 +178,7 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
     );
     assert_eq!(
         snapshot.active_buffer_projection.small_buffer_text(),
-        Some("second")
+        Some("secondSECRET_DIRTY_BODY")
     );
     assert!(restored.explorer_path_expanded(&explorer_path));
     assert_eq!(

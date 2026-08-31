@@ -55,6 +55,8 @@ const REFERENCE_DOCUMENT: &str = "crates/legion-app/src/lib.rs";
 /// Keystrokes sampled for the input-to-paint percentiles.
 const INPUT_SAMPLES: usize = 64;
 
+const GIT_DISPATCH_SAMPLES: usize = 64;
+
 /// Viewport projections sampled for the scroll percentiles.
 const SCROLL_SAMPLES: usize = 64;
 
@@ -148,6 +150,7 @@ fn main() {
             records.push(measure_scroll(&mut ready));
             records.push(measure_memory_ceiling(&ready));
             records.push(measure_legion_repo_search(&mut ready));
+            records.extend(measure_git_dispatch(&mut ready));
         }
         None => {
             for name in [
@@ -155,6 +158,8 @@ fn main() {
                 "p8.scroll_jank",
                 "p8.memory_ceiling",
                 "p8.legion_repo",
+                "git.ui_dispatch_refresh",
+                "git.remote_push_does_not_block_dispatch",
             ] {
                 records.push(WorkloadRecord::unmeasured(
                     name,
@@ -205,6 +210,71 @@ fn main() {
     if records.iter().any(|record| !record.measured) {
         std::process::exit(3);
     }
+}
+
+fn measure_git_dispatch(ready: &mut ReadyWorkspace) -> Vec<WorkloadRecord> {
+    let mut refresh_samples = Vec::with_capacity(GIT_DISPATCH_SAMPLES);
+    for _ in 0..GIT_DISPATCH_SAMPLES {
+        let start = Instant::now();
+        let outcome = ready
+            .app
+            .dispatch_ui_intent(CommandDispatchIntent::RefreshGit);
+        let elapsed = start.elapsed();
+        if let Err(err) = outcome {
+            return vec![
+                WorkloadRecord::unmeasured(
+                    "git.ui_dispatch_refresh",
+                    format!("RefreshGit dispatch failed: {err:?}"),
+                ),
+                WorkloadRecord::unmeasured(
+                    "git.remote_push_does_not_block_dispatch",
+                    "RefreshGit dispatch failed before remote measurement",
+                ),
+            ];
+        }
+        refresh_samples.push(elapsed);
+    }
+
+    let mut remote_samples = Vec::with_capacity(GIT_DISPATCH_SAMPLES);
+    for _ in 0..GIT_DISPATCH_SAMPLES {
+        let start = Instant::now();
+        let outcome = ready
+            .app
+            .dispatch_ui_intent(CommandDispatchIntent::PushGitRemote {
+                remote: "perf-denied-remote".to_string(),
+            });
+        let elapsed = start.elapsed();
+        if let Err(err) = outcome {
+            return vec![
+                finish_duration_workload(
+                    "git.ui_dispatch_refresh",
+                    refresh_samples,
+                    0,
+                    "RefreshGit intent-to-return samples; no next paint or worker completion included".to_string(),
+                ),
+                WorkloadRecord::unmeasured(
+                    "git.remote_push_does_not_block_dispatch",
+                    format!("policy-denied PushGitRemote dispatch failed: {err:?}"),
+                ),
+            ];
+        }
+        remote_samples.push(elapsed);
+    }
+
+    vec![
+        finish_duration_workload(
+            "git.ui_dispatch_refresh",
+            refresh_samples,
+            0,
+            "RefreshGit intent-to-return samples on the cheap projection path; no next paint or worker completion included".to_string(),
+        ),
+        finish_duration_workload(
+            "git.remote_push_does_not_block_dispatch",
+            remote_samples,
+            0,
+            "policy-denied PushGitRemote intent-to-return samples; no remote process or network allowed".to_string(),
+        ),
+    ]
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -516,61 +586,64 @@ fn measure_memory_ceiling(ready: &ReadyWorkspace) -> WorkloadRecord {
 
 /// Real product workspace search over this repository.
 fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
+    match run_workspace_search(&mut ready.app, REPO_NEEDLE, 100_000) {
+        Ok((0, elapsed)) => {
+            // Zero hits means the walk never read this file's contents, so the
+            // number would describe a directory listing rather than a search.
+            WorkloadRecord::unmeasured(
+                "p8.legion_repo",
+                format!("repo search found 0 hits for the planted needle after {elapsed:?}"),
+            )
+        }
+        Ok((hits, elapsed)) => {
+            let micros = elapsed.as_micros() as u64;
+            WorkloadRecord {
+                name: "p8.legion_repo",
+                measured: true,
+                sample_count: 1,
+                fixture_bytes: 0,
+                p50_micros: micros,
+                p95_micros: micros,
+                total_micros: micros,
+                bytes_value: 0,
+                detail: format!(
+                    "real product RunSearch over the Legion repository: {:.0}ms, {hits} hit(s) for the \
+                     planted needle",
+                    elapsed.as_secs_f64() * 1000.0
+                ),
+            }
+        }
+        Err(reason) => WorkloadRecord::unmeasured("p8.legion_repo", reason),
+    }
+}
+
+/// Dispatch a workspace search and wait for the off-thread worker to finish.
+///
+/// `RunSearch` returns a Running snapshot immediately; the planted-needle
+/// workloads measure the completed walk, so they have to drain the worker
+/// before counting hits.
+fn run_workspace_search(
+    app: &mut AppComposition,
+    query: &str,
+    limit: usize,
+) -> Result<(usize, Duration), String> {
     let start = Instant::now();
-    let outcome = ready
-        .app
-        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-            scope: SearchScopeProjection::Workspace,
-            query: REPO_NEEDLE.to_string(),
-            // High enough that the walker cannot stop early: the workload is a
-            // full-repo scan, and a search that quits at 50 hits measures nothing.
-            limit: 100_000,
-            case_sensitive: Some(true),
-            whole_word: None,
-            use_regex: None,
-        });
-    let elapsed = start.elapsed();
-
-    let hits = match outcome {
-        Ok(AppCommandOutcome::SearchUpdated(projection)) => projection.results.len(),
-        Ok(other) => {
-            return WorkloadRecord::unmeasured(
-                "p8.legion_repo",
-                format!("expected SearchUpdated, got {other:?}"),
-            );
-        }
-        Err(err) => {
-            return WorkloadRecord::unmeasured(
-                "p8.legion_repo",
-                format!("RunSearch dispatch failed: {err:?}"),
-            );
-        }
-    };
-    if hits == 0 {
-        // Zero hits means the walk never read this file's contents, so the
-        // number would describe a directory listing rather than a search.
-        return WorkloadRecord::unmeasured(
-            "p8.legion_repo",
-            format!("repo search found 0 hits for the planted needle after {elapsed:?}"),
-        );
+    match app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
+        scope: SearchScopeProjection::Workspace,
+        query: query.to_string(),
+        // High enough that the walker cannot stop early: the workload is a
+        // full-repo scan, and a search that quits at 50 hits measures nothing.
+        limit,
+        case_sensitive: Some(true),
+        whole_word: None,
+        use_regex: None,
+    }) {
+        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
+        Ok(other) => return Err(format!("expected SearchUpdated, got {other:?}")),
+        Err(err) => return Err(format!("RunSearch dispatch failed: {err:?}")),
     }
-
-    let micros = elapsed.as_micros() as u64;
-    WorkloadRecord {
-        name: "p8.legion_repo",
-        measured: true,
-        sample_count: 1,
-        fixture_bytes: 0,
-        p50_micros: micros,
-        p95_micros: micros,
-        total_micros: micros,
-        bytes_value: 0,
-        detail: format!(
-            "real product RunSearch over the Legion repository: {:.0}ms, {hits} hit(s) for the \
-             planted needle",
-            elapsed.as_secs_f64() * 1000.0
-        ),
-    }
+    let projection = app.drain_search_until_idle();
+    Ok((projection.results.len(), start.elapsed()))
 }
 
 /// Generate the 100K-file reference workspace and search it through the real
@@ -605,36 +678,15 @@ fn measure_fixture_100k() -> WorkloadRecord {
     // which of them moved.
     let open_elapsed = open_start.elapsed();
 
-    let start = Instant::now();
-    let outcome = app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-        scope: SearchScopeProjection::Workspace,
-        query: FIXTURE_NEEDLE.to_string(),
-        limit: 100_000,
-        case_sensitive: Some(true),
-        whole_word: None,
-        use_regex: None,
-    });
-    let elapsed = start.elapsed();
-
-    let hits = match outcome {
-        Ok(AppCommandOutcome::SearchUpdated(projection)) => projection.results.len(),
-        Ok(other) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return WorkloadRecord::unmeasured(
-                "p8.fixture_100k_files",
-                format!("expected SearchUpdated, got {other:?}"),
-            );
-        }
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return WorkloadRecord::unmeasured(
-                "p8.fixture_100k_files",
-                format!("RunSearch dispatch failed: {err:?}"),
-            );
-        }
-    };
+    let search = run_workspace_search(&mut app, FIXTURE_NEEDLE, 100_000);
     let _ = std::fs::remove_dir_all(&root);
 
+    let (hits, elapsed) = match search {
+        Ok(result) => result,
+        Err(reason) => {
+            return WorkloadRecord::unmeasured("p8.fixture_100k_files", reason);
+        }
+    };
     if hits == 0 {
         return WorkloadRecord::unmeasured(
             "p8.fixture_100k_files",

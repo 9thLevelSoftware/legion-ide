@@ -1,0 +1,111 @@
+name: Release blocker
+description: A gap that forbids a named release claim (QUAL.11). Do not use Bug report for this.
+title: "[Release-blocker]: "
+labels: ["release-blocker", "qual-11"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template only for QUAL.11 release blockers.
+        Taxonomy: `plans/qual-11-release-blocker-taxonomy.md`.
+        Sequence: `plans/p0-installed-product-sequence-v0.1.md`.
+        Do not file generic product bugs here — use Bug report.
+  - type: dropdown
+    id: gap_id
+    attributes:
+      label: GAP / P0 id
+      description: One id from the current P0 register or a GAP-* task.
+      options:
+        - P0-01 Installed-product truth
+        - P0-02 Release signing
+        - P0-03 Update safety
+        - P0-04 Data safety
+        - P0-05 Accessibility
+        - P0-06 Manual / no-AI proof
+        - P0-07 Governance
+        - P0-08 Documentation truth
+        - P0-09 Performance
+        - P0-10 Support / legal
+        - GAP-* (name it in Remaining gap)
+    validations:
+      required: true
+  - type: dropdown
+    id: ledger_row
+    attributes:
+      label: Ledger row
+      options:
+        - PR-UI-001
+        - PR-UI-002
+        - PR-LANG-001
+        - PR-LANG-002
+        - PR-AI-001
+        - PR-AI-002
+        - PR-VSC-001
+        - PR-VSC-002
+        - PR-ENT-001
+        - PR-ENT-002
+        - PR-REL-001
+        - none (process-only; explain)
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - severity-p0 (blocks preview / any public claim)
+        - severity-p1 (blocks focused Rust-first IDE)
+        - severity-p2 (blocks universal / extension-platform claim)
+        - severity-p3 (blocks autonomous / enterprise claim)
+    validations:
+      required: true
+  - type: dropdown
+    id: claim_blocked
+    attributes:
+      label: Intended claim blocked
+      options:
+        - dogfood
+        - preview
+        - public-alpha
+        - rust-ga
+        - universal-ga
+        - autonomous-ga
+        - enterprise
+    validations:
+      required: true
+  - type: dropdown
+    id: evidence_level
+    attributes:
+      label: Current evidence level
+      description: 0 absent … 5 installed signed 3-OS artifact. See the sequence ladder.
+      options:
+        - "0 unverified / absent"
+        - "1 unit"
+        - "2 subsystem"
+        - "3 application reachability"
+        - "4 rendered GUI"
+        - "5 installed-artifact"
+    validations:
+      required: true
+  - type: input
+    id: owner
+    attributes:
+      label: Owner
+      description: GitHub login or team that will produce the close-out evidence.
+      placeholder: "@9thLevelSoftware"
+    validations:
+      required: true
+  - type: textarea
+    id: remaining
+    attributes:
+      label: Remaining gap
+      description: One present-tense sentence. What is still missing?
+    validations:
+      required: true
+  - type: textarea
+    id: close_out
+    attributes:
+      label: Close-out evidence
+      description: Repo path or hosted run URL that will exist when this is no longer a blocker.
+    validations:
+      required: true

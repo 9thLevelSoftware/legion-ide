@@ -58,6 +58,12 @@ Every current workspace crate must have an explicit internal dependency policy e
   - `legion-protocol`
   - `legion-security`
 
+  The external `gix` dependency is limited to the Git inspection collector.
+  `GitInspectionBackend::Auto` remains CLI-equivalent by default; each
+  operation must use a typed gix path only when parity is proven, otherwise it
+  must name and retain an explicit CLI fallback. Git mutation and remote
+  operations remain CLI-backed.
+
 - `legion-editor` may depend on:
   - `legion-observability`
   - `legion-protocol`
@@ -871,3 +877,9 @@ Phase 8 production capability names are reserved for security-broker decisions b
 Phase 13 authorizes only policy-first, metadata-first Legion Workflow orchestration. `legion-protocol` may define `LegionWorkflowSession`, worker, dependency, conflict, verification, sign-off, projection, and merge-readiness DTOs without taking dependencies on runtime crates. `legion-agent` may later coordinate workflow teams only through existing delegated-task primitives and assisted-AI provider-route metadata; it must not gain `legion-app`, `legion-ui`, `legion-desktop`, `legion-editor`, `legion-project`, `legion-terminal`, or direct workspace mutation authority. `legion-tracker` and `legion-memory` may later persist metadata-only workflow/evidence records through their existing storage boundaries and retention policies. `legion-app` remains the sole composition owner for workflow execution, verification, sign-off, dirty/stale/conflict blockers, proposal lifecycle, and approval-gated merge readiness. `legion-ui` and `legion-desktop` remain projection/request-only surfaces for Legion Workflow command centers and must not own workflow state, provider calls, terminal execution, proposal application, tracker records, or memory retention.
 
 Autonomous merge/apply remains forbidden. Main-workspace mutation must continue through app-owned proposal-mediated authority, with explicit approval and rollback/checkpoint metadata before any merge-readiness claim can progress.
+
+### PR-21 local MCP server boundary
+
+PR-21 authorizes a minimal local MCP server module in `legion-ai-providers` using the existing `legion-protocol` and `legion-security` contracts. The module is stdio-only, dispatches metadata-safe workbench descriptors, and denies tool calls by default until `legion-app` composition supplies an approved capability/proposal callback. It must not gain filesystem, terminal, process, network, VSIX, or Node authority.
+
+This slice does not add MCP runtime dependencies to `legion-agent`, `legion-ui`, `legion-desktop`, or `legion-cli`; it does not add `rmcp`, `modelcontextprotocol`, or `agent-client-protocol`; and it does not introduce a listen socket, HTTP server, completion-class MCP tool, registry marketplace, or direct mutation path. Any future expansion requires a new phase gate and ADR amendment.

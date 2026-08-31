@@ -1,5 +1,11 @@
 //! Metadata-only platform and accessibility smoke projection.
 
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+
 use legion_protocol::{ExtensionPermissionState, TextCoordinate};
 use legion_ui::ShellProjectionSnapshot;
 
@@ -10,6 +16,23 @@ use crate::{
 
 const ADAPTER_PATH_PASSED: &str = "adapter-path passed";
 const NOT_OBSERVED: &str = "not observed";
+const OS_TREE_NOT_OBSERVED: &str = "OS tree not observed";
+const WINDOWS_UIA_PROBE_SCRIPT: &str = "scripts/a11y-uia-walk.ps1";
+/// Smoke rebuilds this snapshot every frame; the PowerShell walk is not cheap.
+const WINDOWS_UIA_PROBE_RETRY: Duration = Duration::from_millis(250);
+
+struct WindowsUiaProbeCache {
+    last_attempt: Option<Instant>,
+    observation: Option<WindowsUiaProbeObservation>,
+    /// Script missing or UIA assemblies unavailable will not change mid-run.
+    terminal_miss: bool,
+}
+
+static WINDOWS_UIA_PROBE_CACHE: Mutex<WindowsUiaProbeCache> = Mutex::new(WindowsUiaProbeCache {
+    last_attempt: None,
+    observation: None,
+    terminal_miss: false,
+});
 
 /// Adapter command paths that were exercised without OS payload capture.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -45,6 +68,15 @@ pub struct NativePlatformObservation {
     pub focused: Option<bool>,
     /// Native pixels-per-point scale when observed.
     pub pixels_per_point: Option<f32>,
+    /// Committed Windows UIA walk when that probe actually succeeded.
+    pub os_accessibility_tree: Option<WindowsUiaProbeObservation>,
+}
+
+/// Observation produced by `scripts/a11y-uia-walk.ps1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsUiaProbeObservation {
+    /// Control-view descendants enumerated under a top-level window.
+    pub descendant_count: usize,
 }
 
 /// A projected accessibility node label derived from metadata-only UI state.
@@ -124,7 +156,10 @@ pub fn build_platform_smoke_snapshot(
         theme_smoke: "adapter theme defaults available".to_string(),
         high_dpi_smoke: high_dpi_status(native.pixels_per_point),
         focus_traversal_smoke: focus_traversal_status(node_count, native.focused),
-        accessibility_tree_smoke: accessibility_tree_status(node_count),
+        accessibility_tree_smoke: accessibility_tree_status(
+            node_count,
+            native.os_accessibility_tree,
+        ),
         accessibility_projection_node_count: node_count,
         accessibility_nodes,
     }
@@ -214,12 +249,193 @@ fn focus_traversal_status(node_count: usize, focused: Option<bool>) -> String {
     }
 }
 
-fn accessibility_tree_status(node_count: usize) -> String {
+fn accessibility_tree_status(
+    node_count: usize,
+    os_tree: Option<WindowsUiaProbeObservation>,
+) -> String {
     if node_count == 0 {
-        NOT_OBSERVED.to_string()
-    } else {
-        format!("metadata-only projection accessibility nodes {node_count}; OS tree not observed")
+        return NOT_OBSERVED.to_string();
     }
+
+    let os_tree = os_tree.or_else(cached_windows_uia_observation);
+    format!(
+        "metadata-only projection accessibility nodes {node_count}; {}",
+        os_accessibility_tree_clause(os_tree)
+    )
+}
+
+fn os_accessibility_tree_clause(os_tree: Option<WindowsUiaProbeObservation>) -> String {
+    match os_tree {
+        Some(observation) => format!(
+            "Windows UIA observed {} descendants",
+            observation.descendant_count
+        ),
+        None => OS_TREE_NOT_OBSERVED.to_string(),
+    }
+}
+
+/// Parse stdout from the committed Windows UI Automation probe.
+///
+/// The winit event-target pane is a second top-level window with zero
+/// descendants; the product window's count is the maximum enumerated line.
+#[must_use]
+pub fn parse_windows_uia_probe_output(stdout: &str) -> Option<WindowsUiaProbeObservation> {
+    let mut saw_ok = false;
+    let mut descendant_count = 0_usize;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line == "UIA_WALK_OK" {
+            saw_ok = true;
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("DESCENDANTS_ENUMERATED:") else {
+            continue;
+        };
+        if let Ok(count) = rest.trim().parse::<usize>() {
+            descendant_count = descendant_count.max(count);
+        }
+    }
+    saw_ok.then_some(WindowsUiaProbeObservation { descendant_count })
+}
+
+/// Locate `scripts/a11y-uia-walk.ps1` from the crate or the process cwd.
+#[must_use]
+pub fn committed_windows_uia_probe_script() -> Option<PathBuf> {
+    windows_uia_probe_script_path()
+}
+
+/// Run the committed Windows UIA probe against this process.
+///
+/// Non-Windows hosts, a missing script, or a walk that did not print
+/// `UIA_WALK_OK` stay `None`. This never invents a macOS or Linux probe.
+#[must_use]
+pub fn probe_windows_uia_tree() -> Option<WindowsUiaProbeObservation> {
+    match run_windows_uia_probe_outcome() {
+        WindowsUiaProbeOutcome::Observed(observation) => {
+            if let Ok(mut cache) = WINDOWS_UIA_PROBE_CACHE.lock() {
+                cache.observation = Some(observation);
+            }
+            Some(observation)
+        }
+        WindowsUiaProbeOutcome::TerminalMiss => {
+            if let Ok(mut cache) = WINDOWS_UIA_PROBE_CACHE.lock() {
+                cache.terminal_miss = true;
+            }
+            None
+        }
+        WindowsUiaProbeOutcome::RetryableMiss => None,
+    }
+}
+
+fn cached_windows_uia_observation() -> Option<WindowsUiaProbeObservation> {
+    {
+        let cache = WINDOWS_UIA_PROBE_CACHE.lock().ok()?;
+        if let Some(observation) = cache.observation {
+            return Some(observation);
+        }
+        if cache.terminal_miss {
+            return None;
+        }
+        if cache
+            .last_attempt
+            .is_some_and(|at| at.elapsed() < WINDOWS_UIA_PROBE_RETRY)
+        {
+            return None;
+        }
+    }
+
+    let outcome = run_windows_uia_probe_outcome();
+    let mut cache = WINDOWS_UIA_PROBE_CACHE.lock().ok()?;
+    cache.last_attempt = Some(Instant::now());
+    match outcome {
+        WindowsUiaProbeOutcome::Observed(observation) => {
+            cache.observation = Some(observation);
+            Some(observation)
+        }
+        WindowsUiaProbeOutcome::TerminalMiss => {
+            cache.terminal_miss = true;
+            None
+        }
+        WindowsUiaProbeOutcome::RetryableMiss => None,
+    }
+}
+
+enum WindowsUiaProbeOutcome {
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Observed(WindowsUiaProbeObservation),
+    #[cfg_attr(not(windows), allow(dead_code))]
+    RetryableMiss,
+    TerminalMiss,
+}
+
+fn run_windows_uia_probe_outcome() -> WindowsUiaProbeOutcome {
+    #[cfg(windows)]
+    {
+        run_windows_uia_probe_outcome_windows()
+    }
+    #[cfg(not(windows))]
+    {
+        WindowsUiaProbeOutcome::TerminalMiss
+    }
+}
+
+fn windows_uia_probe_script_path() -> Option<PathBuf> {
+    // Resolve only from the shipped tree next to this crate. Walking cwd would
+    // let an untrusted workspace supply `scripts/a11y-uia-walk.ps1` that then
+    // runs under PowerShell `-ExecutionPolicy Bypass`.
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(WINDOWS_UIA_PROBE_SCRIPT);
+    let canonical = shipped.canonicalize().ok()?;
+    if !canonical.is_file() {
+        return None;
+    }
+    if canonical.file_name()?.to_str()? != "a11y-uia-walk.ps1" {
+        return None;
+    }
+    Some(canonical)
+}
+
+#[cfg(windows)]
+fn run_windows_uia_probe_outcome_windows() -> WindowsUiaProbeOutcome {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let Some(script) = windows_uia_probe_script_path() else {
+        return WindowsUiaProbeOutcome::TerminalMiss;
+    };
+    let Some(proc_name) = current_process_name() else {
+        return WindowsUiaProbeOutcome::RetryableMiss;
+    };
+
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script)
+        .arg("-ProcName")
+        .arg(&proc_name)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => return WindowsUiaProbeOutcome::TerminalMiss,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.contains("UIA_LOAD_FAILED") {
+        return WindowsUiaProbeOutcome::TerminalMiss;
+    }
+    match parse_windows_uia_probe_output(&stdout) {
+        Some(observation) => WindowsUiaProbeOutcome::Observed(observation),
+        None => WindowsUiaProbeOutcome::RetryableMiss,
+    }
+}
+
+#[cfg(windows)]
+fn current_process_name() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    exe.file_stem()?.to_str().map(str::to_string)
 }
 
 fn accessibility_nodes(snapshot: &ShellProjectionSnapshot) -> Vec<DesktopAccessibilityNode> {

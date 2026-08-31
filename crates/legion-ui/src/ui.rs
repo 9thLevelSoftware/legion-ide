@@ -1458,6 +1458,10 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "GoToLine".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("G", true, true, false),
+            action_label: "StageFocusedGitHunk".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("P", true, false, false),
             action_label: "OpenPalette".into(),
         },
@@ -1501,6 +1505,26 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "GoToDefinition".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("F8", false, false, false),
+            action_label: "ProblemNext".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F8", false, true, false),
+            action_label: "ProblemPrev".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F2", false, false, false),
+            action_label: "RenameSymbol".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("F", false, true, true),
+            action_label: "FormatDocument".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("O", true, true, false),
+            action_label: "OrganizeImports".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("F5", false, false, false),
             action_label: "DebugStart".into(),
         },
@@ -1523,6 +1547,14 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
         KeybindingEntry {
             combo: KeyCombo::new("F11", false, true, false),
             action_label: "DebugStepOut".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowUp", false, false, true),
+            action_label: "DebugStackPrevious".into(),
+        },
+        KeybindingEntry {
+            combo: KeyCombo::new("ArrowDown", false, false, true),
+            action_label: "DebugStackNext".into(),
         },
     ]
 }
@@ -1812,6 +1844,21 @@ pub struct LocalHistoryEntryProjection {
     pub size_bytes: u64,
 }
 
+/// Background Git projection state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitRefreshState {
+    /// No Git job is pending.
+    Idle,
+    /// A Git snapshot or mutation is running.
+    Refreshing,
+    /// The worker exceeded its bounded command timeout.
+    TimedOut,
+    /// The worker returned a non-timeout failure.
+    Failed,
+    /// Git requested credentials or another interactive action.
+    AuthRequired,
+}
+
 /// Projection-only git status, syntactic diff, blame, graph, and conflict surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitProjection {
@@ -1871,6 +1918,10 @@ pub struct GitProjection {
     /// Retained across refreshes so the verdict stays visible after the
     /// projection rebuilds; empty until a push/fetch/pull is attempted.
     pub remote_policy_audit: Vec<GitRemotePolicyProjection>,
+    /// Current background inspection state.
+    pub refresh_state: GitRefreshState,
+    /// Whether the displayed rows predate the latest refresh request.
+    pub stale: bool,
 }
 
 impl GitProjection {
@@ -1898,6 +1949,8 @@ impl GitProjection {
             commit_validation_errors: Vec::new(),
             local_history_entries: Vec::new(),
             remote_policy_audit: Vec::new(),
+            refresh_state: GitRefreshState::Idle,
+            stale: false,
         }
     }
 }
@@ -2966,6 +3019,13 @@ pub enum CommandDispatchIntent {
     },
     /// Open the projected Settings surface.
     OpenSettings,
+    /// Attach an optional local ACP adapter host for delegated proposal work.
+    AttachAcpHost {
+        /// Executable or program path.
+        program: String,
+        /// Arguments passed to the local adapter host.
+        args: Vec<String>,
+    },
     /// Update the app-owned theme preference.
     SetThemePreference {
         /// Requested theme preference.
@@ -3187,6 +3247,8 @@ pub enum CommandDispatchIntent {
     GitNavNextFile,
     /// Navigate to the first hunk in the previous changed file.
     GitNavPrevFile,
+    /// Stage the hunk currently focused in the Git review surface.
+    StageFocusedGitHunk,
     /// Request local history entries for the given canonical file path.
     RequestLocalHistoryEntries {
         /// Canonical path of the file to fetch history for.

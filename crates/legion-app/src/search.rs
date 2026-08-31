@@ -9,12 +9,15 @@
 //! Structural (syntax-aware) search still lives in `lib.rs`; only the lexical
 //! path moved here.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::thread;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use legion_editor::BufferMode;
 use legion_project::{
-    SearchPattern, SearchPatternKind, WorkspaceSearchBatch, WorkspaceSearchFilters,
+    SearchPattern, SearchPatternKind, WorkspaceActor, WorkspaceSearchBatch, WorkspaceSearchFilters,
     WorkspaceSearchQuery,
 };
 use legion_protocol::{
@@ -122,6 +125,107 @@ struct SearchBuildResult {
     whole_word: bool,
     /// Effective regex mode used for this result set.
     use_regex: bool,
+}
+
+#[derive(Debug, Clone)]
+struct SearchViewportLine {
+    line_number: u32,
+    visible_text: String,
+    byte_start: u64,
+}
+
+#[derive(Debug, Clone)]
+enum SearchActiveSnapshot {
+    Full {
+        buffer_id: BufferId,
+        metadata: ActiveFileMetadata,
+        text: String,
+    },
+    Degraded {
+        buffer_id: BufferId,
+        metadata: ActiveFileMetadata,
+        lines: Vec<SearchViewportLine>,
+    },
+}
+
+#[derive(Debug)]
+struct SearchWorkerRequest {
+    generation: u64,
+    query_id: String,
+    scope: SearchScopeProjection,
+    query: String,
+    limit: usize,
+    options: SearchQueryOptions,
+    active_snapshot: Option<SearchActiveSnapshot>,
+    workspace_id: Option<WorkspaceId>,
+    indexed_backend_enabled: bool,
+    open_buffers: HashMap<FileId, BufferId>,
+}
+
+#[derive(Debug)]
+struct SearchWorkerResult {
+    generation: u64,
+    query_id: String,
+    scope: SearchScopeProjection,
+    query_label: String,
+    result_limit: usize,
+    result: Result<SearchBuildResult, String>,
+}
+
+pub(crate) struct SearchWorker {
+    sender: Sender<SearchWorkerRequest>,
+    receiver: Receiver<SearchWorkerResult>,
+}
+
+impl SearchWorker {
+    pub(crate) fn new(workspace: Arc<WorkspaceActor>) -> Self {
+        let (request_sender, request_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        thread::Builder::new()
+            .name("legion-search-worker".to_string())
+            .spawn(move || {
+                while let Ok(mut request) = request_receiver.recv() {
+                    while let Ok(next) = request_receiver.try_recv() {
+                        request = next;
+                    }
+                    let result = run_search_request(&workspace, &request);
+                    if result_sender
+                        .send(SearchWorkerResult {
+                            generation: request.generation,
+                            query_id: request.query_id,
+                            scope: request.scope,
+                            query_label: request.query.trim().to_string(),
+                            result_limit: request.limit,
+                            result,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .expect("search worker thread must start");
+        Self {
+            sender: request_sender,
+            receiver: result_receiver,
+        }
+    }
+
+    fn submit(&self, request: SearchWorkerRequest) -> Result<(), String> {
+        self.sender
+            .send(request)
+            .map_err(|_| "search worker is unavailable".to_string())
+    }
+
+    fn drain_latest(&self) -> Option<SearchWorkerResult> {
+        let mut latest = None;
+        loop {
+            match self.receiver.try_recv() {
+                Ok(result) => latest = Some(result),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return latest,
+            }
+        }
+    }
 }
 
 struct SearchTextInput<'a> {
@@ -449,6 +553,158 @@ fn bounded_search_snippet(line: &str) -> (String, bool) {
     (format!("{}...", &line[..end]), true)
 }
 
+fn run_search_request(
+    workspace: &WorkspaceActor,
+    request: &SearchWorkerRequest,
+) -> Result<SearchBuildResult, String> {
+    let parsed = match parse_search_query(&request.query, request.options) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            return Ok(SearchBuildResult {
+                validation_error: Some(message),
+                ..SearchBuildResult::default()
+            });
+        }
+    };
+    match request.scope {
+        SearchScopeProjection::ActiveFile => {
+            let snapshot = request
+                .active_snapshot
+                .as_ref()
+                .ok_or_else(|| "active file search snapshot is unavailable".to_string())?;
+            Ok(match snapshot {
+                SearchActiveSnapshot::Full {
+                    buffer_id,
+                    metadata,
+                    text,
+                } => {
+                    let mut result = SearchBuildResult {
+                        case_sensitive: parsed.case_sensitive,
+                        whole_word: parsed.whole_word,
+                        use_regex: parsed.use_regex,
+                        ..SearchBuildResult::default()
+                    };
+                    collect_search_results_for_text(SearchTextInput {
+                        query_id: &request.query_id,
+                        pattern: &parsed.pattern,
+                        scope: SearchScopeProjection::ActiveFile,
+                        workspace_id: Some(metadata.identity.workspace_id),
+                        buffer_id: Some(*buffer_id),
+                        file_id: Some(metadata.identity.file_id),
+                        file_path: Some(metadata.identity.canonical_path.clone()),
+                        text,
+                        limit: request.limit,
+                        result: &mut result,
+                    });
+                    result
+                }
+                SearchActiveSnapshot::Degraded {
+                    buffer_id,
+                    metadata,
+                    lines,
+                } => {
+                    let mut result = SearchBuildResult {
+                        degraded_limited: true,
+                        diagnostics: vec![
+                            "Active-file search is limited to the visible viewport in degraded mode"
+                                .to_string(),
+                        ],
+                        case_sensitive: parsed.case_sensitive,
+                        whole_word: parsed.whole_word,
+                        use_regex: parsed.use_regex,
+                        ..SearchBuildResult::default()
+                    };
+                    for line in lines {
+                        collect_search_results_for_line(SearchLineInput {
+                            query_id: &request.query_id,
+                            pattern: &parsed.pattern,
+                            scope: SearchScopeProjection::ActiveFile,
+                            workspace_id: Some(metadata.identity.workspace_id),
+                            buffer_id: Some(*buffer_id),
+                            file_id: Some(metadata.identity.file_id),
+                            file_path: Some(metadata.identity.canonical_path.clone()),
+                            line_number: line.line_number,
+                            line_text: &line.visible_text,
+                            absolute_line_start: line.byte_start,
+                            limit: request.limit,
+                            result: &mut result,
+                        });
+                    }
+                    result
+                }
+            })
+        }
+        SearchScopeProjection::Workspace => {
+            let workspace_id = request.workspace_id.ok_or_else(|| {
+                "workspace search is unavailable without an open workspace".to_string()
+            })?;
+            let backend_query = WorkspaceSearchQuery {
+                workspace_id,
+                pattern: parsed.pattern,
+                search_text: parsed.search_text,
+                filters: parsed.filters,
+                result_limit: request.limit,
+                batch_size: 32,
+                use_indexed_backend: request.indexed_backend_enabled && parsed.is_literal,
+            };
+            let mut result = SearchBuildResult {
+                case_sensitive: parsed.case_sensitive,
+                whole_word: parsed.whole_word,
+                use_regex: parsed.use_regex,
+                ..SearchBuildResult::default()
+            };
+            let report = workspace
+                .search_workspace_stream(backend_query, |batch: WorkspaceSearchBatch| {
+                    result.omitted_file_count = result
+                        .omitted_file_count
+                        .saturating_add(batch.omitted_file_count);
+                    result.omitted_result_count = result
+                        .omitted_result_count
+                        .saturating_add(batch.omitted_hit_count);
+                    result.diagnostics.extend(batch.diagnostics);
+                    for hit in batch.hits {
+                        let byte_start =
+                            hit.byte_range.start.saturating_sub(hit.line_byte_start) as usize;
+                        let byte_end =
+                            hit.byte_range.end.saturating_sub(hit.line_byte_start) as usize;
+                        let character_start = count_chars_up_to(&hit.line_text, byte_start) as u32;
+                        let character_end = count_chars_up_to(&hit.line_text, byte_end) as u32;
+                        result.results.push(SearchResultProjection {
+                            query_id: request.query_id.clone(),
+                            scope: SearchScopeProjection::Workspace,
+                            workspace_id: Some(workspace_id),
+                            buffer_id: request.open_buffers.get(&hit.file_id).copied(),
+                            file_id: Some(hit.file_id),
+                            file_path: Some(hit.canonical_path),
+                            line_number: hit.line_number,
+                            range: ProtocolTextRange {
+                                start: TextCoordinate {
+                                    line: hit.line_number,
+                                    character: character_start,
+                                    byte_offset: Some(hit.byte_range.start),
+                                    utf16_offset: Some(character_start as u64),
+                                },
+                                end: TextCoordinate {
+                                    line: hit.line_number,
+                                    character: character_end,
+                                    byte_offset: Some(hit.byte_range.end),
+                                    utf16_offset: Some(character_end as u64),
+                                },
+                            },
+                            snippet: hit.snippet,
+                            snippet_truncated: hit.snippet_truncated,
+                            stale: false,
+                        });
+                    }
+                    true
+                })
+                .map_err(|error| error.to_string())?;
+            result.skipped_binary_count = report.skipped_binary_count;
+            Ok(result)
+        }
+    }
+}
+
 impl AppComposition {
     /// Run bounded lexical search through app-owned editor/workspace authority.
     ///
@@ -463,33 +719,6 @@ impl AppComposition {
         limit: usize,
         options: SearchQueryOptions,
     ) -> Result<SearchProjection, AppCompositionError> {
-        // Mark current results stale before running the new query so that any
-        // caller holding a snapshot sees them de-emphasised.
-        //
-        // STALE-MARKER VISIBILITY LIMITATION (synchronous model): because
-        // `run_search` is synchronous and single-threaded, the stale flag set
-        // here is immediately overwritten by the `search_projection` assignment
-        // at the end of this call in the same stack frame.  In the current
-        // model there is therefore *zero practical visibility window* for the
-        // stale state — no external observer can read the transient stale
-        // snapshot.  The flag is meaningful only if/when an asynchronous
-        // search path is introduced (where the caller could read the stale
-        // projection between dispatching the new query and receiving its
-        // result).  Keep the logic in place as a forwards-compatible hook, but
-        // document that it has no effect today.
-        let incoming_query_id = query_id.as_str();
-        let current_is_different = self
-            .search_projection
-            .query_id
-            .as_deref()
-            .is_none_or(|prev| prev != incoming_query_id);
-        if current_is_different && !self.search_projection.results.is_empty() {
-            for row in &mut self.search_projection.results {
-                row.stale = true;
-            }
-            self.search_projection.generated_at = TimestampMillis::now();
-        }
-
         let result_limit = normalize_search_limit(limit);
         let query_label = query.trim().to_string();
         if query_label.is_empty() {
@@ -507,30 +736,167 @@ impl AppComposition {
             return Ok(self.search_projection.clone());
         }
 
-        let result = match scope {
-            SearchScopeProjection::ActiveFile => {
-                self.run_active_file_search(&query_id, &query_label, result_limit, options)?
-            }
-            SearchScopeProjection::Workspace => {
-                self.run_workspace_search(&query_id, &query_label, result_limit, options)?
-            }
+        let active_snapshot = match scope {
+            SearchScopeProjection::ActiveFile => Some(self.snapshot_active_search_input()?),
+            SearchScopeProjection::Workspace => None,
         };
+        let workspace_id = match scope {
+            SearchScopeProjection::ActiveFile => None,
+            SearchScopeProjection::Workspace => Some(self.active_documents.require_workspace_id()?),
+        };
+        let open_buffers = self
+            .active_documents
+            .buffer_file_metadata
+            .iter()
+            .map(|(buffer_id, metadata)| (metadata.identity.file_id, *buffer_id))
+            .collect();
 
-        let status = search_status_for_result(scope, &result);
-        self.search_projection = build_search_projection(
-            Some(query_id),
+        if !self.search_projection.results.is_empty() {
+            for row in &mut self.search_projection.results {
+                row.stale = true;
+            }
+        }
+        self.search_generation = self.search_generation.saturating_add(1);
+        self.search_projection = SearchProjection {
+            query_id: Some(query_id.clone()),
             scope,
             query_label,
+            status: SearchStatusProjection {
+                kind: SearchStatusKindProjection::Running,
+                message: "Search running".to_string(),
+            },
             result_limit,
-            status,
-            result,
-        );
+            case_sensitive: options.case_sensitive.unwrap_or(true),
+            whole_word: options.whole_word.unwrap_or(false),
+            use_regex: options.use_regex.unwrap_or(false),
+            generated_at: TimestampMillis::now(),
+            ..self.search_projection.clone()
+        };
+        self.search_projection.query_id = Some(query_id.clone());
+        self.search_projection.scope = scope;
+        self.search_projection.query_label = query.trim().to_string();
+        self.search_projection.result_limit = result_limit;
+        self.search_projection.status = SearchStatusProjection {
+            kind: SearchStatusKindProjection::Running,
+            message: "Search running".to_string(),
+        };
+        self.search_projection.generated_at = TimestampMillis::now();
+        self.search_worker
+            .submit(SearchWorkerRequest {
+                generation: self.search_generation,
+                query_id,
+                scope,
+                query,
+                limit: result_limit,
+                options,
+                active_snapshot,
+                workspace_id,
+                indexed_backend_enabled: self.settings.indexed_workspace_search_enabled,
+                open_buffers,
+            })
+            .map_err(AppCompositionError::SearchValidation)?;
+        #[cfg(feature = "test-helpers")]
+        {
+            let _ = self.drain_search_until_idle();
+        }
+        self.sync_search_palette_results();
         Ok(self.search_projection.clone())
+    }
+
+    /// Drain completed search work without blocking the app thread.
+    pub fn drain_search_worker(&mut self) -> bool {
+        let Some(result) = self.search_worker.drain_latest() else {
+            return false;
+        };
+        if result.generation != self.search_generation
+            || self.search_projection.query_id.as_deref() != Some(result.query_id.as_str())
+        {
+            return false;
+        }
+        match result.result {
+            Ok(build) => {
+                self.search_projection = build_search_projection(
+                    Some(result.query_id),
+                    result.scope,
+                    result.query_label,
+                    result.result_limit,
+                    search_status_for_result(result.scope, &build),
+                    build,
+                );
+            }
+            Err(message) => {
+                self.search_projection.status = SearchStatusProjection {
+                    kind: SearchStatusKindProjection::Error,
+                    message,
+                };
+                self.search_projection.generated_at = TimestampMillis::now();
+            }
+        }
+        self.sync_search_palette_results();
+        true
+    }
+
+    /// Drain search worker results until the current query is no longer running.
+    ///
+    /// `RunSearch` returns as soon as the worker accepts the query so the app
+    /// thread stays free. Callers that need the completed result — golden
+    /// paths, the product-perf harness, and tests — wait here instead of
+    /// treating the Running snapshot as the answer.
+    pub fn drain_search_until_idle(&mut self) -> SearchProjection {
+        while self.search_worker_in_flight() {
+            self.drain_search_worker();
+            if self.search_worker_in_flight() {
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.drain_search_worker();
+        self.search_projection.clone()
+    }
+
+    fn snapshot_active_search_input(&self) -> Result<SearchActiveSnapshot, AppCompositionError> {
+        let buffer_id = self.active_documents.require_active_buffer()?;
+        let metadata = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .cloned()
+            .ok_or(AppCompositionError::ActiveFileMissing)?;
+        if matches!(self.editor.buffer_mode(buffer_id)?, BufferMode::Degraded) {
+            let scroll = self.active_documents.viewport_scroll_for(buffer_id);
+            let viewport =
+                self.editor
+                    .viewport_projection(legion_protocol::EditorViewportRequest {
+                        buffer_id,
+                        scroll,
+                        dimensions: legion_protocol::ViewportDimensions {
+                            width_px: 800,
+                            height_px: 384,
+                        },
+                    })?;
+            return Ok(SearchActiveSnapshot::Degraded {
+                buffer_id,
+                metadata,
+                lines: viewport
+                    .line_slices
+                    .into_iter()
+                    .map(|slice| SearchViewportLine {
+                        line_number: slice.line_number,
+                        visible_text: slice.visible_text,
+                        byte_start: slice.byte_range.start,
+                    })
+                    .collect(),
+            });
+        }
+        Ok(SearchActiveSnapshot::Full {
+            buffer_id,
+            metadata,
+            text: self.editor.text(buffer_id)?.to_string(),
+        })
     }
 
     /// Cancel the projected search by query id.
     pub fn cancel_search(&mut self, query_id: String) -> SearchProjection {
         if self.search_projection.query_id.as_deref() == Some(query_id.as_str()) {
+            self.search_generation = self.search_generation.saturating_add(1);
             self.search_projection.status = SearchStatusProjection {
                 kind: SearchStatusKindProjection::Cancelled,
                 message: "Search cancelled".to_string(),
@@ -542,6 +908,7 @@ impl AppComposition {
         projection
     }
 
+    #[allow(dead_code)]
     fn run_active_file_search(
         &self,
         query_id: &str,
@@ -593,6 +960,7 @@ impl AppComposition {
         Ok(result)
     }
 
+    #[allow(dead_code)]
     fn run_degraded_active_file_search(
         &self,
         query_id: &str,
@@ -654,6 +1022,7 @@ impl AppComposition {
         Ok(result)
     }
 
+    #[allow(dead_code)]
     fn run_workspace_search(
         &self,
         query_id: &str,
@@ -1107,5 +1476,50 @@ impl AppComposition {
             )));
         }
         Ok(Ok(proposal_id))
+    }
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn search_worker_drain_keeps_only_latest_completed_generation() {
+        let (sender, request_receiver) = mpsc::channel();
+        drop(request_receiver);
+        let (result_sender, receiver) = mpsc::channel();
+        result_sender
+            .send(SearchWorkerResult {
+                generation: 1,
+                query_id: "search:old".to_string(),
+                scope: SearchScopeProjection::Workspace,
+                query_label: "old".to_string(),
+                result_limit: 10,
+                result: Ok(SearchBuildResult::default()),
+            })
+            .expect("old result should queue");
+        result_sender
+            .send(SearchWorkerResult {
+                generation: 2,
+                query_id: "search:new".to_string(),
+                scope: SearchScopeProjection::Workspace,
+                query_label: "new".to_string(),
+                result_limit: 10,
+                result: Ok(SearchBuildResult::default()),
+            })
+            .expect("new result should queue");
+
+        let worker = SearchWorker { sender, receiver };
+        let latest = worker.drain_latest().expect("a result should be available");
+        assert_eq!(latest.generation, 2);
+        assert_eq!(latest.query_id, "search:new");
+        assert!(worker.drain_latest().is_none());
+    }
+
+    #[test]
+    fn drain_search_until_idle_is_a_no_op_when_no_query_is_running() {
+        let mut app = crate::AppComposition::new();
+        let projection = app.drain_search_until_idle();
+        assert_ne!(projection.status.kind, SearchStatusKindProjection::Running);
     }
 }

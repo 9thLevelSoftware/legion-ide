@@ -33,7 +33,7 @@ If you override `-OutDir`, record the alternate directory in the report.
 
 ## What to include in a bug report
 
-Use `.github/ISSUE_TEMPLATE/bug_report.md` and attach or reference:
+Use `.github/ISSUE_TEMPLATE/bug_report.md` for product defects and attach or reference:
 
 - the exact command that failed;
 - the OS and profile you were using;
@@ -41,6 +41,8 @@ Use `.github/ISSUE_TEMPLATE/bug_report.md` and attach or reference:
 - the session-state and diagnostics-export files, if present;
 - the package manifest, if the problem is packaging-related;
 - the expected versus actual behavior in one or two sentences.
+
+If the gap **forbids a named release claim** (P0 register, QUAL.11), use `.github/ISSUE_TEMPLATE/release-blocker.yml` instead of Bug report. See `plans/qual-11-release-blocker-taxonomy.md`.
 
 ## GP-1 smoke common skips
 

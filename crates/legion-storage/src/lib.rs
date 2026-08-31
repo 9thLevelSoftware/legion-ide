@@ -8,6 +8,10 @@ pub mod plan;
 /// Local file history metadata store.
 pub mod local_history;
 
+/// Crash-safe unsaved-buffer snapshots, kept out of session JSON.
+pub mod hot_exit;
+pub use hot_exit::{HOT_EXIT_SCHEMA_VERSION, HotExitSnapshot, HotExitStore};
+
 /// OS keyring-backed and in-memory secret stores for BYOK provider credentials.
 pub mod secrets;
 

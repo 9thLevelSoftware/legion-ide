@@ -118,6 +118,7 @@ fn desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions() {
             .expect("git refresh should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
     let snapshot = runtime.projection_snapshot();
     assert_eq!(snapshot.git_projection.changed_files.len(), 2);
     assert!(
@@ -167,6 +168,7 @@ fn desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions() {
             .expect("hunk stage should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
     let cached = run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]);
     assert!(cached.contains("first_changed"));
     assert!(!cached.contains("second_changed"));
@@ -216,6 +218,7 @@ fn desktop_git_workflow_resolves_conflicts_through_bridge_actions() {
             .expect("git refresh should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
     let snapshot = runtime.projection_snapshot();
     assert!(
         !snapshot.git_projection.conflicts.is_empty(),
@@ -238,6 +241,7 @@ fn desktop_git_workflow_resolves_conflicts_through_bridge_actions() {
             .expect("accept current should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
 
     let snapshot = runtime.projection_snapshot();
     assert!(
@@ -313,6 +317,7 @@ fn desktop_git_workflow_pushes_current_branch_to_origin() {
     runtime
         .handle_action(DesktopAction::RefreshGit)
         .expect("refresh should route");
+    runtime.drain_git_until_idle();
 
     assert_eq!(
         runtime
@@ -320,8 +325,9 @@ fn desktop_git_workflow_pushes_current_branch_to_origin() {
             .expect("push should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
 
-    let pushed = run_git(&remote_root, ["log", "--oneline", "master"]);
+    let pushed = run_git(&remote_root, ["log", "--oneline", "--all"]);
     assert!(
         pushed.contains("initial"),
         "remote should receive the pushed commit"
@@ -363,6 +369,7 @@ fn desktop_git_workflow_translates_open_pr_url_from_remote_metadata() {
     runtime
         .handle_action(DesktopAction::RefreshGit)
         .expect("refresh should route");
+    runtime.drain_git_until_idle();
     let snapshot = runtime.projection_snapshot();
     let bridge = DesktopCommandBridge::new();
 
@@ -435,6 +442,7 @@ fn desktop_git_refresh_reflects_edits_made_after_the_first_refresh() {
     runtime
         .handle_action(DesktopAction::RefreshGit)
         .expect("first git refresh should route");
+    runtime.drain_git_until_idle();
     let first = runtime.projection_snapshot().git_projection;
     assert_eq!(
         first.changed_files.len(),
@@ -449,6 +457,7 @@ fn desktop_git_refresh_reflects_edits_made_after_the_first_refresh() {
     runtime
         .handle_action(DesktopAction::RefreshGit)
         .expect("second git refresh should route");
+    runtime.drain_git_until_idle();
     let second = runtime.projection_snapshot().git_projection;
 
     assert_eq!(

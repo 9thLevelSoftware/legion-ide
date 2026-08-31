@@ -16,6 +16,11 @@ Record the accessibility evidence for the Legion desktop shell and the golden-pa
 
 Part of this evidence is product-facing rather than projection-only. One of the three supported OSes (Windows) now has a reproducible product-facing observation; macOS has an unreproducible one; Linux has none.
 
+PR-15 adds `scripts/a11y-platform-probe.sh` as a deterministic status
+contract and `PR-15-manual-keyboard-path.md` as the honest keyboard-only path.
+The contract delegates Windows to the committed UIA walk and reports macOS and
+Linux as unobserved until committed platform probes exist.
+
 ## Source evidence
 
 - OS accessibility-tree inspection for the product window, **Windows, repeatable**: `scripts/a11y-uia-walk.ps1` → `plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt`
@@ -27,7 +32,7 @@ Part of this evidence is product-facing rather than projection-only. One of the 
 
 - Linux OS accessibility tree: not inspected on any date.
 - macOS reproducibility: the macOS observation cannot be repeated from this repository, because the probe source was never committed.
-- Harness reporting: `legion-desktop --smoke` reports `accessibility_tree_smoke: ... OS tree not observed` unconditionally — `accessibility_tree_status` in `crates/legion-desktop/src/platform.rs` has no code path that can report otherwise, on any platform. The Windows walk above was taken against a live smoke process that was simultaneously writing "OS tree not observed" into its own evidence file, so that string reflects a harness limitation, not the product.
+- Harness reporting: `legion-desktop --smoke` reports `Windows UIA observed N descendants` from `accessibility_tree_status` when the committed probe `scripts/a11y-uia-walk.ps1` actually prints `UIA_WALK_OK` against the live process. macOS and Linux still have no committed probe, so those hosts keep `OS tree not observed`. A snapshot path with no successful Windows walk also keeps `OS tree not observed` rather than claiming a tree that was not walked. This does not close the 3-OS `PR-UI-001` bar.
 - CI: `.github/workflows/` contains no accessibility step in any of its five workflows, so none of this is protected against regression.
 - Depth of the Windows result: it shows control types and names reach the OS layer. It is not an audit of label quality, focus order, live regions, high contrast, or reduced motion, and no screen reader was run against it.
 - Screen-reader sessions: no NVDA, VoiceOver, or Orca run has been recorded. `plans/evidence/production/M5/WS18-T2-accesskit-product-pass.md` says so itself under "Residual risk".
@@ -39,6 +44,7 @@ Read these as label inventories of the accessible surface, not as screen-reader 
 - `plans/evidence/accessibility/gp-1-manual-walkthrough.md`
 - `plans/evidence/accessibility/gp-2-assist-walkthrough.md`
 - `plans/evidence/accessibility/gp-3-delegate-walkthrough.md`
+- `plans/evidence/accessibility/PR-15-manual-keyboard-path.md`
 
 ## Acceptance note
 

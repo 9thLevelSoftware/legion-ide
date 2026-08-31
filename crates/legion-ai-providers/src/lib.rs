@@ -3,6 +3,8 @@
 #![warn(missing_docs)]
 
 pub mod capabilities;
+/// Local, capability-gated MCP server over newline-delimited stdio.
+pub mod mcp_server;
 /// Native Ollama `/api/chat` tool calling.
 ///
 /// Lives in its own module rather than here: Ollama's wire format diverges

@@ -22,6 +22,7 @@ fn platform_snapshot_records_projection_and_adapter_statuses() {
         NativePlatformObservation {
             focused: Some(true),
             pixels_per_point: Some(2.0),
+            os_accessibility_tree: None,
         },
     );
 
@@ -38,7 +39,25 @@ fn platform_snapshot_records_projection_and_adapter_statuses() {
     assert!(
         platform
             .accessibility_tree_smoke
+            .contains("metadata-only projection accessibility nodes")
+    );
+    assert!(
+        !platform.accessibility_tree_smoke.contains("macOS")
+            && !platform.accessibility_tree_smoke.contains("Linux")
+            && !platform.accessibility_tree_smoke.contains("AT-SPI")
+            && !platform.accessibility_tree_smoke.contains("AXUIElement"),
+        "must not claim a macOS or Linux OS-tree probe: {}",
+        platform.accessibility_tree_smoke
+    );
+    assert!(
+        platform
+            .accessibility_tree_smoke
             .contains("OS tree not observed")
+            || platform
+                .accessibility_tree_smoke
+                .contains("Windows UIA observed"),
+        "OS tree status must be the committed Windows probe or an honest miss: {}",
+        platform.accessibility_tree_smoke
     );
     assert!(platform.accessibility_projection_node_count >= 2);
 }

@@ -150,6 +150,9 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::CancelPaletteConfirmation { token })
             }
             CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
+            CommandDispatchIntent::AttachAcpHost { program, args } => {
+                Ok(AppCommandRequest::AttachAcpHost { program, args })
+            }
             CommandDispatchIntent::SetThemePreference { preference } => {
                 Ok(AppCommandRequest::SetThemePreference { preference })
             }
@@ -240,6 +243,9 @@ impl CommandDispatcher {
             CommandDispatchIntent::RefreshGit => Ok(AppCommandRequest::RefreshGit),
             CommandDispatchIntent::StageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::StageGitHunk { hunk_id })
+            }
+            CommandDispatchIntent::StageFocusedGitHunk => {
+                Ok(AppCommandRequest::StageFocusedGitHunk)
             }
             CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
@@ -710,9 +716,9 @@ impl CommandDispatcher {
             CommandDispatchIntent::AddCursorAbove { .. }
             | CommandDispatchIntent::AddCursorBelow { .. }
             | CommandDispatchIntent::ClearExtraCursors { .. } => Ok(AppCommandRequest::Noop),
-            // Vim modal editing intents: VimState parser exists in legion-ui
-            // but is not yet wired to the desktop keyboard handler. These arms
-            // satisfy exhaustiveness until integration lands.
+            // Vim intents need buffer text and cursor, which this router does
+            // not have. `AppComposition::dispatch_ui_intent` handles them via
+            // `dispatch_vim_intent` first; these arms satisfy exhaustiveness.
             CommandDispatchIntent::SetVimModeEnabled { .. }
             | CommandDispatchIntent::VimMotion { .. }
             | CommandDispatchIntent::VimOperatorMotion { .. }

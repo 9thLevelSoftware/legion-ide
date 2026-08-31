@@ -111,6 +111,7 @@ fn open_app_with_hunks(repo: &TempGitRepo) -> (AppComposition, PathBuf, PathBuf)
     // Refresh so hunks are populated.
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh");
+    app.drain_git_until_idle();
 
     (app, src_a, src_b)
 }

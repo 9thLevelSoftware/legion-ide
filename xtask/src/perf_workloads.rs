@@ -90,6 +90,8 @@ const LEGION_REPO_BUDGET_MILLIS: u64 = 120_000;
 /// trend numbers, not by this ceiling.
 const FIXTURE_100K_BUDGET_MILLIS: u64 = 1_800_000;
 
+const GIT_DISPATCH_P95_BUDGET_MILLIS: u64 = 4;
+
 /// What a workload is allowed to cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductBudget {
@@ -165,7 +167,60 @@ pub fn product_workload_policies() -> Vec<ProductWorkloadPolicy> {
             },
             summary: "real product workspace search over a generated 100K-file workspace",
         },
+        ProductWorkloadPolicy {
+            name: "git.ui_dispatch_refresh",
+            budget: ProductBudget::Latency {
+                p50_millis: GIT_DISPATCH_P95_BUDGET_MILLIS,
+                p95_millis: GIT_DISPATCH_P95_BUDGET_MILLIS,
+            },
+            summary: "RefreshGit intent-to-return on the cheap projection path; no paint wait",
+        },
+        ProductWorkloadPolicy {
+            name: "git.remote_push_does_not_block_dispatch",
+            budget: ProductBudget::Latency {
+                p50_millis: GIT_DISPATCH_P95_BUDGET_MILLIS,
+                p95_millis: GIT_DISPATCH_P95_BUDGET_MILLIS,
+            },
+            summary: "policy-denied PushGitRemote intent-to-return; no remote process or network",
+        },
     ]
+}
+
+/// Git rows whose strict gates require instrumentation or the typed backend.
+/// They remain visible in every report without pretending that a product
+/// workload measured a worker-job or process count it cannot observe yet.
+pub fn git_report_only_measurements() -> Vec<SkeletonMeasurement> {
+    [
+        (
+            "git.jobs_per_refresh_burst",
+            "report-only: PR-2 deterministic 50-refresh regression owns the <=2 worker-job proof; product_perf has no worker counter",
+        ),
+        (
+            "git.spawn_count_per_snapshot",
+            "report-only: deferred until post-PR-3 typed-gix/process instrumentation; no process count is inferred",
+        ),
+        (
+            "git.status_legion_repo",
+            "report-only: strict status-row gate deferred until post-PR-3 typed-gix parity evidence",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, message)| SkeletonMeasurement {
+        name: name.to_string(),
+        kind: SkeletonKind::ProductWorkload,
+        fixture_bytes: 0,
+        sample_count: 0,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis: 0,
+        status: SkeletonStatus::Skipped,
+        message: message.to_string(),
+        measured: false,
+        bytes_value: 0,
+        synthetic_stand_in: false,
+    })
+    .collect()
 }
 
 /// The `product_perf` subprocess's report.

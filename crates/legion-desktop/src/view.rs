@@ -7,6 +7,8 @@ mod brand_mark;
 mod call_hierarchy;
 mod code_canvas_painter;
 mod components;
+/// Debug call-stack and variable inspector.
+mod debug_inspector;
 /// Applying persisted dock splitter fractions, and observing new ones.
 pub mod dock_geometry;
 #[cfg(feature = "ai")]
@@ -16,13 +18,20 @@ pub mod rail_icons;
 mod source_control;
 /// The editor tab strip: tabs, close affordance, drag-to-reorder.
 mod tab_strip;
+/// Test explorer tree for the Tests surface.
+mod test_explorer;
 
 use call_hierarchy::call_hierarchy_rows;
+use debug_inspector::{
+    DEBUG_STACK_FRAME_RENDER_LIMIT, debug_frame_navigation_action,
+    debug_selected_stack_frame_index, render_debug_inspector, set_debug_selected_stack_frame_index,
+};
 use source_control::{
     active_git_relative_path, git_hunk_marker_for_line, git_inline_blame_label,
     git_next_hunk_cursor, git_previous_hunk_cursor, git_rows, render_git_controls,
 };
 use tab_strip::render_tab_strip;
+use test_explorer::render_test_explorer_tree;
 
 use proposal_cards::render_proposal_cards;
 
@@ -31,6 +40,7 @@ pub mod agent_comm;
 /// Files as draggable cards in an infinite 2D space.
 pub mod canvas_workspace;
 mod keymap_dispatch;
+
 pub(crate) use keymap_dispatch::*;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
 pub mod assist_rail_commands;
@@ -2703,6 +2713,7 @@ fn render_activity_sidebar(
         ActivitySurface::Debug => {
             sidebar_header(ui, "RUN AND DEBUG", model.layout_title.clone());
             render_debug_controls(ui, snapshot, actions);
+            render_debug_inspector(ui, snapshot, actions);
             render_compact_rows(ui, &model.debug_rows, "No debug configurations", 12);
         }
     }
@@ -3131,6 +3142,7 @@ fn key_label_to_egui(label: &str) -> Option<egui::Key> {
         "Tab" => Some(egui::Key::Tab),
         "F3" => Some(egui::Key::F3),
         "F5" => Some(egui::Key::F5),
+        "F8" => Some(egui::Key::F8),
         "F9" => Some(egui::Key::F9),
         "F10" => Some(egui::Key::F10),
         "F11" => Some(egui::Key::F11),
@@ -5117,6 +5129,7 @@ fn render_test_controls(
             });
         }
     });
+    render_test_explorer_tree(ui, snapshot, actions);
 }
 
 /// The command the Tests surface offers to run.
@@ -11127,6 +11140,45 @@ mod tests {
     }
 
     #[test]
+    fn format_and_organize_imports_keybindings_dispatch_proposals() {
+        let snapshot = Shell::empty("Format keybinding test").projection_snapshot();
+        assert_eq!(
+            action_label_to_desktop_action("FormatDocument", &snapshot),
+            Some(DesktopAction::RequestFormattingProposal)
+        );
+        assert_eq!(
+            action_label_to_desktop_action("OrganizeImports", &snapshot),
+            Some(DesktopAction::RequestOrganizeImportsProposal)
+        );
+    }
+
+    #[test]
+    fn problem_keybindings_route_to_navigation_actions() {
+        let snapshot = Shell::empty("Problem keybinding test").projection_snapshot();
+        assert_eq!(
+            action_label_to_desktop_action("ProblemNext", &snapshot),
+            Some(DesktopAction::ProblemNext)
+        );
+        assert_eq!(
+            action_label_to_desktop_action("ProblemPrev", &snapshot),
+            Some(DesktopAction::ProblemPrev)
+        );
+        assert_eq!(key_label_to_egui("F8"), Some(egui::Key::F8));
+
+        let bindings = legion_ui::ui::default_keymap();
+        assert!(bindings.iter().any(|binding| {
+            binding.combo.key == "F8"
+                && !binding.combo.shift
+                && binding.action_label == "ProblemNext"
+        }));
+        assert!(bindings.iter().any(|binding| {
+            binding.combo.key == "F8"
+                && binding.combo.shift
+                && binding.action_label == "ProblemPrev"
+        }));
+    }
+
+    #[test]
     fn automate_permission_session_is_parsed_from_request_labels() {
         let request =
             delegated_task_tool_permission_request(DelegatedTaskToolPermissionRequestInput {
@@ -11394,6 +11446,39 @@ mod tests {
                 byte_offset: None,
                 utf16_offset: None,
             })
+        );
+    }
+
+    #[test]
+    fn stage_focused_git_hunk_routes_only_an_unstaged_focus() {
+        let mut snapshot = Shell::empty("focused hunk").projection_snapshot();
+        snapshot.git_projection.focused_hunk_id = Some("git-hunk:focused".to_string());
+        snapshot.git_projection.hunks = vec![GitHunkProjection {
+            hunk_id: "git-hunk:focused".to_string(),
+            path: "src/lib.rs".to_string(),
+            stage: GitHunkStageProjection::Unstaged,
+            header: "@@ -1 +1 @@".to_string(),
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            added_lines: 1,
+            deleted_lines: 1,
+            submodule_dirty_only: false,
+            context: None,
+        }];
+
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            Some(DesktopAction::StageGitHunk {
+                hunk_id: "git-hunk:focused".to_string(),
+            })
+        );
+
+        snapshot.git_projection.hunks[0].stage = GitHunkStageProjection::Staged;
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            None
         );
     }
 

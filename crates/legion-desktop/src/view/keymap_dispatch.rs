@@ -37,6 +37,28 @@ pub(crate) fn action_label_to_desktop_action(
         "GoToDefinition" => Some(DesktopAction::GoToDefinition {
             position: projected_cursor(snapshot),
         }),
+        "RenameSymbol" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: "language rename ".to_string(),
+            scope: SearchScopeProjection::ActiveFile,
+        }),
+        "FormatDocument" => Some(DesktopAction::RequestFormattingProposal),
+        "OrganizeImports" => Some(DesktopAction::RequestOrganizeImportsProposal),
+        "StageFocusedGitHunk" => snapshot
+            .git_projection
+            .focused_hunk_id
+            .as_deref()
+            .and_then(|focused_id| {
+                snapshot
+                    .git_projection
+                    .hunks
+                    .iter()
+                    .find(|hunk| hunk.hunk_id == focused_id)
+            })
+            .filter(|hunk| hunk.stage == legion_ui::GitHunkStageProjection::Unstaged)
+            .map(|hunk| DesktopAction::StageGitHunk {
+                hunk_id: hunk.hunk_id.clone(),
+            }),
         "GoToLine" => Some(DesktopAction::OpenPalette {
             mode: PaletteMode::Command,
             query: "Go to line".to_string(),
@@ -58,6 +80,8 @@ pub(crate) fn action_label_to_desktop_action(
             .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
         "PrevTab" => adjacent_tab_for_keybinding(snapshot, -1)
             .map(|buffer_id| DesktopAction::SwitchTab { buffer_id }),
+        "ProblemNext" => Some(DesktopAction::ProblemNext),
+        "ProblemPrev" => Some(DesktopAction::ProblemPrev),
         "DebugStart" => {
             if let Some(session_id) = snapshot.debug_projection.active_session_id.clone() {
                 Some(DesktopAction::DebugStep {
@@ -186,11 +210,60 @@ pub(crate) fn dispatch_keybindings(
             if binding.combo.alt != input.modifiers.alt {
                 continue;
             }
-            if let Some(action) = action_label_to_desktop_action(&binding.action_label, snapshot)
+            let action = match binding.action_label.as_str() {
+                "DebugStackPrevious" => debug_stack_navigation_action(ctx, snapshot, -1),
+                "DebugStackNext" => debug_stack_navigation_action(ctx, snapshot, 1),
+                _ => action_label_to_desktop_action(&binding.action_label, snapshot),
+            };
+            if let Some(action) = action
                 && (editor_input_enabled || !action_is_editor_scoped(&action))
             {
                 actions.push(action);
             }
         }
     });
+}
+
+fn debug_stack_navigation_action(
+    ctx: &egui::Context,
+    snapshot: &ShellProjectionSnapshot,
+    direction: isize,
+) -> Option<DesktopAction> {
+    let frame_count = snapshot.debug_projection.stack_frames.len();
+    let current =
+        debug_selected_stack_frame_index(ctx, frame_count.min(DEBUG_STACK_FRAME_RENDER_LIMIT));
+    let next = debug_stack_navigation_index(current, frame_count, direction)?;
+    set_debug_selected_stack_frame_index(ctx, next);
+    snapshot
+        .debug_projection
+        .stack_frames
+        .get(next)
+        .and_then(debug_frame_navigation_action)
+}
+
+fn debug_stack_navigation_index(
+    current: usize,
+    total_frame_count: usize,
+    direction: isize,
+) -> Option<usize> {
+    let frame_count = total_frame_count.min(DEBUG_STACK_FRAME_RENDER_LIMIT);
+    if frame_count == 0 {
+        return None;
+    }
+    Some(
+        (current.min(frame_count - 1) as isize + direction).clamp(0, frame_count as isize - 1)
+            as usize,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::debug_stack_navigation_index;
+
+    #[test]
+    fn debug_stack_navigation_stays_within_rendered_frame_limit() {
+        assert_eq!(debug_stack_navigation_index(31, 40, 1), Some(31));
+        assert_eq!(debug_stack_navigation_index(40, 40, -1), Some(30));
+        assert_eq!(debug_stack_navigation_index(0, 0, 1), None);
+    }
 }

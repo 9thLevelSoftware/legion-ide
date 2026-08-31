@@ -29,16 +29,23 @@ impl AppComposition {
         };
         let root_path = root_path.to_string();
 
-        // Resolve the branch first: a push with no branch label cannot be
-        // described in an audit row, let alone executed.
-        let branch = self.git_projection.branch_label.clone().ok_or_else(|| {
-            git_protocol_error(
-                "git_branch_missing",
-                format!("git branch label unavailable for {}", operation.label()),
-            )
-        })?;
+        // A freshly opened workspace may not have a completed snapshot yet;
+        // the worker resolves an empty branch label off the app thread.
+        let branch = self.git_projection.branch_label.clone().unwrap_or_default();
 
-        let remote_url = legion_project::git_remote_configured_url(Path::new(&root_path), remote);
+        // App-thread dispatch cannot spawn git.exe: the 4ms
+        // git.remote_push_does_not_block_dispatch budget is intent-to-return
+        // with no child process. Origin's URL is already on the projection
+        // from inspection; a named remote that is not origin is evaluated
+        // with no URL, which policy denies (cannot evaluate a target it
+        // cannot see) rather than blocking the UI on `git remote get-url`.
+        let remote_url = if remote == "origin" {
+            self.git_projection.remote_url.clone().or_else(|| {
+                legion_project::git_remote_configured_url(Path::new(&root_path), remote)
+            })
+        } else {
+            None
+        };
         let trust = self
             .active_documents
             .active_workspace_trust
@@ -54,23 +61,13 @@ impl AppComposition {
         git_policy::record(&mut self.git_remote_policy_audit, outcome.audit);
 
         if !outcome.allowed {
-            // Refresh so the caller sees the audit row alongside current status.
-            return Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()));
+            // Denials are app-thread decisions: expose the audit row without
+            // starting a worker job or synchronously invoking git.exe.
+            self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
+            return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
         }
-
-        let result = match operation {
-            GitRemoteOperation::Push => {
-                push_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
-            }
-            GitRemoteOperation::Fetch => {
-                legion_project::fetch_git_remote(Path::new(&root_path), remote).map(|_| ())
-            }
-            GitRemoteOperation::Pull => {
-                legion_project::pull_git_remote(Path::new(&root_path), remote, &branch).map(|_| ())
-            }
-        };
-        result.map_err(git_inspection_protocol_error)?;
-        Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+        let projection = self.enqueue_git_remote(operation, remote.to_string(), branch)?;
+        Ok(AppCommandOutcome::GitUpdated(projection))
     }
 
     /// Record or withdraw user consent to reach a host for git remote operations.

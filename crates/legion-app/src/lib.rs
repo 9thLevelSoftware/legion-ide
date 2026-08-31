@@ -7,8 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-helpers"))]
-use std::process::Command;
+
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
@@ -20,7 +19,7 @@ use legion_agent::{
     dag::{WorkflowDag, workflow_dag_from_approved_plan},
     plan::editable_plan_from_workflow_artifacts,
 };
-#[cfg(all(feature = "ai", any(test, feature = "test-helpers")))]
+#[cfg(feature = "ai")]
 use legion_agent::{DelegatedTaskProposalGenerator, DelegatedTaskProposalInput};
 #[cfg(feature = "ai")]
 use legion_ai::{InlinePredictionRequest, ProviderRegistry, ProviderRouter};
@@ -31,11 +30,20 @@ use legion_ai_providers::{
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
 
+mod acp_host;
 mod assist_proposal;
+mod git_inspection;
+mod hot_exit;
+use acp_host::AcpHostCommand;
+#[cfg(feature = "ai")]
+use acp_host::run_acp_host_proposal;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
 use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use git_inspection::GitInspectionRunner;
+use git_inspection::{GitMutateOp, GitWorkRequest, GitWorker};
 
 pub mod terminal_policy;
 
@@ -167,16 +175,14 @@ use legion_observability::{
 use legion_platform::{NativeFileSystem, NativeWatcherService, resolve_existing_prefix};
 use legion_plugin::PluginRuntimeHost;
 use legion_project::{
-    CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
-    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
-    WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
-    WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
-    WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
-    WorkspaceRestoreFileOp, WorkspaceSaveRequest, collect_git_snapshot, commit_git_changes,
-    create_git_branch, delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
-    prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
-    stage_git_hunk, stage_git_path, stash_git_changes, switch_git_branch, unstage_git_hunk,
-    unstage_git_path,
+    CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitHunkStage,
+    GitInspectionError, OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest,
+    WorkspaceDeleteFileRequest, WorkspaceError, WorkspaceMutationRollbackCheckpoint,
+    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
+    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceRestoreFileOp,
+    WorkspaceSaveRequest, create_git_branch, delete_git_branch,
+    discover_cargo_debug_configurations, git_repository_root, prune_git_worktrees,
+    remove_git_worktree, resolve_git_conflict, stash_git_changes, switch_git_branch,
 };
 use legion_protocol::CallHierarchyDirection;
 use legion_protocol::{
@@ -307,14 +313,11 @@ use legion_ui::ui::{
     DebugStatusKindProjection, DebugStatusProjection, DebugStepKindProjection,
     DebugVariableProjection, DebugWatchProjection, EditorTabProjection, EditorTabsProjection,
     EditorViewportStateProjection, ExcerptSurfaceLineProjection, ExcerptSurfaceProjection,
-    ExcerptSurfaceSectionProjection, GitBlameLineProjection, GitCommitProjection,
-    GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
-    PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
-    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    TestExplorerProjection, ThemePreferenceProjection, ToastVerbosityProjection,
-    WorkspaceSessionRecordProjection,
+    ExcerptSurfaceSectionProjection, GitProjection, PaletteMode, PaletteProjection, PaletteResult,
+    PaletteResultKind, SearchProjection, SearchScopeProjection, SearchStatusKindProjection,
+    SearchStatusProjection, SettingsProjection, StructuralSearchCaptureProjection,
+    StructuralSearchMatchProjection, StructuralSearchProjection, TestExplorerProjection,
+    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
@@ -511,6 +514,12 @@ enum PaletteCommandOperands {
     WorktreePath(String),
     CommitMessage(String),
     StashMessage(Option<String>),
+    RenameName(String),
+    CodeActionId(String),
+    AcpHost {
+        program: String,
+        args: Vec<String>,
+    },
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -539,6 +548,19 @@ impl PaletteCommandOperands {
                 format!("Stash changes as ‘{message}’")
             }
             ("git-stash", Self::StashMessage(None)) => "Stash local changes".to_string(),
+            ("language-rename", Self::RenameName(name)) => {
+                format!("Rename symbol to `{name}'")
+            }
+            ("language-code-action", Self::CodeActionId(action_id)) => {
+                format!("Preview code action `{action_id}'")
+            }
+            ("acp-attach-host", Self::AcpHost { program, args }) => {
+                if args.is_empty() {
+                    format!("Attach ACP host `{program}'")
+                } else {
+                    format!("Attach ACP host `{program} {}'", args.join(" "))
+                }
+            }
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -556,6 +578,11 @@ impl PaletteCommandOperands {
             Self::WorktreePath(path) => vec![path.clone()],
             Self::CommitMessage(message) => vec![message.clone()],
             Self::StashMessage(message) => message.iter().cloned().collect(),
+            Self::RenameName(name) => vec![name.clone()],
+            Self::CodeActionId(action_id) => vec![action_id.clone()],
+            Self::AcpHost { program, args } => std::iter::once(program.clone())
+                .chain(args.iter().cloned())
+                .collect(),
             Self::NewWorktree {
                 branch,
                 worktree_path,
@@ -573,6 +600,9 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-new-worktree" => &["git new worktree", "git: new worktree"],
         "git-commit" => &["git commit", "git: commit staged changes"],
         "git-stash" => &["git stash", "git: stash changes"],
+        "language-rename" => &["language rename", "rename symbol", "rename"],
+        "language-code-action" => &["language code action", "code action"],
+        "acp-attach-host" => &["acp attach host", "acp: attach host"],
         _ => &[],
     }
 }
@@ -609,6 +639,9 @@ fn parse_palette_command_operands(
         "git-new-worktree" => "Enter a branch and worktree path",
         "git-commit" => "Enter a commit message",
         "git-stash" => "Enter a stash message",
+        "language-rename" => "Enter the new symbol name",
+        "language-code-action" => "Enter a code-action id",
+        "acp-attach-host" => "Enter an ACP host program, optionally followed by arguments",
         _ => return None,
     };
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
@@ -629,6 +662,8 @@ fn parse_palette_command_operands(
         "git-stash" => Ok(PaletteCommandOperands::StashMessage(Some(
             operands.to_string(),
         ))),
+        "language-rename" => Ok(PaletteCommandOperands::RenameName(operands.to_string())),
+        "language-code-action" => Ok(PaletteCommandOperands::CodeActionId(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -644,6 +679,16 @@ fn parse_palette_command_operands(
                     worktree_path: worktree_path.to_string(),
                 })
             }
+        }
+        "acp-attach-host" => {
+            let mut parts = operands.split_whitespace();
+            let Some(program) = parts.next() else {
+                return Some(Err(missing));
+            };
+            Ok(PaletteCommandOperands::AcpHost {
+                program: program.to_string(),
+                args: parts.map(ToString::to_string).collect(),
+            })
         }
         _ => unreachable!("argument commands are matched above"),
     })
@@ -2503,6 +2548,7 @@ impl Drop for InFlightDelegatedTaskRun {
 struct DelegatedTaskRunCompletion {
     audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
     loop_result: Option<legion_agent::agent_loop::DelegatedTaskLoopResult>,
+    acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     sandbox_allocation_failure: Option<String>,
     sandbox_enforcement_label: Option<String>,
 }
@@ -2898,50 +2944,6 @@ pub trait AppAutomateMcpToolRuntime: Send + Sync {
         &self,
         invocation: &AppAutomateMcpToolInvocation,
     ) -> Result<AppAutomateMcpToolInvocationReceipt, AppAutomateMcpToolRuntimeError>;
-}
-
-/// ACP host command configured by the app.
-#[derive(Debug, Clone)]
-#[cfg(any(test, feature = "test-helpers"))]
-struct AcpHostCommand {
-    program: PathBuf,
-    args: Vec<String>,
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl AcpHostCommand {
-    fn new(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
-        Self {
-            program: program.into(),
-            args,
-        }
-    }
-
-    fn run(
-        &self,
-        sandbox_path: &Path,
-        target_path: &Path,
-        plan_id: &str,
-    ) -> std::io::Result<std::process::Output> {
-        let mut command = Command::new(&self.program);
-        command.args(&self.args);
-        command.current_dir(sandbox_path);
-        command.env("LEGION_ACP_PLAN_ID", plan_id);
-        command.env("LEGION_ACP_SANDBOX_PATH", sandbox_path);
-        command.env("LEGION_ACP_TARGET_PATH", target_path);
-        command.env(
-            "LEGION_ACP_TARGET_DIR",
-            target_path.parent().unwrap_or(sandbox_path),
-        );
-        command.env(
-            "LEGION_ACP_TARGET_FILE",
-            target_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("proposal.txt"),
-        );
-        command.output()
-    }
 }
 
 /// App adapter that invokes a `legion-ai-providers` MCP client from Automate workflows.
@@ -6420,6 +6422,17 @@ impl ActiveDocumentController {
         })
     }
 
+    fn restore_expected_fingerprint(&mut self, buffer_id: BufferId, fingerprint: FileFingerprint) {
+        if let Some(metadata) = self.buffer_file_metadata.get_mut(&buffer_id) {
+            metadata.fingerprint = fingerprint.clone();
+        }
+        if self.active_buffer_id == Some(buffer_id)
+            && let Some(metadata) = self.active_file_metadata.as_mut()
+        {
+            metadata.fingerprint = fingerprint;
+        }
+    }
+
     fn require_open_buffer(&self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
         if self.open_tabs.contains(&buffer_id) && self.metadata_for_buffer(buffer_id).is_some() {
             Ok(())
@@ -9442,6 +9455,13 @@ pub enum AppCommandRequest {
     },
     /// Open the app-owned Settings projection.
     OpenSettings,
+    /// Attach an optional local ACP adapter host for delegated proposal work.
+    AttachAcpHost {
+        /// Executable or program path.
+        program: String,
+        /// Arguments passed to the local adapter host.
+        args: Vec<String>,
+    },
     /// Update the app-owned theme preference.
     SetThemePreference {
         /// Requested theme preference.
@@ -9573,6 +9593,8 @@ pub enum AppCommandRequest {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage the hunk currently focused in the Git review surface.
+    StageFocusedGitHunk,
     /// Stage every change to one path, hunk or not.
     StageGitPath {
         /// Repository-relative path to stage.
@@ -10265,6 +10287,7 @@ impl CommandExecutionService {
             | AppCommandRequest::ConfirmPaletteSelection { .. }
             | AppCommandRequest::CancelPaletteConfirmation { .. }
             | AppCommandRequest::OpenSettings
+            | AppCommandRequest::AttachAcpHost { .. }
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
             | AppCommandRequest::SetEditorFontSize { .. }
@@ -10288,6 +10311,7 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelSearch { .. }
             | AppCommandRequest::RefreshGit
             | AppCommandRequest::StageGitHunk { .. }
+            | AppCommandRequest::StageFocusedGitHunk
             | AppCommandRequest::UnstageGitHunk { .. }
             | AppCommandRequest::StageGitPath { .. }
             | AppCommandRequest::UnstageGitPath { .. }
@@ -12845,127 +12869,6 @@ fn build_structural_search_projection(
     }
 }
 
-fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
-    GitProjection {
-        root_label: Some(snapshot.root.0),
-        hunks_truncated: snapshot.hunks_truncated,
-        merge_awaiting_commit: snapshot.merge_awaiting_commit,
-        branch_label: snapshot.branch_label,
-        head_short: snapshot.head_short,
-        remote_url: snapshot.remote_url,
-        remote_default_branch: snapshot.remote_default_branch,
-        changed_files: snapshot
-            .changed_files
-            .into_iter()
-            .map(|file| GitFileProjection {
-                path: file.path,
-                status: file.status,
-                inserted_lines: file.inserted_lines,
-                deleted_lines: file.deleted_lines,
-                unstaged_hunk_count: file.unstaged_hunk_count,
-                staged_hunk_count: file.staged_hunk_count,
-                stageable: file.stageable,
-                diff_strategy: git_diff_strategy_projection(file.diff_strategy),
-                fallback_reason: file.fallback_reason,
-                conflict: file.conflict,
-            })
-            .collect(),
-        hunks: snapshot
-            .hunks
-            .into_iter()
-            .map(|hunk| GitHunkProjection {
-                hunk_id: hunk.hunk_id,
-                path: hunk.path,
-                stage: git_hunk_stage_projection(hunk.stage),
-                header: hunk.header,
-                old_start: hunk.old_start,
-                old_lines: hunk.old_lines,
-                new_start: hunk.new_start,
-                new_lines: hunk.new_lines,
-                added_lines: hunk.added_lines,
-                deleted_lines: hunk.deleted_lines,
-                submodule_dirty_only: hunk.submodule_dirty_only,
-                context: hunk.context,
-            })
-            .collect(),
-        blame_lines: snapshot
-            .blame_lines
-            .into_iter()
-            .map(|line| GitBlameLineProjection {
-                path: line.path,
-                line_number: line.line_number,
-                commit_short: line.commit_short,
-                author: line.author,
-                summary: line.summary,
-                line_preview: line.line_preview,
-            })
-            .collect(),
-        commits: snapshot
-            .commits
-            .into_iter()
-            .map(|commit| GitCommitProjection {
-                hash: commit.hash,
-                short_hash: commit.short_hash,
-                author: commit.author,
-                date: commit.date,
-                summary: commit.summary,
-                parent_count: commit.parent_count,
-                refs: commit.refs,
-            })
-            .collect(),
-        conflicts: snapshot
-            .conflicts
-            .into_iter()
-            .map(|conflict| GitConflictProjection {
-                path: conflict.path,
-                marker_count: conflict.marker_count,
-                actions: conflict.actions,
-            })
-            .collect(),
-        worktrees: snapshot
-            .worktrees
-            .into_iter()
-            .map(|worktree| GitWorktreeProjection {
-                path: worktree.path,
-                branch_label: worktree.branch_label,
-                head_short: worktree.head_short,
-                kind: match worktree.kind {
-                    legion_project::ProjectGitWorktreeKind::Agent => {
-                        GitWorktreeKindProjection::Agent
-                    }
-                    legion_project::ProjectGitWorktreeKind::Manual => {
-                        GitWorktreeKindProjection::Manual
-                    }
-                },
-                prunable: worktree.prunable,
-            })
-            .collect(),
-        diagnostics: snapshot.diagnostics,
-        generated_at: snapshot.generated_at,
-        schema_version: snapshot.schema_version,
-        // Navigation state and local history entries are injected at the app layer after build.
-        focused_hunk_id: None,
-        commit_validation_warnings: Vec::new(),
-        commit_validation_errors: Vec::new(),
-        local_history_entries: Vec::new(),
-        remote_policy_audit: Vec::new(),
-    }
-}
-
-fn git_diff_strategy_projection(strategy: GitDiffStrategy) -> GitDiffStrategyProjection {
-    match strategy {
-        GitDiffStrategy::Syntactic => GitDiffStrategyProjection::Syntactic,
-        GitDiffStrategy::LineFallback => GitDiffStrategyProjection::LineFallback,
-    }
-}
-
-fn git_hunk_stage_projection(stage: GitHunkStage) -> GitHunkStageProjection {
-    match stage {
-        GitHunkStage::Unstaged => GitHunkStageProjection::Unstaged,
-        GitHunkStage::Staged => GitHunkStageProjection::Staged,
-    }
-}
-
 /// Strip the Windows UNC prefix `\\?\` from a path string (no-op on non-Windows paths).
 /// Used to normalise canonical paths for comparison when user-supplied paths may lack the prefix.
 fn strip_unc_prefix(path: &str) -> &str {
@@ -13281,6 +13184,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-stage-focused-hunk",
+            title: "Git: Stage Focused Hunk",
+            detail: "Stage the currently focused unstaged hunk",
+            shortcut_label: Some("Ctrl+Shift+G"),
+        },
+        PaletteCommandSpec {
             id: "git-switch-branch",
             title: "Git: Switch Branch",
             detail: "Switch to another Git branch",
@@ -13361,6 +13270,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "acp-attach-host",
+            title: "ACP: Attach Host",
+            detail: "Attach an optional local ACP adapter bridge",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "close-palette",
             title: "Close Command Palette",
             detail: "Close the command palette",
@@ -13415,6 +13330,30 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Restart the language server",
             shortcut_label: None,
         },
+        PaletteCommandSpec {
+            id: "language-format",
+            title: "Language: Format Document",
+            detail: "Create a formatting proposal preview",
+            shortcut_label: Some("Shift+Alt+F"),
+        },
+        PaletteCommandSpec {
+            id: "language-rename",
+            title: "Language: Rename Symbol",
+            detail: "Enter a new name and create a proposal preview",
+            shortcut_label: Some("F2"),
+        },
+        PaletteCommandSpec {
+            id: "language-organize-imports",
+            title: "Language: Organize Imports",
+            detail: "Create an organize-imports proposal preview",
+            shortcut_label: Some("Ctrl+Shift+O"),
+        },
+        PaletteCommandSpec {
+            id: "language-code-action",
+            title: "Language: Code Action",
+            detail: "Enter an action id and create a proposal preview",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -13423,12 +13362,14 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "save-all" => Some(CommandDispatchIntent::SaveAll),
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "git-stage-focused-hunk" => Some(CommandDispatchIntent::StageFocusedGitHunk),
         "refresh-tests" => Some(CommandDispatchIntent::RefreshTestExplorer),
         "run-test" => None, // requires item id via :test-run <id>
         "git-switch-branch" => None,
         "git-create-branch" => None,
         "git-delete-branch" => None,
         "git-stash" => None,
+        "acp-attach-host" => None,
         "git-push" => Some(CommandDispatchIntent::PushGitRemote {
             remote: "origin".to_string(),
         }),
@@ -13461,6 +13402,10 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         // PKT-LSP-C T1: language server lifecycle palette commands.
         "lsp-start-session" => Some(CommandDispatchIntent::LspStartSession),
         "lsp-restart-session" => Some(CommandDispatchIntent::LspRestartSession),
+        "language-format"
+        | "language-rename"
+        | "language-organize-imports"
+        | "language-code-action" => None,
         _ => None,
     }
 }
@@ -14207,7 +14152,7 @@ pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
 
 /// Root application composition.
 pub struct AppComposition {
-    workspace: WorkspaceActor,
+    workspace: Arc<WorkspaceActor>,
     editor: EditorEngine,
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
@@ -14293,7 +14238,6 @@ pub struct AppComposition {
     #[cfg(feature = "ai")]
     in_flight_delegated_task: Option<InFlightDelegatedTaskRun>,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
-    #[cfg(any(test, feature = "test-helpers"))]
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
     legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
@@ -14305,8 +14249,15 @@ pub struct AppComposition {
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
     search_projection: SearchProjection,
+    search_worker: crate::search::SearchWorker,
+    search_generation: u64,
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
+    git_worker: GitWorker,
+    git_latest_generation: u64,
+    git_applied_generation: u64,
+    git_in_flight: bool,
+    pending_mutation: Option<GitWorkRequest>,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
@@ -14580,6 +14531,14 @@ impl AppComposition {
         ))
     }
 
+    /// Build composition with an injected Git runner for deterministic worker tests.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new_with_git_runner_for_test(runner: GitInspectionRunner) -> Self {
+        let mut app = Self::new();
+        app.git_worker = GitWorker::new_with_runner(runner);
+        app
+    }
+
     /// Build composition with native platform adapters and an injected event sink.
     pub fn with_event_sink(event_sink: SharedEventSink) -> Self {
         let fs = Arc::new(NativeFileSystem);
@@ -14588,14 +14547,15 @@ impl AppComposition {
             SecurityPolicy::default(),
             CapabilityNamespace("app".to_string()),
         );
+        let workspace = Arc::new(WorkspaceActor::with_event_sink(
+            fs,
+            watcher,
+            security,
+            Box::new(event_sink.clone()),
+        ));
 
         Self {
-            workspace: WorkspaceActor::with_event_sink(
-                fs,
-                watcher,
-                security,
-                Box::new(event_sink.clone()),
-            ),
+            workspace: Arc::clone(&workspace),
             editor: EditorEngine::new(),
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
@@ -14646,7 +14606,6 @@ impl AppComposition {
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
-            #[cfg(any(test, feature = "test-helpers"))]
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
             legion_workflow_plan_artifacts: HashMap::new(),
@@ -14658,8 +14617,15 @@ impl AppComposition {
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
             search_projection: SearchProjection::idle(),
+            search_worker: crate::search::SearchWorker::new(Arc::clone(&workspace)),
+            search_generation: 0,
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
+            git_worker: GitWorker::new(),
+            git_latest_generation: 0,
+            git_applied_generation: 0,
+            git_in_flight: false,
+            pending_mutation: None,
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             git_remote_policy_audit: Vec::new(),
@@ -15317,6 +15283,11 @@ impl AppComposition {
         self.live_product_ai_stream.is_in_flight()
     }
 
+    /// Whether a search worker request is still settling.
+    pub fn search_worker_in_flight(&self) -> bool {
+        self.search_projection.status.kind == SearchStatusKindProjection::Running
+    }
+
     /// Poll live stream into `last_product_ai_stream` and apply finished background jobs.
     ///
     /// Returns `true` when the retained stream, chat projection, or Assist proposal
@@ -15618,9 +15589,13 @@ impl AppComposition {
     }
 
     /// Configure the optional ACP host command used by delegated tasks.
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_acp_host_command(&mut self, program: impl Into<PathBuf>, args: Vec<String>) {
         self.acp_host_command = Some(AcpHostCommand::new(program, args));
+    }
+
+    /// Clear the optional ACP host command and return to manual behavior.
+    pub fn clear_acp_host_command(&mut self) {
+        self.acp_host_command = None;
     }
 
     /// Removes delegated-task sandbox directories left behind by crashed or
@@ -17034,7 +17009,7 @@ impl AppComposition {
         };
 
         let recent_bonus = self.palette_recent_path_bonus_map();
-        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?
+        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?
             .into_iter()
             .filter(workspace_node_is_regular_file)
             .map(|node| node.identity.canonical_path.0)
@@ -17363,6 +17338,9 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "git-stage-focused-hunk" => {
+                            Some(CommandDispatchIntent::StageFocusedGitHunk)
+                        }
                         "git-switch-branch" => {
                             match parse_palette_command_operands(
                                 command_id,
@@ -17407,6 +17385,17 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "acp-attach-host" => {
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::AcpHost { program, args })) => {
+                                    Some(CommandDispatchIntent::AttachAcpHost { program, args })
+                                }
+                                _ => None,
+                            }
+                        }
                         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
                         "git-remove-worktree" => {
                             match parse_palette_command_operands(
@@ -17443,6 +17432,64 @@ impl AppComposition {
                             (!path.is_empty()).then_some(
                                 CommandDispatchIntent::RequestLocalHistoryEntries { path },
                             )
+                        }
+                        "language-format" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestFormattingProposal { buffer_id }
+                            })
+                        }
+                        "language-organize-imports" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
+                            })
+                        }
+                        "language-rename" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let Some(Ok(PaletteCommandOperands::RenameName(new_name))) =
+                                parse_palette_command_operands(
+                                    command_id,
+                                    palette_query_body(PaletteMode::Command, &self.palette.query),
+                                )
+                            else {
+                                return None;
+                            };
+                            let cursor = self.editor.primary_cursor(buffer_id).ok()?;
+                            let text = self.editor.text(buffer_id).ok()?.to_string();
+                            let line_start = text
+                                .split_inclusive('\n')
+                                .take(cursor.line)
+                                .map(str::len)
+                                .sum::<usize>();
+                            let byte_offset = line_start.saturating_add(cursor.column);
+                            let character = text
+                                .get(line_start..byte_offset)
+                                .map(|line| line.chars().count() as u32)
+                                .unwrap_or(0);
+                            Some(CommandDispatchIntent::RequestRenameProposal {
+                                buffer_id,
+                                position: TextCoordinate {
+                                    line: cursor.line as u32,
+                                    character,
+                                    byte_offset: Some(byte_offset as u64),
+                                    utf16_offset: None,
+                                },
+                                new_name,
+                            })
+                        }
+                        "language-code-action" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let Some(Ok(PaletteCommandOperands::CodeActionId(action_id))) =
+                                parse_palette_command_operands(
+                                    command_id,
+                                    palette_query_body(PaletteMode::Command, &self.palette.query),
+                                )
+                            else {
+                                return None;
+                            };
+                            Some(CommandDispatchIntent::RequestCodeActionProposal {
+                                buffer_id,
+                                action_id,
+                            })
                         }
                         _ => palette_command_intent(command_id),
                     })
@@ -18017,6 +18064,7 @@ impl AppComposition {
         &mut self,
         intent: CommandDispatchIntent,
     ) -> Result<AppCommandOutcome, AppCompositionError> {
+        self.drain_git_inspection();
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
@@ -18267,7 +18315,7 @@ impl AppComposition {
         if let Some(outcome) = CommandExecutionService::execute(
             &request,
             &mut self.editor,
-            &self.workspace,
+            &*self.workspace,
             &mut state,
         )? {
             state.apply_to_active(&mut self.active_documents);
@@ -18350,6 +18398,10 @@ impl AppComposition {
             ),
             AppCommandRequest::OpenSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
+            }
+            AppCommandRequest::AttachAcpHost { program, args } => {
+                self.set_acp_host_command(program.clone(), args.clone());
+                Ok(AppCommandOutcome::Noop)
             }
             AppCommandRequest::SetThemePreference { preference } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_theme_preference(preference)),
@@ -18447,6 +18499,14 @@ impl AppComposition {
             AppCommandRequest::StageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
             )),
+            AppCommandRequest::StageFocusedGitHunk => {
+                let Some(hunk_id) = self.focused_git_hunk_id.clone() else {
+                    return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
+                };
+                Ok(AppCommandOutcome::GitUpdated(
+                    self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
+                ))
+            }
             AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
             )),
@@ -18525,12 +18585,15 @@ impl AppComposition {
                     self.git_projection.commit_validation_warnings = validation.warnings;
                     return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
                 }
-                commit_git_changes(Path::new(root_path), &message)
-                    .map_err(git_inspection_protocol_error)?;
                 // Clear stale validation state after a successful commit.
                 self.git_projection.commit_validation_errors = Vec::new();
                 self.git_projection.commit_validation_warnings = Vec::new();
-                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+                Ok(AppCommandOutcome::GitUpdated(self.enqueue_git_mutation(
+                    GitMutateOp::Commit {
+                        root: PathBuf::from(root_path),
+                        message,
+                    },
+                )?))
             }
             AppCommandRequest::SwitchGitBranch { branch } => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -19938,7 +20001,7 @@ impl AppComposition {
             let _spawn_message_id = self.delegate_workflow.record_system_message(
                 format!(
                     "acp.host.spawn status={} stdout_bytes={} stderr_bytes={}",
-                    host_output.status,
+                    host_output.status_label,
                     host_output.stdout.len(),
                     host_output.stderr.len()
                 ),
@@ -19947,7 +20010,7 @@ impl AppComposition {
                 correlation_id,
                 causality_id,
             );
-            if !host_output.status.success() {
+            if !host_output.success {
                 let _terminate_message_id = self.delegate_workflow.record_system_message(
                     format!(
                         "acp.host.terminate failure stdout={} stderr={}",
@@ -20146,6 +20209,8 @@ impl AppComposition {
         #[cfg(any(test, feature = "test-helpers"))]
         let inject_spawn_failure = std::mem::take(&mut self.injected_delegated_spawn_failure);
         let worker_cancellation = cancellation_flag.clone();
+        let acp_host_command = self.acp_host_command.clone();
+        let worker_task_id = task_id.clone();
         let mut sandbox_guard =
             DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
         let worker = move || {
@@ -20180,6 +20245,7 @@ impl AppComposition {
                         loop_result: Some(
                             legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled,
                         ),
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: None,
                         sandbox_enforcement_label: None,
                     });
@@ -20188,10 +20254,27 @@ impl AppComposition {
                     return Ok(DelegatedTaskRunCompletion {
                         audit_steps: Vec::new(),
                         loop_result: None,
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: Some(error.to_string()),
                         sandbox_enforcement_label: None,
                     });
                 }
+                let acp_proposals = if let Some(command) = acp_host_command.as_ref() {
+                    let target_file = config.worktree_root.join(format!(
+                        "delegated-task/{}.proposal.txt",
+                        safe_path_component(&worker_task_id, "task")
+                    ));
+                    vec![run_acp_host_proposal(
+                        command,
+                        &config.worktree_root,
+                        &target_file,
+                        &worker_task_id,
+                        correlation_id,
+                        causality_id,
+                    )?]
+                } else {
+                    Vec::new()
+                };
                 let tool_host = AppDelegatedToolHost::new(
                     config.worktree_root.clone(),
                     std::collections::BTreeSet::new(),
@@ -20211,6 +20294,7 @@ impl AppComposition {
                 Ok(DelegatedTaskRunCompletion {
                     audit_steps: audit_sink.steps,
                     loop_result: Some(loop_result),
+                    acp_proposals,
                     sandbox_allocation_failure: None,
                     sandbox_enforcement_label: tool_host.last_enforcement_summary(),
                 })
@@ -20332,6 +20416,7 @@ impl AppComposition {
         Ok(Some(self.finish_background_delegated_task(
             loop_result,
             completion.audit_steps,
+            completion.acp_proposals,
         )?))
     }
 
@@ -20340,6 +20425,7 @@ impl AppComposition {
         &mut self,
         loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
         audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+        acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
         use legion_agent::agent_loop::DelegatedTaskLoopResult;
         match &loop_result {
@@ -20355,8 +20441,10 @@ impl AppComposition {
         Ok(match loop_result {
             DelegatedTaskLoopResult::Completed {
                 final_message,
-                proposals,
+                proposals: loop_proposals,
             } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -20379,10 +20467,15 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
                 // Register before reporting: these proposals are reviewable on
                 // the same terms as a completed run's, and the run is still
                 // waiting on a human either way.
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -21178,6 +21271,34 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = sandbox_guard.orchestrator.sandbox_path().to_path_buf();
+        let acp_proposals = if let Some(command) = self.acp_host_command.as_ref() {
+            let target_file = sandbox_path.join(format!(
+                "delegated-task/{}.proposal.txt",
+                safe_path_component(&task_id, "task")
+            ));
+            match run_acp_host_proposal(
+                command,
+                &sandbox_path,
+                &target_file,
+                &task_id,
+                correlation_id,
+                causality_id,
+            ) {
+                Ok(proposal) => vec![proposal],
+                Err(error) => {
+                    let cleanup_result = sandbox_guard.cleanup();
+                    let message = match cleanup_result {
+                        Ok(()) => error.to_string(),
+                        Err(cleanup_error) => format!("{error}; {cleanup_error}"),
+                    };
+                    self.delegate_workflow
+                        .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
         // Build the tool host backed by `spawn_sandboxed`.
         let tool_host =
@@ -21331,7 +21452,9 @@ impl AppComposition {
                 final_message,
                 proposals: loop_proposals,
             } => {
-                let registered = self.register_delegated_task_proposals(loop_proposals)?;
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
+                let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
                     proposals: registered,
@@ -21350,7 +21473,12 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::StoppedNoProgress {
                     reason,
@@ -25170,6 +25298,7 @@ impl AppComposition {
                     "cargo test discovery requires a trusted workspace".to_string(),
                 ));
             }
+            test_explorer::invalidate_published_discovery_cache(Path::new(root_path));
             test_explorer::discover_cargo_tests(
                 Path::new(root_path),
                 test_explorer::DEFAULT_DISCOVER_TIMEOUT,
@@ -25390,120 +25519,6 @@ impl AppComposition {
             added = added.saturating_add(1);
         }
         Ok(added)
-    }
-
-    /// Refresh app-owned git projection data for the active workspace.
-    pub fn refresh_git_projection(&mut self) -> GitProjection {
-        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
-            self.git_hunk_cache.clear();
-            self.git_projection = GitProjection {
-                diagnostics: vec!["git.workspace_not_open".to_string()],
-                generated_at: TimestampMillis::now(),
-                worktrees: Vec::new(),
-                ..GitProjection::idle()
-            };
-            return self.git_projection.clone();
-        };
-        let active_file = self
-            .active_documents
-            .active_file_path
-            .as_deref()
-            .map(PathBuf::from);
-        match collect_git_snapshot(
-            Path::new(root_path),
-            active_file.as_deref(),
-            GitSnapshotOptions::default(),
-        ) {
-            Ok(snapshot) => {
-                self.git_hunk_cache = snapshot
-                    .hunks
-                    .iter()
-                    .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
-                    .collect();
-                self.git_projection = git_projection_from_project(snapshot);
-            }
-            Err(error) => {
-                self.git_hunk_cache.clear();
-                self.git_projection = GitProjection {
-                    root_label: Some(root_path.to_string()),
-                    diagnostics: vec![format!("git.refresh_failed: {error}")],
-                    generated_at: TimestampMillis::now(),
-                    worktrees: Vec::new(),
-                    ..GitProjection::idle()
-                };
-            }
-        }
-        // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
-        // not in the project snapshot, so it must be injected after each build.
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        // Same for the remote-policy audit trail: a denied push refreshes the
-        // projection, and the user must still be able to read why it was denied.
-        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
-        // Propagate any local-history blob-write degradation as a diagnostic.
-        if let Some(ref err) = self.local_history_last_write_error {
-            self.git_projection
-                .diagnostics
-                .push(format!("local_history.write_degraded: {err}"));
-        }
-        self.git_projection.clone()
-    }
-
-    /// Navigate to the next or previous hunk in the diff review surface.
-    ///
-    /// `forward` — true = next, false = prev.
-    /// `by_file` — true = jump to first hunk of next/prev file, false = adjacent hunk.
-    fn navigate_git_hunk(&mut self, forward: bool, by_file: bool) -> GitProjection {
-        let hunks = &self.git_projection.hunks;
-        if hunks.is_empty() {
-            return self.git_projection.clone();
-        }
-
-        let current_idx = self
-            .focused_git_hunk_id
-            .as_deref()
-            .and_then(|id| hunks.iter().position(|h| h.hunk_id == id));
-
-        let new_id = if by_file {
-            // Jump to the first hunk of the next/prev file.
-            let current_path = current_idx
-                .and_then(|i| hunks.get(i))
-                .map(|h| h.path.as_str());
-            if forward {
-                // Find the first hunk whose path differs and comes after current.
-                let start = current_idx.map(|i| i + 1).unwrap_or(0);
-                hunks[start..]
-                    .iter()
-                    .find(|h| current_path.is_none_or(|p| h.path != p))
-                    .map(|h| h.hunk_id.clone())
-                    .or_else(|| hunks.first().map(|h| h.hunk_id.clone()))
-            } else {
-                // Find the last hunk whose path differs and comes before current.
-                let end = current_idx.unwrap_or(hunks.len());
-                hunks[..end]
-                    .iter()
-                    .rev()
-                    .find(|h| current_path.is_none_or(|p| h.path != p))
-                    .and_then(|h| {
-                        // Jump to the *first* hunk of that file.
-                        let target_path = h.path.clone();
-                        hunks.iter().find(|hh| hh.path == target_path)
-                    })
-                    .map(|h| h.hunk_id.clone())
-                    .or_else(|| hunks.last().map(|h| h.hunk_id.clone()))
-            }
-        } else if forward {
-            let next_idx = current_idx.map(|i| (i + 1) % hunks.len()).unwrap_or(0);
-            hunks.get(next_idx).map(|h| h.hunk_id.clone())
-        } else {
-            let prev_idx = current_idx
-                .map(|i| if i == 0 { hunks.len() - 1 } else { i - 1 })
-                .unwrap_or_else(|| hunks.len() - 1);
-            hunks.get(prev_idx).map(|h| h.hunk_id.clone())
-        };
-
-        self.focused_git_hunk_id = new_id;
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        self.git_projection.clone()
     }
 
     /// Return local history entries for the given canonical path, newest first.
@@ -25870,14 +25885,11 @@ impl AppComposition {
         // `sub/blob.bin` and `git add -- sub/blob.bin` executed there resolves to
         // `/repo/sub/sub/blob.bin`. The control then failed for every file in
         // such a workspace, which is an ordinary way to open one.
-        let repo_root =
-            git_repository_root(Path::new(root_path)).map_err(git_inspection_protocol_error)?;
-        if stage {
-            stage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
-        } else {
-            unstage_git_path(&repo_root, path).map_err(git_inspection_protocol_error)?;
-        }
-        Ok(self.refresh_git_projection())
+        self.enqueue_git_mutation(GitMutateOp::Path {
+            root: PathBuf::from(root_path),
+            path: path.to_string(),
+            stage,
+        })
     }
 
     fn stage_or_unstage_git_hunk(
@@ -25903,13 +25915,11 @@ impl AppComposition {
                 ),
             ));
         }
-        match expected_stage {
-            GitHunkStage::Unstaged => stage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-            GitHunkStage::Staged => unstage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-        }
-        Ok(self.refresh_git_projection())
+        self.enqueue_git_mutation(GitMutateOp::Hunk {
+            root: PathBuf::from(root_path),
+            hunk,
+            stage: matches!(expected_stage, GitHunkStage::Unstaged),
+        })
     }
 
     /// Enable the real terminal runtime for app integration tests.
@@ -26017,6 +26027,8 @@ impl AppComposition {
     /// Enable the DAP debug runtime for app integration tests.
     pub fn enable_debug_runtime_for_tests(&mut self) {
         self.debug_workflow.enable_runtime();
+        self.debug_workflow
+            .set_dap_mode_for_tests(legion_debug::DapMode::Fixture);
     }
 
     /// Compatibility alias for older debug integration tests.
@@ -28907,7 +28919,7 @@ impl AppComposition {
     /// Build explorer projection from workspace tree snapshot.
     pub fn explorer_projection(&self) -> Result<ExplorerProjection, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let nodes = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?;
+        let nodes = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?;
         Ok(ProjectionBuilder::explorer_projection(
             &self.active_documents,
             nodes,
@@ -35315,6 +35327,33 @@ mod lsp_explicit_start_tests {
         assert!(
             specs.iter().any(|s| s.id == "lsp-restart-session"),
             "lsp-restart-session palette command must be registered"
+        );
+        for command_id in [
+            "language-format",
+            "language-rename",
+            "language-organize-imports",
+            "language-code-action",
+        ] {
+            assert!(
+                specs.iter().any(|spec| spec.id == command_id),
+                "{command_id} palette command must be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn pr12_language_palette_operands_are_parsed() {
+        assert_eq!(
+            parse_palette_command_operands("language-rename", "language rename NewName"),
+            Some(Ok(PaletteCommandOperands::RenameName(
+                "NewName".to_string(),
+            )))
+        );
+        assert_eq!(
+            parse_palette_command_operands("language-code-action", "code action quick-fix"),
+            Some(Ok(PaletteCommandOperands::CodeActionId(
+                "quick-fix".to_string()
+            )))
         );
     }
 

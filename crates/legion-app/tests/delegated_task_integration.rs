@@ -97,6 +97,29 @@ fn acp_host_command() -> (PathBuf, Vec<String>) {
     )
 }
 
+#[cfg(windows)]
+fn failing_acp_host_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("powershell"),
+        vec![
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Error 'intentional ACP failure'; exit 7".to_string(),
+        ],
+    )
+}
+
+#[cfg(not(windows))]
+fn failing_acp_host_command() -> (PathBuf, Vec<String>) {
+    (
+        PathBuf::from("/bin/sh"),
+        vec![
+            "-c".to_string(),
+            "printf 'intentional ACP failure\\n' >&2; exit 7".to_string(),
+        ],
+    )
+}
+
 #[cfg(not(windows))]
 fn acp_host_command() -> (PathBuf, Vec<String>) {
     (
@@ -962,6 +985,157 @@ fn execute_delegated_task_uses_acp_host_command_and_projects_comm_stream() {
         }
         other => panic!("expected ProposalReady, got {other:?}"),
     }
+}
+
+#[test]
+fn start_delegated_task_consumes_acp_host_into_proposal_mediation() {
+    let root = temp_workspace("acp-production");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("acp-production-test".to_string()),
+    )
+    .expect("workspace opens for production ACP flow");
+    app.set_product_mode(AppProductMode::Delegate);
+    let (program, args) = acp_host_command();
+    app.set_acp_host_command(program, args);
+
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("The delegated worker completed without an edit.")
+        .build("test-scripted-production-acp");
+    let outcome = app
+        .start_delegated_task(
+            "Run the attached ACP host in the delegated sandbox".to_string(),
+            test_scope(&root),
+            &provider,
+        )
+        .expect("production delegated ACP flow should complete");
+
+    let AppDelegatedTaskOutcome::Completed { proposals, .. } = outcome else {
+        panic!("expected a completed delegated run, got {outcome:?}");
+    };
+    assert_eq!(proposals.len(), 1, "ACP output must become one proposal");
+    let ProposalPayload::CreateFile(payload) = &proposals[0].payload else {
+        panic!("ACP output must use the path-based proposal payload");
+    };
+    assert!(
+        payload.path.0.contains("delegated-task/") && payload.path.0.ends_with(".proposal.txt"),
+        "ACP proposal must remain sandbox-relative: {}",
+        payload.path.0
+    );
+    assert!(
+        payload
+            .initial_content
+            .as_deref()
+            .is_some_and(|content| content.contains("external-agent=claude-code")),
+        "ACP host output must be preserved inside the proposal payload"
+    );
+}
+
+#[test]
+fn background_delegated_task_consumes_acp_host_into_proposal_mediation() {
+    let root = temp_workspace("acp-background-production");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("acp-background-production-test".to_string()),
+    )
+    .expect("workspace opens for background ACP flow");
+    app.set_product_mode(AppProductMode::Delegate);
+    let (program, args) = acp_host_command();
+    app.set_acp_host_command(program, args);
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("The background delegated worker completed.")
+        .build("test-scripted-background-acp");
+
+    app.start_delegated_task_background(
+        "Run the attached ACP host in the background sandbox".to_string(),
+        test_scope(&root),
+        Box::new(provider),
+    )
+    .expect("background delegated ACP flow should start");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let outcome = loop {
+        if let Some(outcome) = app
+            .poll_delegated_task()
+            .expect("background ACP completion should merge")
+        {
+            break outcome;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background ACP flow did not finish"
+        );
+        std::thread::yield_now();
+    };
+    let AppDelegatedTaskOutcome::Completed { proposals, .. } = outcome else {
+        panic!("expected a completed background run, got {outcome:?}");
+    };
+    assert_eq!(
+        proposals.len(),
+        1,
+        "background ACP output must be one proposal"
+    );
+    assert!(matches!(
+        &proposals[0].payload,
+        ProposalPayload::CreateFile(payload)
+            if payload.path.0.contains("delegated-task/")
+                && payload.path.0.ends_with(".proposal.txt")
+    ));
+}
+
+#[test]
+fn background_delegated_task_projects_acp_host_failure() {
+    let root = temp_workspace("acp-background-failure");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("acp-background-failure-test".to_string()),
+    )
+    .expect("workspace opens for background ACP failure flow");
+    app.set_product_mode(AppProductMode::Delegate);
+    let (program, args) = failing_acp_host_command();
+    app.set_acp_host_command(program, args);
+    let provider = ScriptedToolCallingProviderBuilder::new()
+        .end_turn("provider should not hide ACP failure")
+        .build("test-scripted-background-acp-failure");
+
+    app.start_delegated_task_background(
+        "Run the failing attached ACP host".to_string(),
+        test_scope(&root),
+        Box::new(provider),
+    )
+    .expect("background delegated ACP failure flow should start");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let error = loop {
+        match app.poll_delegated_task() {
+            Err(error) => break error,
+            Ok(None) => {}
+            Ok(Some(outcome)) => panic!("failed ACP host cannot produce outcome: {outcome:?}"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background ACP failure did not surface"
+        );
+        std::thread::yield_now();
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("ACP host command exited unsuccessfully")
+    );
+    let snapshot = app
+        .shell_projection_snapshot("acp-background-failure")
+        .expect("failure projection should remain readable");
+    assert_eq!(
+        snapshot.delegated_task_projection.runtime_activation,
+        DelegatedTaskRuntimeActivationState::Failed
+    );
 }
 
 #[test]

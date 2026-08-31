@@ -491,6 +491,7 @@ impl SmokeObservations {
         NativePlatformObservation {
             focused: self.focused,
             pixels_per_point: self.pixels_per_point,
+            os_accessibility_tree: None,
         }
     }
 

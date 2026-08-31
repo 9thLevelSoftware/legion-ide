@@ -10,6 +10,7 @@ use legion_protocol::{
     AgentRunId, CausalityId, CorrelationId, PrincipalId, ProtocolTextRange, TextCoordinate,
     ViewportScroll, ViewportSemanticTokenKind, WorkspaceTrustState,
 };
+use legion_storage::HotExitStore;
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -561,6 +562,107 @@ fn daily_editing_contracts_session_record_is_metadata_only() {
             .session_record
             .is_some()
     );
+}
+
+#[test]
+fn daily_editing_contracts_hot_exit_restores_dirty_body_without_writing_disk() {
+    let root = create_root();
+    let target = root.join("session.txt");
+    std::fs::write(&target, "seed").expect("seed target");
+    let dirty_body = "SECRET_DIRTY_BODY";
+
+    let mut app = trusted_app(&root);
+    app.open_file(target.to_string_lossy())
+        .expect("open target");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), dirty_body))
+        .expect("edit target");
+    let record = app
+        .capture_workspace_session_record()
+        .expect("capture session");
+    let snapshots = app.capture_hot_exit_snapshots().expect("capture hot-exit");
+    assert_eq!(snapshots.len(), 1);
+    assert!(snapshots[0].body.contains(dirty_body));
+    let dir = root.join("unsaved");
+    HotExitStore::save(&dir, &snapshots).expect("save hot-exit");
+    let serialized_shape = format!("{record:?}");
+    assert!(!serialized_shape.contains(dirty_body));
+
+    drop(app);
+    let mut restored = trusted_app(&root);
+    restored
+        .restore_workspace_session_record(&record)
+        .expect("restore tabs");
+    let loaded = HotExitStore::load(&dir).expect("load hot-exit");
+    let count = restored
+        .restore_hot_exit_snapshots(&loaded)
+        .expect("restore hot-exit");
+    assert_eq!(count, 1);
+    let snapshot = restored
+        .shell_projection_snapshot("daily")
+        .expect("snapshot");
+    let text = snapshot
+        .active_buffer_projection
+        .small_buffer_text()
+        .expect("text");
+    assert!(text.contains(dirty_body), "restored text was {text:?}");
+    let disk = std::fs::read_to_string(&target).expect("disk");
+    assert_eq!(disk, "seed");
+}
+
+#[test]
+fn daily_editing_contracts_hot_exit_conflicts_when_disk_fingerprint_changed() {
+    let root = create_root();
+    let target = root.join("session.txt");
+    std::fs::write(&target, "seed").expect("seed target");
+    let dirty_body = "SECRET_DIRTY_BODY";
+
+    let mut app = trusted_app(&root);
+    app.open_file(target.to_string_lossy())
+        .expect("open target");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), dirty_body))
+        .expect("edit target");
+    let record = app
+        .capture_workspace_session_record()
+        .expect("capture session");
+    let snapshots = app.capture_hot_exit_snapshots().expect("capture hot-exit");
+    assert!(snapshots[0].disk_fingerprint.is_some());
+    let dir = root.join("unsaved");
+    HotExitStore::save(&dir, &snapshots).expect("save hot-exit");
+
+    drop(app);
+    std::fs::write(&target, "external-edit").expect("external overwrite");
+    let mut restored = trusted_app(&root);
+    restored
+        .restore_workspace_session_record(&record)
+        .expect("restore tabs");
+    let loaded = HotExitStore::load(&dir).expect("load hot-exit");
+    let count = restored
+        .restore_hot_exit_snapshots(&loaded)
+        .expect("restore hot-exit");
+    assert_eq!(count, 1);
+    let snapshot = restored
+        .shell_projection_snapshot("daily")
+        .expect("snapshot");
+    let text = snapshot
+        .active_buffer_projection
+        .small_buffer_text()
+        .expect("text");
+    assert!(
+        text.contains(dirty_body),
+        "fingerprint mismatch must restore dirty body as unsaved, got {text:?}"
+    );
+    let recapture = restored
+        .capture_hot_exit_snapshots()
+        .expect("recapture hot-exit");
+    assert_eq!(recapture.len(), 1);
+    assert!(recapture[0].body.contains(dirty_body));
+    let outcome = restored.save_active_buffer().expect("save");
+    assert!(
+        matches!(outcome, AppSaveOutcome::Rejected(_)),
+        "save must conflict against the external edit, got {outcome:?}"
+    );
+    let disk = std::fs::read_to_string(&target).expect("disk");
+    assert_eq!(disk, "external-edit");
 }
 
 #[test]

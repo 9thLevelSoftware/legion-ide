@@ -30,12 +30,13 @@ use legion_protocol::{
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
-    OsKeyringSecretStore, SecretStore, provider_api_key_reference, provider_secret_reference,
+    HotExitStore, OsKeyringSecretStore, SecretStore, provider_api_key_reference,
+    provider_secret_reference,
 };
 use legion_ui::{
-    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, PaletteMode, PanelId,
-    SearchScopeProjection, SearchStatusKindProjection, SettingsProjection, Shell,
-    ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
+    CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, GitRefreshState,
+    PaletteMode, PanelId, SearchScopeProjection, SearchStatusKindProjection, SettingsProjection,
+    Shell, ShellProjectionSnapshot, StatusMessageProjection, StatusSeverity,
 };
 
 use crate::{
@@ -814,6 +815,26 @@ impl DesktopRuntime {
                 let (restore_status, restore_details) = restore_status_messages(&restore);
                 status = restore_status;
                 status_details = restore_details;
+                if let Some(session_path) = &config.session_state {
+                    let dir = HotExitStore::dir_for_session(session_path);
+                    match HotExitStore::load(&dir) {
+                        Ok(snapshots) => match app.restore_hot_exit_snapshots(&snapshots) {
+                            Ok(0) => {}
+                            Ok(count) => status_details.push(status_message(
+                                StatusSeverity::Info,
+                                format!("Restored {count} unsaved buffer(s) from last session"),
+                            )),
+                            Err(error) => status_details.push(status_message(
+                                StatusSeverity::Warning,
+                                format!("Could not restore unsaved buffers: {error}"),
+                            )),
+                        },
+                        Err(error) => status_details.push(status_message(
+                            StatusSeverity::Warning,
+                            format!("Could not load unsaved buffers: {error}"),
+                        )),
+                    }
+                }
             } else {
                 status = status_message(
                     StatusSeverity::Warning,
@@ -1517,6 +1538,11 @@ impl DesktopRuntime {
         self.app.product_ai_stream_in_flight()
     }
 
+    /// Whether the app-owned search worker still has a request settling.
+    pub fn search_worker_in_flight(&self) -> bool {
+        self.app.search_worker_in_flight()
+    }
+
     /// Whether the audit trail still owes a route record a write.
     pub fn has_pending_route_audits(&self) -> bool {
         self.app.has_pending_route_audits()
@@ -1525,6 +1551,14 @@ impl DesktopRuntime {
     /// Current shell projection snapshot for rendering and tests.
     pub fn projection_snapshot(&self) -> ShellProjectionSnapshot {
         self.shell.projection_snapshot()
+    }
+
+    /// Drain Git inspections to completion for deterministic tests and golden paths.
+    pub fn drain_git_until_idle(&mut self) {
+        self.app.drain_git_until_idle();
+        if let Ok(snapshot) = self.app.shell_projection_snapshot(WINDOW_TITLE) {
+            self.shell.replace_projection_snapshot(snapshot);
+        }
     }
 
     /// Return durable checkpoint summaries from the app-owned checkpoint store.
@@ -1851,7 +1885,15 @@ impl DesktopRuntime {
             return Ok(());
         }
         DesktopSessionStore::save(&path, &record)?;
+        self.persist_hot_exit_snapshots(&path)?;
         self.last_saved_session_fingerprint = fingerprint;
+        Ok(())
+    }
+
+    fn persist_hot_exit_snapshots(&mut self, session_path: &Path) -> Result<()> {
+        let snapshots = self.app.capture_hot_exit_snapshots()?;
+        HotExitStore::save(&HotExitStore::dir_for_session(session_path), &snapshots)
+            .map_err(|error| anyhow!("hot-exit snapshot save failed: {error}"))?;
         Ok(())
     }
 
@@ -3472,6 +3514,11 @@ impl DesktopRuntime {
 
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
+        self.app.drain_git_inspection();
+        self.app.drain_test_explorer_runs();
+        // Search work is also app-owned and worker-backed; drain only completed
+        // results so stale rows and the Running state remain observable.
+        self.app.drain_search_worker();
         let mut snapshot = self.app.shell_projection_snapshot(WINDOW_TITLE)?;
 
         // T6: auto-open popup when new completions arrive from the LSP worker.
@@ -4218,6 +4265,17 @@ impl DesktopEframeApp {
         // requiring another user gesture after launch.
         {
             let snapshot = self.runtime.projection_snapshot();
+            if snapshot.git_projection.refresh_state == GitRefreshState::Refreshing {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            if snapshot.test_explorer_projection.status_label == "discovering"
+                || snapshot.test_explorer_projection.status_label == "running"
+                || snapshot.test_explorer_projection.last_run_status.as_deref() == Some("running")
+            {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
             if snapshot
                 .terminal_panel_projection
                 .active_session_id
@@ -4248,6 +4306,7 @@ impl DesktopEframeApp {
         // turn would read as `Streaming` for as long as that took.
         if self.runtime.poll_product_ai_stream()
             || self.runtime.product_ai_stream_in_flight()
+            || self.runtime.search_worker_in_flight()
             || self.runtime.has_pending_route_audits()
         {
             ui.ctx()

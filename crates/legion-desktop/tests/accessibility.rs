@@ -7,7 +7,9 @@ use std::{
 
 use legion_desktop::{
     platform::{
-        DesktopPlatformAdapterChecks, NativePlatformObservation, build_platform_smoke_snapshot,
+        DesktopPlatformAdapterChecks, NativePlatformObservation, WindowsUiaProbeObservation,
+        build_platform_smoke_snapshot, committed_windows_uia_probe_script,
+        parse_windows_uia_probe_output, probe_windows_uia_tree,
     },
     view::ProjectionView,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
@@ -1204,9 +1206,145 @@ fn live_regions_surface_status_message_counts_in_the_accessibility_projection() 
         .expect("status live region should be projected");
 
     assert_eq!(status_node.label, "2 status messages");
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+#[test]
+fn committed_windows_uia_probe_output_parses_the_captured_walk() {
+    let script = committed_windows_uia_probe_script()
+        .expect("scripts/a11y-uia-walk.ps1 must be locatable from the crate");
     assert!(
-        smoke
-            .accessibility_tree_smoke
-            .contains("metadata-only projection accessibility nodes 2; OS tree not observed")
+        script.ends_with(std::path::Path::new("scripts/a11y-uia-walk.ps1")),
+        "probe path should resolve to the committed script, got {script:?}"
     );
+
+    let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt");
+    let stdout = fs::read_to_string(&evidence).expect("committed Windows UIA walk should exist");
+    let observation =
+        parse_windows_uia_probe_output(&stdout).expect("captured walk printed UIA_WALK_OK");
+    assert_eq!(observation.descendant_count, 138);
+
+    assert!(parse_windows_uia_probe_output("PROCESS_NOT_FOUND: legion-desktop").is_none());
+    assert!(parse_windows_uia_probe_output("UIA_LOAD_FAILED: missing assemblies").is_none());
+    assert!(parse_windows_uia_probe_output("NO_TOPLEVEL_WINDOW_FOR_PROCESS").is_none());
+}
+
+#[test]
+fn accessibility_tree_status_reports_injected_windows_uia_observation() {
+    let mut snapshot = Shell::empty("Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation {
+            os_accessibility_tree: Some(WindowsUiaProbeObservation {
+                descendant_count: 138,
+            }),
+            ..NativePlatformObservation::default()
+        },
+    );
+
+    assert_eq!(
+        smoke.accessibility_tree_smoke,
+        "metadata-only projection accessibility nodes 2; Windows UIA observed 138 descendants"
+    );
+    assert!(!smoke.accessibility_tree_smoke.contains("macOS"));
+    assert!(!smoke.accessibility_tree_smoke.contains("Linux"));
+}
+
+#[test]
+fn accessibility_tree_status_matches_the_live_windows_uia_probe() {
+    let mut snapshot = Shell::empty("Live Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation::default(),
+    );
+
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+fn assert_os_tree_status_matches_probe(status: &str, node_count: usize) {
+    assert!(
+        status.starts_with(&format!(
+            "metadata-only projection accessibility nodes {node_count}; "
+        )),
+        "unexpected accessibility tree status: {status}"
+    );
+    assert!(
+        !status.contains("macOS")
+            && !status.contains("Linux")
+            && !status.contains("AT-SPI")
+            && !status.contains("AXUIElement")
+            && !status.contains("VoiceOver")
+            && !status.contains("Orca"),
+        "must not claim a macOS or Linux probe: {status}"
+    );
+    if let Some(rest) = status.rsplit_once("Windows UIA observed ") {
+        let count = rest
+            .1
+            .strip_suffix(" descendants")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                panic!("Windows UIA status must include a descendant count: {status}")
+            });
+        let observed = probe_windows_uia_tree()
+            .expect("status claimed a Windows UIA walk, so the committed probe must succeed");
+        assert_eq!(observed.descendant_count, count);
+        assert!(!status.contains("OS tree not observed"));
+    } else {
+        assert!(
+            status.contains("OS tree not observed"),
+            "absent Windows UIA walk must stay an honest miss, got {status}"
+        );
+    }
+}
+
+#[test]
+fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let probe = root.join("scripts/a11y-platform-probe.sh");
+    let evidence = root.join("plans/evidence/accessibility/PR-15-manual-keyboard-path.md");
+
+    let probe_text = fs::read_to_string(probe).expect("PR-15 probe contract");
+    assert!(probe_text.contains("observation=unobserved"));
+    assert!(probe_text.contains("a11y-uia-walk.ps1"));
+
+    let evidence_text = fs::read_to_string(evidence).expect("PR-15 evidence packet");
+    for platform in ["macOS", "Linux"] {
+        assert!(evidence_text.contains(&format!("| {platform} |")));
+        assert!(evidence_text.contains(&format!(
+            "| {platform} | No committed OS-tree probe | Unobserved. |"
+        )));
+    }
+    assert!(evidence_text.contains("Manual keyboard-only path"));
+    for route in [
+        ":search-workspace <query>",
+        ":definition <byte-offset>",
+        ":git-stage-hunk <hunk-id>",
+        ":term-launch <command>",
+        "Git: Commit Staged Changes",
+    ] {
+        assert!(
+            evidence_text.contains(route),
+            "evidence should name the available route `{route}`"
+        );
+    }
+    assert!(evidence_text.contains("not a renderer-backed keyboard path"));
+    assert!(evidence_text.contains("remains pending"));
+    assert!(!evidence_text.contains("Use the published palette/keymap to"));
+    assert!(!evidence_text.contains("`Git: Stage Focused Hunk` from its published"));
 }

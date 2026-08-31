@@ -9,7 +9,7 @@
 //! `legion-app`/`legion-editor` (`check-deps` enforces that): they live in
 //! product-crate binaries that this harness spawns, and the results come back
 //! through [`crate::perf_workloads`] (`legion-app --bin product_perf`),
-//! [`large_file_perf_measurement`] (`legion-app --bin large_file_perf`), and
+//! [`run_renderer_backed_large_file_measurement`] and
 //! [`run_renderer_backed_manual_measurement`] (`legion-desktop --manual-perf`).
 //!
 //! What still runs in-process here:
@@ -63,6 +63,8 @@ const SEARCH_STREAM_50K_BUDGET_MILLIS: u64 = 0;
 const LARGE_FILE_100MB_BUDGET_MILLIS: u64 = MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
+pub const LARGE_FILE_MANUAL_RENDERER_PERF_REPORT_FILE: &str =
+    "large_file_manual_renderer_perf.toml";
 
 /// Environment variable that, when set to a positive millisecond count,
 /// overrides the per-skeleton budget. Used by the failing-gate CI leg.
@@ -101,14 +103,14 @@ pub enum SkeletonKind {
     /// only the visible viewport rows looked up/shaped per frame.
     #[serde(rename = "line_galley_shaping_cache", alias = "linegalleyshapingcache")]
     LineGalleyShapingCache,
-    /// Real 100MB large-file measurement supplied by the `large_file_perf`
-    /// subprocess.
+    /// Real 100MB large-file measurement supplied by the
+    /// `legion-desktop --manual-perf` subprocess.
     ///
     /// Every other large-file number this harness reports is a synthetic
     /// stand-in, because `xtask` cannot depend on `legion-editor`. This one
-    /// opens an actual 100MB file through the streaming path and measures
-    /// typing in it, which is the question that decides whether large files
-    /// are usable rather than merely openable.
+    /// opens an actual 100MB file through the desktop renderer path and
+    /// measures typing and scrolling in it, which is the question that decides
+    /// whether large files are usable rather than merely openable.
     #[serde(rename = "large_file_100mb", alias = "largefile100mb")]
     LargeFile100Mb,
     /// Renderer-backed Manual editor input-to-paint measurement supplied by
@@ -1045,6 +1047,46 @@ pub fn manual_renderer_perf_measurement(report: &ManualRendererPerfToml) -> Skel
     }
 }
 
+pub fn large_file_manual_renderer_perf_measurement(
+    report: &ManualRendererPerfToml,
+    fixture_bytes: usize,
+    budget_millis: u64,
+) -> SkeletonMeasurement {
+    let p50_micros = report.keypress_p50_micros;
+    let p95_micros = report.keypress_p95_micros.max(report.scroll_p95_micros);
+    let status = if report.status == "skipped" {
+        SkeletonStatus::Skipped
+    } else if report.status == "passed" && p50_micros <= budget_millis.saturating_mul(1_000) {
+        SkeletonStatus::Passed
+    } else {
+        SkeletonStatus::Failed
+    };
+    let message = if report.message.trim().is_empty() {
+        format!(
+            "renderer-backed 100MB file: status={} keypress_p50={}us scroll_p95={}us",
+            report.status, p50_micros, report.scroll_p95_micros
+        )
+    } else {
+        format!("renderer-backed 100MB file: {}", report.message)
+    };
+
+    SkeletonMeasurement {
+        name: "m9.large_file_100mb".to_string(),
+        kind: SkeletonKind::LargeFile100Mb,
+        fixture_bytes,
+        sample_count: report.sample_count,
+        total_micros: p50_micros.saturating_add(report.scroll_p95_micros),
+        p50_micros,
+        p95_micros,
+        budget_millis,
+        status,
+        message,
+        measured: report.status != "skipped",
+        bytes_value: 0,
+        synthetic_stand_in: false,
+    }
+}
+
 /// Write the report to `<out_dir>/perf_report.toml`. Returns the absolute
 /// path of the written file on success.
 pub fn write_report(out_dir: &Path, report: &PerfReport) -> Result<PathBuf, String> {
@@ -1300,6 +1342,111 @@ pub fn run_renderer_backed_manual_measurement(
     }
 }
 
+pub fn run_renderer_backed_large_file_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+    initial_file: &Path,
+    fixture_bytes: usize,
+    budget_millis: u64,
+) -> SkeletonMeasurement {
+    let report_path = out_dir.join(LARGE_FILE_MANUAL_RENDERER_PERF_REPORT_FILE);
+    match fs::remove_file(&report_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return placeholder_large_file_manual_measurement(
+                SkeletonStatus::Failed,
+                fixture_bytes,
+                budget_millis,
+                format!(
+                    "unable to clear stale report `{}`: {err}",
+                    report_path.display()
+                ),
+            );
+        }
+    }
+
+    let sample_count = MANUAL_RENDERER_SAMPLE_COUNT.to_string();
+    let output = std::process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "legion-desktop",
+            "--no-default-features",
+            "--features",
+            "offline",
+            "--",
+            "--manual-perf",
+            "--workspace",
+        ])
+        .arg(workspace_root)
+        .args(["--file"])
+        .arg(initial_file)
+        .args(["--perf-report"])
+        .arg(&report_path)
+        .args(["--perf-samples", &sample_count])
+        .output();
+
+    match output {
+        Err(err) => placeholder_large_file_manual_measurement(
+            SkeletonStatus::Skipped,
+            fixture_bytes,
+            budget_millis,
+            format!("unable to spawn renderer-backed desktop subprocess: {err}"),
+        ),
+        Ok(output) => match read_manual_renderer_perf_report(&report_path) {
+            Ok(report) => {
+                large_file_manual_renderer_perf_measurement(&report, fixture_bytes, budget_millis)
+            }
+            Err(read_err) => {
+                let output_text = subprocess_output_text(&output);
+                let status = if !output.status.success()
+                    && (manual_renderer_environment_blocked(&output_text)
+                        || manual_renderer_build_failed(&output_text))
+                {
+                    SkeletonStatus::Skipped
+                } else {
+                    SkeletonStatus::Failed
+                };
+                placeholder_large_file_manual_measurement(
+                    status,
+                    fixture_bytes,
+                    budget_millis,
+                    format!(
+                        "renderer-backed 100MB report unavailable: {read_err}{}",
+                        command_output_suffix(&output_text)
+                    ),
+                )
+            }
+        },
+    }
+}
+
+pub fn placeholder_large_file_manual_measurement(
+    status: SkeletonStatus,
+    fixture_bytes: usize,
+    budget_millis: u64,
+    message: String,
+) -> SkeletonMeasurement {
+    SkeletonMeasurement {
+        name: "m9.large_file_100mb".to_string(),
+        kind: SkeletonKind::LargeFile100Mb,
+        fixture_bytes,
+        sample_count: MANUAL_RENDERER_SAMPLE_COUNT,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis,
+        status,
+        message,
+        measured: false,
+        bytes_value: 0,
+        synthetic_stand_in: false,
+    }
+}
+
 /// Build a placeholder measurement for the renderer-backed manual skeleton
 /// when the subprocess cannot run or its report cannot be read.
 pub fn placeholder_manual_measurement(
@@ -1550,6 +1697,57 @@ mod tests {
             Some(SEARCH_STREAM_50K_FILE_COUNT),
             "file_count must carry the file count"
         );
+    }
+
+    #[test]
+    fn large_file_renderer_measurement_gates_keypress_p50_and_marks_real_data() {
+        let report = ManualRendererPerfToml {
+            schema_version: 1,
+            scenario: MANUAL_RENDERER_SCENARIO.to_string(),
+            status: "passed".to_string(),
+            sample_count: 16,
+            keypress_p50_micros: 17_000,
+            keypress_p95_micros: 24_000,
+            scroll_p95_micros: 19_000,
+            keypress_p50_budget_ms: 16,
+            keypress_p95_budget_ms: 32,
+            scroll_p95_budget_ms: 32,
+            message: "renderer completed".to_string(),
+        };
+
+        let measurement =
+            large_file_manual_renderer_perf_measurement(&report, 100 * 1024 * 1024, 16);
+
+        assert_eq!(measurement.status, SkeletonStatus::Failed);
+        assert!(measurement.measured);
+        assert!(!measurement.synthetic_stand_in);
+        assert_eq!(measurement.p50_micros, 17_000);
+        assert_eq!(measurement.fixture_bytes, 100 * 1024 * 1024);
+        assert_eq!(measurement.bytes_value, 0);
+    }
+
+    #[test]
+    fn large_file_renderer_measurement_keeps_headless_result_report_only() {
+        let report = ManualRendererPerfToml {
+            schema_version: 1,
+            scenario: MANUAL_RENDERER_SCENARIO.to_string(),
+            status: "skipped".to_string(),
+            sample_count: 16,
+            keypress_p50_micros: 0,
+            keypress_p95_micros: 0,
+            scroll_p95_micros: 0,
+            keypress_p50_budget_ms: 16,
+            keypress_p95_budget_ms: 32,
+            scroll_p95_budget_ms: 32,
+            message: "renderer unavailable".to_string(),
+        };
+
+        let measurement =
+            large_file_manual_renderer_perf_measurement(&report, 100 * 1024 * 1024, 16);
+
+        assert_eq!(measurement.status, SkeletonStatus::Skipped);
+        assert!(!measurement.measured);
+        assert!(measurement.message.contains("renderer-backed 100MB file"));
     }
 
     // ── MIN-1: fuzzy_score_tuple wrapper ─────────────────────────────────────

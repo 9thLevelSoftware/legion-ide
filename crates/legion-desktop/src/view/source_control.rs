@@ -9,8 +9,8 @@
 
 use legion_protocol::TextCoordinate;
 use legion_ui::{
-    GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, PaletteMode,
-    ShellProjectionSnapshot,
+    GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, GitRefreshState,
+    PaletteMode, ShellProjectionSnapshot,
 };
 
 use super::components::soft_button;
@@ -22,6 +22,20 @@ pub(super) fn render_git_controls(
     snapshot: &ShellProjectionSnapshot,
     actions: &mut Vec<DesktopAction>,
 ) {
+    let refresh_label = match snapshot.git_projection.refresh_state {
+        GitRefreshState::Idle => None,
+        GitRefreshState::Refreshing => Some("Git refresh: Refreshing"),
+        GitRefreshState::TimedOut => Some("Git refresh: TimedOut"),
+        GitRefreshState::Failed => Some("Git refresh: Failed"),
+        GitRefreshState::AuthRequired => Some("Git refresh: AuthRequired"),
+    };
+    if let Some(label) = refresh_label {
+        let response = ui.label(theme::muted(label));
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_role(egui::accesskit::Role::Status);
+            node.set_label(label);
+        });
+    }
     ui.horizontal_wrapped(|ui| {
         if soft_button(ui, "Refresh Git").clicked() {
             actions.push(DesktopAction::RefreshGit);
@@ -759,9 +773,11 @@ pub(super) fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
         || !git.conflicts.is_empty()
         || !git.worktrees.is_empty()
         || !git.diagnostics.is_empty()
+        || git.refresh_state != GitRefreshState::Idle
     {
         rows.push(format!(
-            "git: branch={} head={} changes={} hunks={} conflicts={} worktrees={}",
+            "git: refresh={:?} branch={} head={} changes={} hunks={} conflicts={} worktrees={}",
+            git.refresh_state,
             git.branch_label.as_deref().unwrap_or("<none>"),
             git.head_short.as_deref().unwrap_or("<none>"),
             git.changed_files.len(),
@@ -770,19 +786,31 @@ pub(super) fn git_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
             git.worktrees.len()
         ));
     }
-    rows.extend(git.changed_files.iter().take(16).map(|file| {
-        format!(
-            "git file {} status={} diff={:?} +{} -{} hunks={}/{} conflict={}",
-            file.path,
-            file.status,
-            file.diff_strategy,
-            file.inserted_lines,
-            file.deleted_lines,
-            file.staged_hunk_count,
-            file.unstaged_hunk_count,
-            file.conflict
-        )
-    }));
+    let mut grouped_files = std::collections::BTreeMap::<String, Vec<_>>::new();
+    for file in git.changed_files.iter().take(16) {
+        let group = file
+            .path
+            .rsplit_once('/')
+            .map(|(directory, _)| directory.to_string())
+            .unwrap_or_else(|| "<root>".to_string());
+        grouped_files.entry(group).or_default().push(file);
+    }
+    for (group, files) in grouped_files {
+        rows.push(format!("git group {group}"));
+        rows.extend(files.into_iter().map(|file| {
+            format!(
+                "git file {} status={} diff={:?} +{} -{} hunks={}/{} conflict={}",
+                file.path,
+                file.status,
+                file.diff_strategy,
+                file.inserted_lines,
+                file.deleted_lines,
+                file.staged_hunk_count,
+                file.unstaged_hunk_count,
+                file.conflict
+            )
+        }));
+    }
     rows.extend(git.hunks.iter().take(20).map(|hunk| {
         format!(
             "git hunk {} {} stage={:?} +{} -{} {}",
@@ -1136,5 +1164,44 @@ mod stage_window_rules {
             "advancing past the end emptied the list, so the control that moves the window \
              can lose the window"
         );
+    }
+}
+
+#[cfg(test)]
+mod grouped_rows {
+    use super::git_rows;
+    use legion_ui::{GitDiffStrategyProjection, GitFileProjection, Shell};
+
+    #[test]
+    fn git_rows_group_changed_files_without_dropping_file_details() {
+        let mut snapshot = Shell::empty("grouped git rows").projection_snapshot();
+        let file = |path: &str| GitFileProjection {
+            path: path.to_string(),
+            status: " M".to_string(),
+            inserted_lines: 1,
+            deleted_lines: 0,
+            unstaged_hunk_count: 1,
+            staged_hunk_count: 0,
+            stageable: true,
+            diff_strategy: GitDiffStrategyProjection::Syntactic,
+            fallback_reason: None,
+            conflict: false,
+        };
+        snapshot.git_projection.changed_files = vec![
+            file("src/lib.rs"),
+            file("src/bin/main.rs"),
+            file("README.md"),
+        ];
+
+        let rows = git_rows(&snapshot);
+        assert!(rows.iter().any(|row| row == "git group src"));
+        assert!(rows.iter().any(|row| row == "git group src/bin"));
+        assert!(rows.iter().any(|row| row == "git group <root>"));
+        for path in ["src/lib.rs", "src/bin/main.rs", "README.md"] {
+            assert!(
+                rows.iter().any(|row| row.contains(path)),
+                "grouped Git rows dropped {path}: {rows:?}"
+            );
+        }
     }
 }

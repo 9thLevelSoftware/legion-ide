@@ -4,8 +4,11 @@
 //! back to `cargo test -- --list`. Per-item run uses the lens command label or
 //! `cargo test -- --exact <id>`. Projections stay metadata-only.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use legion_protocol::{
@@ -25,6 +28,44 @@ pub const MAX_PROJECTED_ITEMS: usize = 500;
 
 /// Maximum retained per-item run rows for the verification projection.
 pub const MAX_RECENT_RUNS: usize = 20;
+
+struct DiscoveryWorker {
+    handle: Option<JoinHandle<TestExplorerProjection>>,
+    result: Option<TestExplorerProjection>,
+}
+
+struct RunWorker {
+    handle: JoinHandle<Result<CargoTestItemRunResult, String>>,
+    workspace_root: PathBuf,
+    started_at: TimestampMillis,
+}
+
+static DISCOVERY_WORKER: OnceLock<Mutex<HashMap<PathBuf, DiscoveryWorker>>> = OnceLock::new();
+static RUN_WORKER: OnceLock<Mutex<HashMap<String, RunWorker>>> = OnceLock::new();
+
+fn discovery_worker() -> &'static Mutex<HashMap<PathBuf, DiscoveryWorker>> {
+    DISCOVERY_WORKER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn run_worker() -> &'static Mutex<HashMap<String, RunWorker>> {
+    RUN_WORKER.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pending_projection(
+    status_label: &str,
+    controller_label: &str,
+    generated_at: TimestampMillis,
+    diagnostic: &str,
+) -> TestExplorerProjection {
+    let mut projection = projection_from_items(
+        Vec::new(),
+        vec![diagnostic.to_string()],
+        status_label,
+        generated_at,
+    );
+    projection.controller_label = controller_label.to_string();
+    projection
+}
 
 /// Maximum stdout bytes retained transiently for summary parsing (not projected).
 const MAX_PARSE_STDOUT_BYTES: usize = 16 * 1024;
@@ -313,6 +354,70 @@ pub fn run_cargo_test_filter(
         });
     }
 
+    let key = format!(
+        "{}\u{1f}{}\u{1f}{}",
+        workspace_root.to_string_lossy(),
+        filter,
+        exact
+    );
+    let mut worker = run_worker()
+        .lock()
+        .map_err(|_| "test-worker-lock-poisoned".to_string())?;
+    if let Some(existing) = worker.get(&key) {
+        if existing.handle.is_finished() {
+            let existing = worker.remove(&key).expect("worker still present");
+            return existing
+                .handle
+                .join()
+                .map_err(|_| "test-worker-panicked".to_string())?;
+        }
+        return Ok(CargoTestItemRunResult {
+            item_id: filter.to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: vec!["worker=background".to_string()],
+        });
+    }
+    let workspace_root = workspace_root.to_path_buf();
+    let filter_owned = filter.to_string();
+    let started_at = TimestampMillis::now();
+    let handle = std::thread::Builder::new()
+        .name("legion-test-runner".to_string())
+        .spawn({
+            let workspace_root = workspace_root.clone();
+            move || run_cargo_test_filter_blocking(&workspace_root, &filter_owned, exact, timeout)
+        })
+        .map_err(|err| format!("spawn-failed:{err}"))?;
+    worker.insert(
+        key,
+        RunWorker {
+            handle,
+            workspace_root,
+            started_at,
+        },
+    );
+    Ok(CargoTestItemRunResult {
+        item_id: filter.to_string(),
+        status_label: "running".to_string(),
+        exit_code: None,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        duration_ms: 0,
+        diagnostics: vec!["worker=background".to_string()],
+    })
+}
+
+fn run_cargo_test_filter_blocking(
+    workspace_root: &Path,
+    filter: &str,
+    exact: bool,
+    timeout: Duration,
+) -> Result<CargoTestItemRunResult, String> {
     let started = Instant::now();
     let mut args = vec!["test".to_string(), "--".to_string()];
     if exact {
@@ -408,6 +513,13 @@ pub fn run_cargo_test_filter(
 
 /// Cap retained protocol test-run summaries for agent evidence (P2.F3.T5).
 pub fn push_test_run_summary(summaries: &mut Vec<TestRunSummary>, summary: TestRunSummary) {
+    if let Some(existing) = summaries
+        .iter_mut()
+        .find(|existing| existing.run_id == summary.run_id)
+    {
+        *existing = summary;
+        return;
+    }
     summaries.insert(0, summary);
     if summaries.len() > MAX_RECENT_RUNS {
         summaries.truncate(MAX_RECENT_RUNS);
@@ -450,6 +562,15 @@ pub fn apply_run_to_projection(
 
 /// Prepend a run row and cap recent history.
 pub fn push_recent_run(runs: &mut Vec<VerificationRunRow>, row: VerificationRunRow) {
+    if let Some(existing) = runs.iter_mut().find(|existing| {
+        existing.run_id == row.run_id
+            || (row.state != VerificationRunState::Running
+                && existing.state == VerificationRunState::Running
+                && existing.target_labels == row.target_labels)
+    }) {
+        *existing = row;
+        return;
+    }
     runs.insert(0, row);
     if runs.len() > MAX_RECENT_RUNS {
         runs.truncate(MAX_RECENT_RUNS);
@@ -460,6 +581,147 @@ pub fn push_recent_run(runs: &mut Vec<VerificationRunRow>, row: VerificationRunR
 ///
 /// Metadata-only: stdout is parsed for names/kinds; raw logs are not retained.
 pub fn discover_cargo_tests(
+    workspace_root: &Path,
+    timeout: Duration,
+    generated_at: TimestampMillis,
+) -> TestExplorerProjection {
+    let mut worker = match discovery_worker().lock() {
+        Ok(worker) => worker,
+        Err(_) => {
+            return pending_projection("error", "cargo-test", generated_at, "worker-lock-poisoned");
+        }
+    };
+    let workspace_root_key = workspace_root.to_path_buf();
+    if let Some(existing) = worker.get_mut(&workspace_root_key) {
+        if let Some(result) = existing.result.as_ref() {
+            return result.clone();
+        }
+        if existing
+            .handle
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            let handle = existing.handle.take().expect("discovery worker handle");
+            existing.result = Some(handle.join().unwrap_or_else(|_| {
+                pending_projection("error", "cargo-test", generated_at, "worker-panicked")
+            }));
+            return existing.result.clone().expect("discovery result");
+        }
+        return pending_projection(
+            "discovering",
+            "cargo-test",
+            generated_at,
+            "worker=background",
+        );
+    }
+    let root = workspace_root.to_path_buf();
+    let handle = match std::thread::Builder::new()
+        .name("legion-test-discoverer".to_string())
+        .spawn(move || discover_cargo_tests_blocking(&root, timeout, generated_at))
+    {
+        Ok(handle) => handle,
+        Err(err) => {
+            return pending_projection(
+                "error",
+                "cargo-test",
+                generated_at,
+                &format!("spawn-failed:{err}"),
+            );
+        }
+    };
+    worker.insert(
+        workspace_root_key,
+        DiscoveryWorker {
+            handle: Some(handle),
+            result: None,
+        },
+    );
+    pending_projection(
+        "discovering",
+        "cargo-test",
+        generated_at,
+        "worker=background",
+    )
+}
+
+/// Drop a *published* discovery result so the next explicit Refresh reruns `cargo test --list`.
+///
+/// In-flight workers are left alone: killing them on every Refresh would
+/// prevent `refresh_until_settled` (and the UI) from ever observing `ready`.
+pub fn invalidate_published_discovery_cache(workspace_root: &Path) {
+    if let Ok(mut worker) = discovery_worker().lock() {
+        let key = workspace_root.to_path_buf();
+        if worker
+            .get(&key)
+            .is_some_and(|existing| existing.result.is_some())
+        {
+            worker.remove(&key);
+        }
+    }
+}
+
+struct FinishedRun {
+    started_at: TimestampMillis,
+    result: Result<CargoTestItemRunResult, String>,
+}
+
+/// Join cargo-test workers that have finished, without requiring another Run click.
+fn poll_finished_runs(workspace_root: &Path) -> Vec<FinishedRun> {
+    let mut finished = Vec::new();
+    let Ok(mut worker) = run_worker().lock() else {
+        return finished;
+    };
+    let keys: Vec<String> = worker
+        .iter()
+        .filter(|(_, existing)| {
+            existing.handle.is_finished() && existing.workspace_root == workspace_root
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        let Some(existing) = worker.remove(&key) else {
+            continue;
+        };
+        finished.push(FinishedRun {
+            started_at: existing.started_at,
+            result: existing
+                .handle
+                .join()
+                .unwrap_or_else(|_| Err("test-worker-panicked".to_string())),
+        });
+    }
+    finished
+}
+
+impl crate::AppComposition {
+    /// Apply completed cargo-test workers without requiring another Run click.
+    pub fn drain_test_explorer_runs(&mut self) -> bool {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+            return false;
+        };
+        let root = PathBuf::from(root);
+        let results = poll_finished_runs(&root);
+        let mut applied = false;
+        for finished in results {
+            let Ok(result) = finished.result else {
+                continue;
+            };
+            if result.status_label == "running" {
+                continue;
+            }
+            self.record_test_explorer_run_result(&result, finished.started_at);
+            self.test_explorer_projection = apply_run_to_projection(
+                self.test_explorer_projection.clone(),
+                &result,
+                TimestampMillis::now(),
+            );
+            applied = true;
+        }
+        applied
+    }
+}
+
+fn discover_cargo_tests_blocking(
     workspace_root: &Path,
     timeout: Duration,
     generated_at: TimestampMillis,
@@ -704,5 +966,103 @@ nested::deep::case: test
                 .iter()
                 .any(|d| d.starts_with("last-run:t::one:passed"))
         );
+    }
+
+    #[test]
+    fn push_recent_run_replaces_running_row_for_same_target() {
+        let running = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        }
+        .to_verification_row(TimestampMillis(10));
+        let passed = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "passed".to_string(),
+            exit_code: Some(0),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 12,
+            diagnostics: Vec::new(),
+        }
+        .to_verification_row(TimestampMillis(10));
+        let mut runs = Vec::new();
+        push_recent_run(&mut runs, running);
+        push_recent_run(&mut runs, passed);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, VerificationRunState::Passed);
+        assert_eq!(runs[0].exit_code, Some(0));
+        assert_eq!(runs[0].target_labels, vec!["t::one".to_string()]);
+    }
+
+    #[test]
+    fn push_test_run_summary_replaces_same_run_id() {
+        let running = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        }
+        .to_test_run_summary(TimestampMillis(10));
+        let passed = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "passed".to_string(),
+            exit_code: Some(0),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 12,
+            diagnostics: Vec::new(),
+        }
+        .to_test_run_summary(TimestampMillis(10));
+        let mut summaries = Vec::new();
+        push_test_run_summary(&mut summaries, running);
+        push_test_run_summary(&mut summaries, passed);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].state, TestRunState::Passed);
+        assert_eq!(summaries[0].passed, 1);
+    }
+
+    #[test]
+    fn discovery_and_run_start_as_background_operations() {
+        let root = std::env::temp_dir().join(format!(
+            "legion-test-explorer-worker-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create worker root");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"worker_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("write manifest");
+
+        let discovery = discover_cargo_tests(&root, Duration::from_secs(10), TimestampMillis(1));
+        assert_eq!(discovery.status_label, "discovering");
+        let run = run_cargo_test_item(&root, "tests::fixture", Duration::from_secs(10))
+            .expect("start test worker");
+        assert_eq!(run.status_label, "running");
+
+        for _ in 0..120 {
+            let discovery =
+                discover_cargo_tests(&root, Duration::from_secs(10), TimestampMillis(2));
+            let run = run_cargo_test_item(&root, "tests::fixture", Duration::from_secs(10))
+                .expect("poll test worker");
+            if discovery.status_label != "discovering" && run.status_label != "running" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }
