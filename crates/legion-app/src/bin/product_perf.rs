@@ -587,7 +587,7 @@ fn measure_memory_ceiling(ready: &ReadyWorkspace) -> WorkloadRecord {
 /// Real product workspace search over this repository.
 fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
     match run_workspace_search(&mut ready.app, REPO_NEEDLE, 100_000) {
-        Ok((hits, elapsed)) if hits == 0 => {
+        Ok((0, elapsed)) => {
             // Zero hits means the walk never read this file's contents, so the
             // number would describe a directory listing rather than a search.
             WorkloadRecord::unmeasured(
