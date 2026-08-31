@@ -5,7 +5,6 @@ use std::process::Command;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -72,12 +71,6 @@ const WINDOW_TITLE: &str = PRODUCT_NAME;
 
 fn is_new_definition_response(last_operation_id: Option<&str>, operation_id: Option<&str>) -> bool {
     operation_id.is_some_and(|current| last_operation_id != Some(current))
-}
-
-fn hash_hot_exit_body(body: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    body.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// Process launch configuration for the desktop adapter.
@@ -702,8 +695,6 @@ pub struct DesktopRuntime {
     /// Encoding of the last session record actually written, so an action that
     /// changed nothing a restart would restore does not pay for a durable write.
     last_saved_session_fingerprint: Option<String>,
-    /// Last written hot-exit body hashes, keyed by canonical path.
-    last_hot_exit_hashes: BTreeMap<String, u64>,
     diagnostics_export_path: Option<PathBuf>,
     onboarding_visible: bool,
     quit_requested: bool,
@@ -891,7 +882,6 @@ impl DesktopRuntime {
             dock_layouts_user_arranged,
             session_state_path: config.session_state,
             last_saved_session_fingerprint: None,
-            last_hot_exit_hashes: BTreeMap::new(),
             diagnostics_export_path: config.diagnostics_export,
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
@@ -1902,16 +1892,8 @@ impl DesktopRuntime {
 
     fn persist_hot_exit_snapshots(&mut self, session_path: &Path) -> Result<()> {
         let snapshots = self.app.capture_hot_exit_snapshots()?;
-        let hashes: BTreeMap<String, u64> = snapshots
-            .iter()
-            .map(|snapshot| (snapshot.path.clone(), hash_hot_exit_body(&snapshot.body)))
-            .collect();
-        if hashes == self.last_hot_exit_hashes {
-            return Ok(());
-        }
         HotExitStore::save(&HotExitStore::dir_for_session(session_path), &snapshots)
             .map_err(|error| anyhow!("hot-exit snapshot save failed: {error}"))?;
-        self.last_hot_exit_hashes = hashes;
         Ok(())
     }
 
@@ -3533,6 +3515,7 @@ impl DesktopRuntime {
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
         self.app.drain_git_inspection();
+        self.app.drain_test_explorer_runs();
         // Search work is also app-owned and worker-backed; drain only completed
         // results so stale rows and the Running state remain observable.
         self.app.drain_search_worker();

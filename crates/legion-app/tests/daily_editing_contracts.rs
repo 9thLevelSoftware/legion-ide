@@ -610,6 +610,51 @@ fn daily_editing_contracts_hot_exit_restores_dirty_body_without_writing_disk() {
 }
 
 #[test]
+fn daily_editing_contracts_hot_exit_skips_restore_when_disk_fingerprint_changed() {
+    let root = create_root();
+    let target = root.join("session.txt");
+    std::fs::write(&target, "seed").expect("seed target");
+    let dirty_body = "SECRET_DIRTY_BODY";
+
+    let mut app = trusted_app(&root);
+    app.open_file(target.to_string_lossy())
+        .expect("open target");
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), dirty_body))
+        .expect("edit target");
+    let record = app
+        .capture_workspace_session_record()
+        .expect("capture session");
+    let snapshots = app.capture_hot_exit_snapshots().expect("capture hot-exit");
+    assert!(snapshots[0].disk_fingerprint.is_some());
+    let dir = root.join("unsaved");
+    HotExitStore::save(&dir, &snapshots).expect("save hot-exit");
+
+    drop(app);
+    std::fs::write(&target, "external-edit").expect("external overwrite");
+    let mut restored = trusted_app(&root);
+    restored
+        .restore_workspace_session_record(&record)
+        .expect("restore tabs");
+    let loaded = HotExitStore::load(&dir).expect("load hot-exit");
+    let count = restored
+        .restore_hot_exit_snapshots(&loaded)
+        .expect("restore hot-exit");
+    assert_eq!(count, 0);
+    let snapshot = restored
+        .shell_projection_snapshot("daily")
+        .expect("snapshot");
+    let text = snapshot
+        .active_buffer_projection
+        .small_buffer_text()
+        .expect("text");
+    assert!(
+        text.contains("external-edit"),
+        "fingerprint mismatch must keep disk body, got {text:?}"
+    );
+    assert!(!text.contains(dirty_body));
+}
+
+#[test]
 fn daily_editing_contracts_session_record_restores_memory_snapshot() {
     let root = create_root();
     let mut app = trusted_app(&root);

@@ -27,10 +27,9 @@ fn qual11_taxonomy_defines_p0_register_and_labels() {
 
 #[test]
 fn release_blocker_issue_template_is_not_the_bug_template() {
-    let template = fs::read_to_string(
-        repo_root().join(".github/ISSUE_TEMPLATE/release-blocker.yml"),
-    )
-    .expect("release-blocker issue form");
+    let template =
+        fs::read_to_string(repo_root().join(".github/ISSUE_TEMPLATE/release-blocker.yml"))
+            .expect("release-blocker issue form");
     assert!(template.contains("name: Release blocker"));
     assert!(template.contains("qual-11"));
     assert!(template.contains("release-blocker"));

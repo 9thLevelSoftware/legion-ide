@@ -1166,3 +1166,42 @@ mod stage_window_rules {
         );
     }
 }
+
+#[cfg(test)]
+mod grouped_rows {
+    use super::git_rows;
+    use legion_ui::{GitDiffStrategyProjection, GitFileProjection, Shell};
+
+    #[test]
+    fn git_rows_group_changed_files_without_dropping_file_details() {
+        let mut snapshot = Shell::empty("grouped git rows").projection_snapshot();
+        let file = |path: &str| GitFileProjection {
+            path: path.to_string(),
+            status: " M".to_string(),
+            inserted_lines: 1,
+            deleted_lines: 0,
+            unstaged_hunk_count: 1,
+            staged_hunk_count: 0,
+            stageable: true,
+            diff_strategy: GitDiffStrategyProjection::Syntactic,
+            fallback_reason: None,
+            conflict: false,
+        };
+        snapshot.git_projection.changed_files = vec![
+            file("src/lib.rs"),
+            file("src/bin/main.rs"),
+            file("README.md"),
+        ];
+
+        let rows = git_rows(&snapshot);
+        assert!(rows.iter().any(|row| row == "git group src"));
+        assert!(rows.iter().any(|row| row == "git group src/bin"));
+        assert!(rows.iter().any(|row| row == "git group <root>"));
+        for path in ["src/lib.rs", "src/bin/main.rs", "README.md"] {
+            assert!(
+                rows.iter().any(|row| row.contains(path)),
+                "grouped Git rows dropped {path}: {rows:?}"
+            );
+        }
+    }
+}

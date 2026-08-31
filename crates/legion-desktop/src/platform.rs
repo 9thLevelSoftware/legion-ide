@@ -378,24 +378,20 @@ fn run_windows_uia_probe_outcome() -> WindowsUiaProbeOutcome {
 }
 
 fn windows_uia_probe_script_path() -> Option<PathBuf> {
-    let relative = Path::new(WINDOWS_UIA_PROBE_SCRIPT);
-    let mut candidates = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
-        let mut dir = cwd.as_path();
-        for _ in 0..8 {
-            candidates.push(dir.join(relative));
-            match dir.parent() {
-                Some(parent) => dir = parent,
-                None => break,
-            }
-        }
+    // Resolve only from the shipped tree next to this crate. Walking cwd would
+    // let an untrusted workspace supply `scripts/a11y-uia-walk.ps1` that then
+    // runs under PowerShell `-ExecutionPolicy Bypass`.
+    let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(WINDOWS_UIA_PROBE_SCRIPT);
+    let canonical = shipped.canonicalize().ok()?;
+    if !canonical.is_file() {
+        return None;
     }
-    candidates.push(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join(relative),
-    );
-    candidates.into_iter().find(|path| path.is_file())
+    if canonical.file_name()?.to_str()? != "a11y-uia-walk.ps1" {
+        return None;
+    }
+    Some(canonical)
 }
 
 #[cfg(windows)]

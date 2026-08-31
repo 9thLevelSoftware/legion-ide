@@ -7,6 +7,8 @@ mod brand_mark;
 mod call_hierarchy;
 mod code_canvas_painter;
 mod components;
+/// Debug call-stack and variable inspector.
+mod debug_inspector;
 /// Applying persisted dock splitter fractions, and observing new ones.
 pub mod dock_geometry;
 #[cfg(feature = "ai")]
@@ -16,13 +18,20 @@ pub mod rail_icons;
 mod source_control;
 /// The editor tab strip: tabs, close affordance, drag-to-reorder.
 mod tab_strip;
+/// Test explorer tree for the Tests surface.
+mod test_explorer;
 
 use call_hierarchy::call_hierarchy_rows;
+use debug_inspector::{
+    DEBUG_STACK_FRAME_RENDER_LIMIT, debug_frame_navigation_action,
+    debug_selected_stack_frame_index, render_debug_inspector, set_debug_selected_stack_frame_index,
+};
 use source_control::{
     active_git_relative_path, git_hunk_marker_for_line, git_inline_blame_label,
     git_next_hunk_cursor, git_previous_hunk_cursor, git_rows, render_git_controls,
 };
 use tab_strip::render_tab_strip;
+use test_explorer::render_test_explorer_tree;
 
 use proposal_cards::render_proposal_cards;
 
@@ -32,7 +41,6 @@ pub mod agent_comm;
 pub mod canvas_workspace;
 mod keymap_dispatch;
 
-const DEBUG_STACK_FRAME_RENDER_LIMIT: usize = 32;
 pub(crate) use keymap_dispatch::*;
 /// Install / update / remove controls for signed extension artifacts (P7.F2).
 pub mod assist_rail_commands;
@@ -5122,63 +5130,6 @@ fn render_test_controls(
         }
     });
     render_test_explorer_tree(ui, snapshot, actions);
-}
-
-fn render_test_explorer_tree(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let explorer = &snapshot.test_explorer_projection;
-    if explorer.status_label == "discovering" || explorer.status_label == "running" {
-        ui.label(theme::muted(format!("Tests {}…", explorer.status_label)));
-    }
-    if explorer.items.is_empty() {
-        return;
-    }
-
-    ui.separator();
-    ui.label(theme::label("Test tree"));
-    egui::ScrollArea::vertical()
-        .id_salt("legion_desktop_test_explorer_tree")
-        .max_height(180.0)
-        .auto_shrink([false, true])
-        .show(ui, |ui| {
-            for group in legion_ui::group_test_explorer_items_by_parent(&explorer.items) {
-                let group_label = format!("{} ({})", group.parent_label, group.items.len());
-                let group_path = group.parent_label.clone();
-                let collapsing = egui::CollapsingHeader::new(theme::label(&group_label))
-                    .id_salt(("legion_test_group", &group_path))
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        for item in group.items {
-                            let response = ui.selectable_label(
-                                false,
-                                theme::label(format!("{}  [{}]", item.label, item.kind_label)),
-                            );
-                            ui.ctx().accesskit_node_builder(response.id, |node| {
-                                node.set_role(egui::accesskit::Role::TreeItem);
-                                node.set_label(item.label.as_str());
-                            });
-                            if response.clicked() {
-                                actions.push(DesktopAction::RunTestExplorerItem {
-                                    item_id: item.item_id.clone(),
-                                });
-                            }
-                        }
-                    });
-                ui.ctx()
-                    .accesskit_node_builder(collapsing.header_response.id, |node| {
-                        node.set_role(egui::accesskit::Role::TreeItem);
-                        node.set_label(group_label.as_str());
-                    });
-                if soft_button(ui, "Run group").clicked() {
-                    actions.push(DesktopAction::RunTestExplorerGroup {
-                        parent_label: group_path,
-                    });
-                }
-            }
-        });
 }
 
 /// The command the Tests surface offers to run.
@@ -10673,143 +10624,6 @@ fn render_debug_controls(
     });
 }
 
-fn render_debug_inspector(
-    ui: &mut egui::Ui,
-    snapshot: &ShellProjectionSnapshot,
-    actions: &mut Vec<DesktopAction>,
-) {
-    let debug = &snapshot.debug_projection;
-    if debug.active_session_id.is_none()
-        || (debug.stack_frames.is_empty() && debug.variables.is_empty())
-    {
-        return;
-    }
-
-    ui.separator();
-    egui::CollapsingHeader::new("Call stack")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
-                node.set_role(egui::accesskit::Role::List);
-                node.set_label("Debug call stack");
-            });
-            if debug.stack_frames.is_empty() {
-                ui.label(theme::muted("No stack frames"));
-            } else {
-                let selected_index = debug_selected_stack_frame_index(
-                    ui.ctx(),
-                    debug.stack_frames.len().min(DEBUG_STACK_FRAME_RENDER_LIMIT),
-                );
-                for (index, frame) in debug
-                    .stack_frames
-                    .iter()
-                    .take(DEBUG_STACK_FRAME_RENDER_LIMIT)
-                    .enumerate()
-                {
-                    let response = ui.selectable_label(
-                        index == selected_index,
-                        debug_stack_frame_label(frame, index),
-                    );
-                    if response.clicked() {
-                        set_debug_selected_stack_frame_index(ui.ctx(), index);
-                        if let Some(action) = debug_frame_navigation_action(frame) {
-                            actions.push(action);
-                        }
-                    }
-                    ui.ctx().accesskit_node_builder(response.id, |node| {
-                        node.set_role(egui::accesskit::Role::ListItem);
-                        node.set_label(debug_stack_frame_label(frame, index));
-                        node.set_selected(index == selected_index);
-                    });
-                }
-            }
-        });
-
-    egui::CollapsingHeader::new("Variables")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.ctx().accesskit_node_builder(ui.unique_id(), |node| {
-                node.set_role(egui::accesskit::Role::Tree);
-                node.set_label("Debug variables");
-            });
-            if debug.variables.is_empty() {
-                ui.label(theme::muted("No variables"));
-            } else {
-                for variable in debug.variables.iter().take(64) {
-                    let label = debug_variable_label(variable);
-                    let response = ui.label(label.clone());
-                    ui.ctx().accesskit_node_builder(response.id, |node| {
-                        node.set_role(egui::accesskit::Role::TreeItem);
-                        node.set_label(label);
-                        if let Some(expanded) = debug_variable_accesskit_expanded(variable) {
-                            node.set_expanded(expanded);
-                        }
-                    });
-                }
-            }
-        });
-}
-
-fn debug_stack_selection_id() -> egui::Id {
-    egui::Id::new("legion.debug.selected-stack-frame")
-}
-
-fn debug_selected_stack_frame_index(ctx: &egui::Context, frame_count: usize) -> usize {
-    if frame_count == 0 {
-        return 0;
-    }
-    ctx.data(|data| {
-        data.get_temp::<usize>(debug_stack_selection_id())
-            .unwrap_or_default()
-            .min(frame_count - 1)
-    })
-}
-
-fn set_debug_selected_stack_frame_index(ctx: &egui::Context, index: usize) {
-    ctx.data_mut(|data| data.insert_temp(debug_stack_selection_id(), index));
-}
-
-fn debug_frame_navigation_action(
-    frame: &legion_ui::DebugStackFrameProjection,
-) -> Option<DesktopAction> {
-    Some(DesktopAction::NavigateToProblem {
-        path: frame.path.as_ref()?.0.clone(),
-        line: frame.line?.saturating_sub(1),
-    })
-}
-
-fn debug_stack_frame_label(frame: &legion_ui::DebugStackFrameProjection, index: usize) -> String {
-    let path = frame
-        .path
-        .as_ref()
-        .map(|path| path.0.as_str())
-        .unwrap_or("<unknown>");
-    let line = frame
-        .line
-        .map(|line| line.to_string())
-        .unwrap_or_else(|| "<unknown>".to_string());
-    format!("{} · {} · {}:{}", index + 1, frame.name, path, line)
-}
-
-fn debug_variable_label(variable: &legion_ui::DebugVariableProjection) -> String {
-    format!(
-        "{} = {}{}",
-        variable.name,
-        variable.value_label,
-        variable
-            .type_label
-            .as_deref()
-            .map(|type_label| format!(" · {type_label}"))
-            .unwrap_or_default()
-    )
-}
-
-fn debug_variable_accesskit_expanded(
-    variable: &legion_ui::DebugVariableProjection,
-) -> Option<bool> {
-    (!variable.has_children).then_some(false)
-}
-
 fn debug_rows(snapshot: &ShellProjectionSnapshot) -> Vec<String> {
     let debug = &snapshot.debug_projection;
     let mut rows = Vec::new();
@@ -11276,58 +11090,13 @@ mod tests {
         DelegatedTaskToolPermissionRequestInput, PermissionBudgetActionClass, RedactionHint,
         TerminalOutputRowProjection, TextCoordinate, delegated_task_tool_permission_request,
     };
-    use legion_ui::{
-        DebugStackFrameProjection, DebugVariableProjection, GitBlameLineProjection,
-        GitDiffStrategyProjection, GitFileProjection, GitHunkProjection, GitHunkStageProjection,
-        Shell,
-    };
+    use legion_ui::{GitBlameLineProjection, GitHunkProjection, GitHunkStageProjection, Shell};
 
     #[test]
     fn provider_permission_uses_plain_ai_copy() {
         assert_eq!(
             workflow_permission_action_label(PermissionBudgetActionClass::InvokeProvider),
             "Uses an AI provider"
-        );
-    }
-
-    #[test]
-    fn debug_inspector_labels_and_navigation_preserve_projection_metadata() {
-        let frame = DebugStackFrameProjection {
-            session_id: legion_protocol::DebugSessionId("debug:1".into()),
-            frame_id: 7,
-            name: "main".into(),
-            path: Some(CanonicalPath("src/main.rs".into())),
-            line: Some(12),
-        };
-        assert_eq!(
-            debug_stack_frame_label(&frame, 0),
-            "1 · main · src/main.rs:12"
-        );
-        assert_eq!(
-            debug_frame_navigation_action(&frame),
-            Some(DesktopAction::NavigateToProblem {
-                path: "src/main.rs".into(),
-                line: 11,
-            })
-        );
-
-        let variable = DebugVariableProjection {
-            session_id: legion_protocol::DebugSessionId("debug:1".into()),
-            name: "count".into(),
-            value_label: "3".into(),
-            type_label: Some("i32".into()),
-            has_children: false,
-        };
-        assert_eq!(debug_variable_label(&variable), "count = 3 · i32");
-        assert_eq!(debug_variable_accesskit_expanded(&variable), Some(false));
-
-        let expandable_variable = DebugVariableProjection {
-            has_children: true,
-            ..variable
-        };
-        assert_eq!(
-            debug_variable_accesskit_expanded(&expandable_variable),
-            None
         );
     }
 
@@ -11698,39 +11467,6 @@ mod tests {
             action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
             None
         );
-    }
-
-    #[test]
-    fn git_rows_group_changed_files_without_dropping_file_details() {
-        let mut snapshot = Shell::empty("grouped git rows").projection_snapshot();
-        let file = |path: &str| GitFileProjection {
-            path: path.to_string(),
-            status: " M".to_string(),
-            inserted_lines: 1,
-            deleted_lines: 0,
-            unstaged_hunk_count: 1,
-            staged_hunk_count: 0,
-            stageable: true,
-            diff_strategy: GitDiffStrategyProjection::Syntactic,
-            fallback_reason: None,
-            conflict: false,
-        };
-        snapshot.git_projection.changed_files = vec![
-            file("src/lib.rs"),
-            file("src/bin/main.rs"),
-            file("README.md"),
-        ];
-
-        let rows = git_rows(&snapshot);
-        assert!(rows.iter().any(|row| row == "git group src"));
-        assert!(rows.iter().any(|row| row == "git group src/bin"));
-        assert!(rows.iter().any(|row| row == "git group <root>"));
-        for path in ["src/lib.rs", "src/bin/main.rs", "README.md"] {
-            assert!(
-                rows.iter().any(|row| row.contains(path)),
-                "grouped Git rows dropped {path}: {rows:?}"
-            );
-        }
     }
 
     #[test]

@@ -22,6 +22,7 @@ impl AppComposition {
             snapshots.push(HotExitSnapshot {
                 path: metadata.identity.canonical_path.0.clone(),
                 buffer_version,
+                disk_fingerprint: Some(metadata.fingerprint.clone()),
                 body: body.to_string(),
             });
         }
@@ -52,6 +53,18 @@ impl AppComposition {
             else {
                 continue;
             };
+            let Some(metadata) = self.active_documents.metadata_for_buffer(buffer_id) else {
+                continue;
+            };
+            match &snapshot.disk_fingerprint {
+                Some(expected) if expected == &metadata.fingerprint => {}
+                _ => {
+                    // Disk changed while the process was down, or the sidecar
+                    // predates fingerprint capture. Do not replace the opened
+                    // body and then treat the new disk hash as expected.
+                    continue;
+                }
+            }
             let current = self.editor.text(buffer_id)?;
             if current == snapshot.body {
                 continue;

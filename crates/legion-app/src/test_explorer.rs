@@ -617,6 +617,64 @@ pub fn discover_cargo_tests(
     )
 }
 
+/// Drop a cached discovery result so the next [`discover_cargo_tests`] call reruns `cargo test --list`.
+pub fn invalidate_discovery_cache(workspace_root: &Path) {
+    if let Ok(mut worker) = discovery_worker().lock() {
+        worker.remove(&workspace_root.to_path_buf());
+    }
+}
+
+/// Join cargo-test workers that have finished, without requiring another Run click.
+pub fn poll_finished_runs() -> Vec<Result<CargoTestItemRunResult, String>> {
+    let mut finished = Vec::new();
+    let Ok(mut worker) = run_worker().lock() else {
+        return finished;
+    };
+    let keys: Vec<String> = worker
+        .iter()
+        .filter(|(_, existing)| existing.handle.is_finished())
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in keys {
+        let Some(existing) = worker.remove(&key) else {
+            continue;
+        };
+        finished.push(
+            existing
+                .handle
+                .join()
+                .unwrap_or_else(|_| Err("test-worker-panicked".to_string())),
+        );
+    }
+    finished
+}
+
+impl crate::AppComposition {
+    /// Apply completed cargo-test workers without requiring another Run click.
+    pub fn drain_test_explorer_runs(&mut self) -> bool {
+        let results = poll_finished_runs();
+        if results.is_empty() {
+            return false;
+        }
+        let started_at = TimestampMillis::now();
+        for result in results {
+            let Ok(result) = result else {
+                continue;
+            };
+            if result.status_label == "running" {
+                continue;
+            }
+            self.record_test_explorer_run_result(&result, started_at);
+            self.test_explorer_projection = apply_run_to_projection(
+                self.test_explorer_projection.clone(),
+                &result,
+                TimestampMillis::now(),
+            );
+        }
+        true
+    }
+}
+
 fn discover_cargo_tests_blocking(
     workspace_root: &Path,
     timeout: Duration,
