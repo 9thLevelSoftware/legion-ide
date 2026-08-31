@@ -474,6 +474,38 @@ fn local_history_records_entry_after_save() {
 }
 
 #[test]
+fn local_history_metadata_reloads_after_workspace_reopen() {
+    let ws = TempWorkspace::new();
+    let (mut app, path) = open_app_with_file(&ws, "src/persist.rs", "fn persist() {}\n");
+    save_file(&mut app);
+    let first = get_entries(&mut app, &path);
+    assert_eq!(first.len(), 1, "save should produce one history entry");
+    let entry_id = first[0].entry_id.clone();
+    let content_hash = first[0].content_hash.clone();
+    drop(app);
+
+    let mut restarted = AppComposition::new();
+    restarted
+        .open_workspace(
+            ws.path(),
+            legion_protocol::WorkspaceTrustState::Trusted,
+            legion_protocol::PrincipalId("lh-test".to_string()),
+        )
+        .expect("workspace reopen");
+    restarted
+        .open_file(path.to_string_lossy())
+        .expect("reopen file");
+    let restored = get_entries(&mut restarted, &path);
+    assert_eq!(
+        restored.len(),
+        1,
+        "restart should reload the persisted history entry"
+    );
+    assert_eq!(restored[0].entry_id, entry_id);
+    assert_eq!(restored[0].content_hash, content_hash);
+}
+
+#[test]
 fn local_history_records_multiple_saves() {
     let ws = TempWorkspace::new();
     let (mut app, path) = open_app_with_file(&ws, "src/multi.rs", "fn v1() {}\n");

@@ -15936,6 +15936,8 @@ impl AppComposition {
         // (and any switch back to untrusted) remain fail-closed.
         self.batch_apply_policy.enabled = trust == WorkspaceTrustState::Trusted;
 
+        self.reload_local_history_store();
+
         Ok(opened)
     }
 
@@ -25574,6 +25576,21 @@ impl AppComposition {
         self.local_history_last_write_error.as_deref()
     }
 
+    fn reload_local_history_store(&mut self) {
+        self.local_history_store = legion_storage::local_history::LocalHistoryMetadataStore::new();
+        self.local_history_last_write_error = None;
+        let Some(root) = self.active_documents.workspace_root_path.as_deref() else {
+            return;
+        };
+        let dir = legion_storage::local_history::LocalHistoryMetadataStore::dir_for_workspace(
+            std::path::Path::new(root),
+        );
+        match legion_storage::local_history::LocalHistoryMetadataStore::load(&dir) {
+            Ok(store) => self.local_history_store = store,
+            Err(err) => self.local_history_last_write_error = Some(err.to_string()),
+        }
+    }
+
     /// Record a local history entry for the given file save.
     ///
     /// This writes the content blob to `.legion/local-history/<path_key>/<hash>.blob`
@@ -25606,9 +25623,9 @@ impl AppComposition {
         let blob_dir = if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
             // Strip the UNC prefix (\\?\) before sanitizing so that the resulting
             // directory name does not contain '?' which is illegal in Windows filenames.
-            let canonical_without_unc = strip_unc_prefix(canonical_path);
-            let path_key =
-                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path_key = legion_storage::local_history::LocalHistoryMetadataStore::path_key(
+                strip_unc_prefix(canonical_path),
+            );
             match create_workspace_state_dir(
                 std::path::Path::new(root),
                 &[".legion", "local-history", &path_key],
@@ -25670,6 +25687,11 @@ impl AppComposition {
             let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
             let _ = std::fs::remove_file(&evicted_blob);
         }
+        if let Some(history_dir) = blob_dir.parent()
+            && let Err(err) = self.local_history_store.persist(history_dir)
+        {
+            self.local_history_last_write_error = Some(err.to_string());
+        }
     }
 
     /// Restore a file from a local history entry by applying a full-replace edit through the
@@ -25698,10 +25720,9 @@ impl AppComposition {
             .ok_or(AppCompositionError::WorkspaceNotOpen)?
             .to_string();
 
-        // Strip UNC prefix before sanitizing to avoid '?' in directory names on Windows.
-        let canonical_without_unc = strip_unc_prefix(canonical_path);
-        let path_key =
-            canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+        let path_key = legion_storage::local_history::LocalHistoryMetadataStore::path_key(
+            strip_unc_prefix(canonical_path),
+        );
         let blob_path = std::path::PathBuf::from(&root_path)
             .join(".legion")
             .join("local-history")
