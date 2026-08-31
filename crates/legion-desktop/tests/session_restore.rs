@@ -517,6 +517,71 @@ fn session_store_save_publishes_validated_temp_and_cleans_intermediates() {
     );
 }
 
+#[test]
+fn session_restore_killed_dirty_session_restores_sidecar_without_writing_disk() {
+    let workspace = TempWorkspace::new("legion_desktop_hot_exit_kill");
+    let file = workspace.write("notes.txt", "clean");
+    let session_state = workspace.path().join("session.json");
+    {
+        let mut runtime = open_runtime(workspace.path(), Some(&file), &session_state);
+        assert_eq!(
+            runtime
+                .handle_action(DesktopAction::InsertText {
+                    text: "DIRTY".to_string(),
+                    at: legion_protocol::TextCoordinate {
+                        line: 0,
+                        character: 5,
+                        byte_offset: Some(5),
+                        utf16_offset: Some(5),
+                    },
+                })
+                .expect("unsaved edit"),
+            DesktopWorkflowOutcome::Edited
+        );
+        runtime
+            .save_session_state()
+            .expect("crash-persist session metadata and hot-exit sidecar");
+    }
+
+    assert_eq!(
+        fs::read_to_string(&file).expect("disk after kill"),
+        "clean",
+        "killed session must not write the dirty body to disk"
+    );
+    let json = fs::read_to_string(&session_state).expect("session json after kill");
+    assert!(
+        !json.contains("DIRTY"),
+        "session.json must stay metadata-only"
+    );
+    let sidecar_dir = session_state
+        .parent()
+        .expect("session parent")
+        .join("unsaved");
+    assert!(
+        sidecar_dir.join("manifest.json").is_file(),
+        "hot-exit sidecar manifest should exist next to session.json"
+    );
+
+    let restored = open_runtime(workspace.path(), None, &session_state);
+    let snapshot = restored.projection_snapshot();
+    assert_eq!(
+        snapshot.active_buffer_projection.small_buffer_text(),
+        Some("cleanDIRTY")
+    );
+    assert!(
+        snapshot.status_messages.iter().any(|status| {
+            status.message.contains("unsaved buffer") || status.message.contains("Session restored")
+        }),
+        "restore should surface a session/hot-exit status, got {:?}",
+        snapshot.status_messages
+    );
+    assert_eq!(
+        fs::read_to_string(&file).expect("disk after restore"),
+        "clean",
+        "restore must not write disk; durable write stays proposal-mediated"
+    );
+}
+
 fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
     WorkspaceSessionRecord {
         session_id: "workspace-session:test".to_string(),
