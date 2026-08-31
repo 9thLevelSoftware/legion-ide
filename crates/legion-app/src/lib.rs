@@ -32,6 +32,7 @@ pub mod offline_ai;
 
 mod assist_proposal;
 mod git_inspection;
+mod hot_exit;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;

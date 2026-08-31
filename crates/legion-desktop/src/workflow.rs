@@ -5,6 +5,7 @@ use std::process::Command;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -30,7 +31,8 @@ use legion_protocol::{
 };
 use legion_remote::RemoteOperationOutcome;
 use legion_storage::{
-    OsKeyringSecretStore, SecretStore, provider_api_key_reference, provider_secret_reference,
+    HotExitStore, OsKeyringSecretStore, SecretStore, provider_api_key_reference,
+    provider_secret_reference,
 };
 use legion_ui::{
     CommandDispatchIntent, DockLayout, DockMode, DockSide, DockSideLayout, GitRefreshState,
@@ -70,6 +72,12 @@ const WINDOW_TITLE: &str = PRODUCT_NAME;
 
 fn is_new_definition_response(last_operation_id: Option<&str>, operation_id: Option<&str>) -> bool {
     operation_id.is_some_and(|current| last_operation_id != Some(current))
+}
+
+fn hash_hot_exit_body(body: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Process launch configuration for the desktop adapter.
@@ -694,6 +702,8 @@ pub struct DesktopRuntime {
     /// Encoding of the last session record actually written, so an action that
     /// changed nothing a restart would restore does not pay for a durable write.
     last_saved_session_fingerprint: Option<String>,
+    /// Last written hot-exit body hashes, keyed by canonical path.
+    last_hot_exit_hashes: BTreeMap<String, u64>,
     diagnostics_export_path: Option<PathBuf>,
     onboarding_visible: bool,
     quit_requested: bool,
@@ -814,6 +824,26 @@ impl DesktopRuntime {
                 let (restore_status, restore_details) = restore_status_messages(&restore);
                 status = restore_status;
                 status_details = restore_details;
+                if let Some(session_path) = &config.session_state {
+                    let dir = HotExitStore::dir_for_session(session_path);
+                    match HotExitStore::load(&dir) {
+                        Ok(snapshots) => match app.restore_hot_exit_snapshots(&snapshots) {
+                            Ok(0) => {}
+                            Ok(count) => status_details.push(status_message(
+                                StatusSeverity::Info,
+                                format!("Restored {count} unsaved buffer(s) from last session"),
+                            )),
+                            Err(error) => status_details.push(status_message(
+                                StatusSeverity::Warning,
+                                format!("Could not restore unsaved buffers: {error}"),
+                            )),
+                        },
+                        Err(error) => status_details.push(status_message(
+                            StatusSeverity::Warning,
+                            format!("Could not load unsaved buffers: {error}"),
+                        )),
+                    }
+                }
             } else {
                 status = status_message(
                     StatusSeverity::Warning,
@@ -861,6 +891,7 @@ impl DesktopRuntime {
             dock_layouts_user_arranged,
             session_state_path: config.session_state,
             last_saved_session_fingerprint: None,
+            last_hot_exit_hashes: BTreeMap::new(),
             diagnostics_export_path: config.diagnostics_export,
             onboarding_visible: session_record.is_none(),
             quit_requested: false,
@@ -1865,6 +1896,22 @@ impl DesktopRuntime {
         }
         DesktopSessionStore::save(&path, &record)?;
         self.last_saved_session_fingerprint = fingerprint;
+        self.persist_hot_exit_snapshots(&path)?;
+        Ok(())
+    }
+
+    fn persist_hot_exit_snapshots(&mut self, session_path: &Path) -> Result<()> {
+        let snapshots = self.app.capture_hot_exit_snapshots()?;
+        let hashes: BTreeMap<String, u64> = snapshots
+            .iter()
+            .map(|snapshot| (snapshot.path.clone(), hash_hot_exit_body(&snapshot.body)))
+            .collect();
+        if hashes == self.last_hot_exit_hashes {
+            return Ok(());
+        }
+        HotExitStore::save(&HotExitStore::dir_for_session(session_path), &snapshots)
+            .map_err(|error| anyhow!("hot-exit snapshot save failed: {error}"))?;
+        self.last_hot_exit_hashes = hashes;
         Ok(())
     }
 
