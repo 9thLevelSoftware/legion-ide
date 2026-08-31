@@ -81,6 +81,13 @@ pub(crate) struct PendingAssistProposalJob {
     pub(crate) event_context: EventContext,
     pub(crate) principal: PrincipalId,
     pub(crate) file_id: FileId,
+    /// The buffer the edit was resolved against.
+    ///
+    /// Carried so the completion path can re-read the whole file. Resolution
+    /// runs against the excerpt the model was shown, which is the only text it
+    /// could have quoted -- but the prompt asks for an anchor unique in the
+    /// *file*, and that is a claim only the file can settle.
+    pub(crate) buffer_id: BufferId,
     pub(crate) preconditions: ProposalVersionPreconditions,
     pub(crate) agent: AgentRuntime,
 }

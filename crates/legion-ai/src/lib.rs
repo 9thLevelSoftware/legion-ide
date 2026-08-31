@@ -38,6 +38,8 @@ pub mod governance {
 }
 
 pub mod redaction;
+/// Action classification and intent-based tool narrowing (ADR-0049).
+pub mod routing;
 pub mod streaming;
 /// AI-side telemetry helpers for suggestion latency and acceptance.
 pub mod telemetry;

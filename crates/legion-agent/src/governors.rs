@@ -31,6 +31,13 @@ use std::collections::{HashMap, HashSet};
 /// rejection. Three in a row is a loop.
 pub const DEFAULT_MAX_IDLE_TURNS: u32 = 3;
 
+/// Consecutive failures of one tool before the model is told to stop using it.
+///
+/// Three, matching the idle-turn threshold: two failures is a model correcting
+/// itself, which is the loop working. The third is the point where the pattern
+/// is the information.
+pub const DEFAULT_MAX_TOOL_FAILURES: u32 = 3;
+
 /// Tools whose results depend only on worktree state, so a repeated identical
 /// call within one run cannot produce a different answer.
 ///
@@ -62,6 +69,21 @@ pub struct LoopGovernors {
     /// Consecutive turns that produced no new information.
     idle_turns: u32,
     max_idle_turns: u32,
+    /// Consecutive failures per tool, reset by that tool succeeding.
+    ///
+    /// Per tool rather than per run, which is the difference from
+    /// `max_consecutive_retries`: that counter terminates the run when
+    /// *anything* keeps failing, and cannot tell "this model is stuck" from
+    /// "this one tool does not work here". A `grep` that fails four times
+    /// while `read` keeps working is the second case, and the useful response
+    /// is to say so rather than to end the run.
+    tool_failures: HashMap<String, u32>,
+    /// Tools already told they are failing, so the notice fires once each.
+    ///
+    /// Repeating it every turn would push the actual diagnostic further from
+    /// the model's attention on exactly the turns it needs it most.
+    demoted_tools: HashSet<String>,
+    max_tool_failures: u32,
 }
 
 impl LoopGovernors {
@@ -74,6 +96,9 @@ impl LoopGovernors {
             hinted_paths: HashSet::new(),
             idle_turns: 0,
             max_idle_turns: DEFAULT_MAX_IDLE_TURNS,
+            tool_failures: HashMap::new(),
+            demoted_tools: HashSet::new(),
+            max_tool_failures: DEFAULT_MAX_TOOL_FAILURES,
         }
     }
 
@@ -174,6 +199,50 @@ impl LoopGovernors {
         self.idle_turns >= self.max_idle_turns
     }
 
+    /// Record that `tool` failed, and say so once it has failed enough.
+    ///
+    /// Returns the notice to append to the failure the model is already being
+    /// shown, or `None`. Advisory only: nothing is withdrawn and nothing stops.
+    /// ADR-0049 classifies these governors as waste containment rather than
+    /// autonomy, and removing a tool mid-run would change what the model is
+    /// permitted to do — the scope decides that, not a failure count.
+    pub fn note_tool_failure(&mut self, tool: &str) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let failures = self.tool_failures.entry(tool.to_string()).or_insert(0);
+        *failures += 1;
+        let failures = *failures;
+        if failures < self.max_tool_failures || !self.demoted_tools.insert(tool.to_string()) {
+            return None;
+        }
+        Some(demotion_notice(tool, failures))
+    }
+
+    /// Record that `tool` worked, clearing its failure streak.
+    ///
+    /// The streak is consecutive, so a success is what makes it not a pattern.
+    /// The demotion itself is not cleared: the model has already been told, and
+    /// re-arming the notice would let a tool that fails, works once, then fails
+    /// again deliver the same advice repeatedly.
+    pub fn note_tool_success(&mut self, tool: &str) {
+        if !self.enabled {
+            return;
+        }
+        self.tool_failures.remove(tool);
+    }
+
+    /// Consecutive failures recorded for `tool`.
+    ///
+    /// Test-only. The loop never asks -- it acts on what `note_tool_failure`
+    /// returns -- so this is a window into the state rather than part of the
+    /// interface, and a production surface carrying inspection knobs no caller
+    /// uses invites someone to build on one.
+    #[cfg(test)]
+    fn tool_failures(&self, tool: &str) -> u32 {
+        self.tool_failures.get(tool).copied().unwrap_or(0)
+    }
+
     /// Consecutive turns without new information.
     pub fn idle_turns(&self) -> u32 {
         self.idle_turns
@@ -189,6 +258,19 @@ pub fn dedup_notice(tool: &str, cached: &str) -> String {
         "You already called `{tool}` with these exact arguments in this run. \
          Its result is unchanged and repeated below. Use it rather than \
          calling again.\n\n{cached}"
+    )
+}
+
+/// The notice appended when one tool keeps failing.
+///
+/// Names the count, because "it failed" is already in the diagnostic above it
+/// and the number is the part the model cannot see. Suggests a different route
+/// rather than forbidding this one: the tool may still be the right choice with
+/// different arguments, and this governor has no way to know.
+pub fn demotion_notice(tool: &str, failures: u32) -> String {
+    format!(
+        "`{tool}` has now failed {failures} times in a row. Treat it as unreliable \
+         for this task and reach the same goal another way if one exists."
     )
 }
 
@@ -399,5 +481,131 @@ mod tests {
             notice.contains("fn main() {}"),
             "declining to repeat the work must not withhold the answer"
         );
+    }
+
+    #[test]
+    fn a_tool_is_left_alone_until_it_has_failed_enough() {
+        let mut governors = LoopGovernors::new(true);
+
+        for _ in 1..DEFAULT_MAX_TOOL_FAILURES {
+            assert!(
+                governors.note_tool_failure("grep").is_none(),
+                "correcting itself twice is the loop working, not a pattern"
+            );
+        }
+        let notice = governors
+            .note_tool_failure("grep")
+            .expect("the third consecutive failure is the point the pattern is information");
+        assert!(notice.contains("grep"));
+        assert!(notice.contains("3 times"));
+    }
+
+    /// The notice fires once, not on every subsequent failure.
+    ///
+    /// Repeating it would push the actual diagnostic further from the model's
+    /// attention on exactly the turns it needs it most.
+    #[test]
+    fn a_demoted_tool_is_not_told_again() {
+        let mut governors = LoopGovernors::new(true);
+        for _ in 0..DEFAULT_MAX_TOOL_FAILURES {
+            let _ = governors.note_tool_failure("grep");
+        }
+
+        assert!(governors.note_tool_failure("grep").is_none());
+        assert!(governors.note_tool_failure("grep").is_none());
+    }
+
+    /// A success clears the streak, because the streak is consecutive.
+    #[test]
+    fn a_success_ends_the_streak() {
+        let mut governors = LoopGovernors::new(true);
+        governors.note_tool_failure("grep");
+        governors.note_tool_failure("grep");
+        assert_eq!(governors.tool_failures("grep"), 2);
+
+        governors.note_tool_success("grep");
+
+        assert_eq!(governors.tool_failures("grep"), 0);
+        assert!(
+            governors.note_tool_failure("grep").is_none(),
+            "one failure after a success is one failure, not the third"
+        );
+    }
+
+    /// Failures are counted per tool, not pooled.
+    ///
+    /// This is the whole difference from `max_consecutive_retries`, which counts
+    /// across every tool and ends the run. A `grep` that keeps failing while
+    /// `read` keeps working is one tool being wrong, not a model being stuck.
+    #[test]
+    fn one_tools_failures_do_not_demote_another() {
+        let mut governors = LoopGovernors::new(true);
+        governors.note_tool_failure("grep");
+        governors.note_tool_failure("grep");
+
+        assert!(governors.note_tool_failure("read").is_none());
+        assert_eq!(governors.tool_failures("read"), 1);
+        assert_eq!(governors.tool_failures("grep"), 2);
+    }
+
+    /// The streak clears however the call was answered.
+    ///
+    /// `note_tool_success` is called from two places in the loop: after a fresh
+    /// execution, and after a dedup cache hit. Only the first did it at
+    /// first, so a tool that failed twice, was answered from cache, and failed
+    /// once more still reported three in a row -- a demotion describing a streak
+    /// a success had already broken. The governor cannot see which path
+    /// answered, which is exactly why the rule has to be stated here rather
+    /// than assumed at one call site.
+    #[test]
+    fn a_success_from_any_path_ends_the_streak() {
+        let mut governors = LoopGovernors::new(true);
+        governors.note_tool_failure("read");
+        governors.note_tool_failure("read");
+
+        // However the caller obtained it, a success is a success.
+        governors.note_tool_success("read");
+
+        assert_eq!(governors.tool_failures("read"), 0);
+        assert!(
+            governors.note_tool_failure("read").is_none(),
+            "the next failure is the first of a new streak, not the third of an old one"
+        );
+    }
+
+    /// A tool that only ever emits broken arguments is still demoted.
+    ///
+    /// Malformed calls never reach `validate_and_execute`, so the streak was
+    /// blind to them -- and the interleaving that hides it is ordinary: broken
+    /// `grep` arguments between working `read` calls keep resetting the global
+    /// retry counter, so the model retries the same broken tool forever without
+    /// ever being told which one is the problem. Per-tool counting is exactly
+    /// what sees through that.
+    #[test]
+    fn malformed_calls_demote_the_tool_that_made_them() {
+        let mut governors = LoopGovernors::new(true);
+
+        assert!(governors.note_tool_failure("grep").is_none());
+        governors.note_tool_success("read");
+        assert!(governors.note_tool_failure("grep").is_none());
+        governors.note_tool_success("read");
+
+        let notice = governors
+            .note_tool_failure("grep")
+            .expect("another tool succeeding does not clear grep's streak");
+        assert!(notice.contains("grep"));
+    }
+
+    /// Disabled governors record nothing and advise nothing.
+    ///
+    /// `LEGION_AI_GOVERNORS=off` has to leave the raw baseline measuring the
+    /// un-ported loop, or the bench's A/B arms stop being comparable.
+    #[test]
+    fn a_disabled_governor_never_demotes() {
+        let mut governors = LoopGovernors::new(false);
+        for _ in 0..(DEFAULT_MAX_TOOL_FAILURES * 3) {
+            assert!(governors.note_tool_failure("grep").is_none());
+        }
+        assert_eq!(governors.tool_failures("grep"), 0);
     }
 }

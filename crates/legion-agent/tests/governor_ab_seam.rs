@@ -782,3 +782,294 @@ fn a_cached_result_resets_the_retry_counter() {
          limit of two: got {result:?}"
     );
 }
+
+/// A query directive is not advertised the edit tool, through the loop's path.
+///
+/// `tools_for_action` is unit-tested in `legion-ai`, and that test passes
+/// whether or not the loop still calls it. This drives the same
+/// `tool_defs_from_registry` the loop uses, so removing the narrowing from the
+/// loop fails here rather than nowhere.
+#[test]
+fn a_query_directive_is_not_advertised_the_edit_tool() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let dir = TempDir::new().unwrap();
+    let scope = config(&dir).scope;
+
+    // SAFETY: holds `ENV_GUARD` across the env-mutating block, so no other test
+    // observes the variable mid-change.
+    unsafe {
+        std::env::set_var("LEGION_AI_GOVERNORS", "on");
+    }
+
+    let advertised: Vec<String> =
+        legion_agent::agent_loop::tool_definitions_for_query_tests(&scope)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect();
+
+    assert!(
+        !advertised.iter().any(|name| name == "edit-as-proposal"),
+        "a question must not be offered the edit tool; advertised {advertised:?}"
+    );
+    assert!(
+        advertised.iter().any(|name| name == "read"),
+        "the reading tools are what answer the question; advertised {advertised:?}"
+    );
+
+    // The same scope, asked as work, keeps everything.
+    let for_work: Vec<String> = legion_agent::agent_loop::tool_definitions_for_tests(&scope)
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect();
+    assert!(
+        for_work.iter().any(|name| name == "edit-as-proposal"),
+        "narrowing is for queries only; advertised {for_work:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}
+
+/// A turn that says something and then calls a tool.
+///
+/// The plan arrives as assistant text in the same turn as the first tool call,
+/// which is how a model actually states one — `tool_use` alone carries no text
+/// for the anchor to read.
+fn planning_turn(
+    text: &str,
+    id: &str,
+    tool: &str,
+    input: serde_json::Value,
+) -> Vec<legion_ai::tool_calls::ToolTurnBlock> {
+    vec![
+        legion_ai::tool_calls::ToolTurnBlock::Text(text.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::ToolUse {
+            id: id.to_string(),
+            name: tool.to_string(),
+            input,
+        },
+    ]
+}
+
+const STATED_PLAN: &str = "I will work in three steps:\n\
+     1. Read a.txt\n\
+     2. Check the contents\n\
+     3. Report back\n";
+
+/// A phrase only `anchor_notice` produces.
+///
+/// "Read a.txt" was the first needle and it matched the model's own turn-one
+/// text, so the test passed with reinjection removed entirely -- it asserted
+/// the model had stated its plan, which it had, in the conversation the
+/// assertion was searching.
+const REMINDER_MARKER: &str = "Reminder \u{2014} the plan you stated";
+
+/// A workspace with four readable files, and the governor flag set.
+///
+/// Four because the filler turns have to be real work: identical reads are
+/// answered from the dedup cache instead of executing, so the turn count would
+/// not advance the way the re-anchor interval needs.
+///
+/// # Safety
+///
+/// The caller must hold `ENV_GUARD` for as long as the returned directory is
+/// in use, so no other test observes the variable mid-change.
+unsafe fn planning_fixture(setting: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt"] {
+        std::fs::write(dir.path().join(name), format!("contents of {name}\n")).unwrap();
+    }
+    unsafe {
+        std::env::set_var("LEGION_AI_GOVERNORS", setting);
+    }
+    dir
+}
+
+/// The same plan, split across two native text blocks mid-list.
+///
+/// Anthropic preserves every text content block separately, and the split that
+/// matters falls *between steps*: block one carries the introduction and step
+/// one, block two carries steps two and three. Parsed independently, block one
+/// has a single step and is refused, block two has two and is captured -- so the
+/// held plan starts at step two and the run is anchored to a plan missing its
+/// first instruction.
+fn split_planning_turn(
+    first: &str,
+    second: &str,
+    id: &str,
+    tool: &str,
+    input: serde_json::Value,
+) -> Vec<legion_ai::tool_calls::ToolTurnBlock> {
+    vec![
+        legion_ai::tool_calls::ToolTurnBlock::Text(first.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::Text(second.to_string()),
+        legion_ai::tool_calls::ToolTurnBlock::ToolUse {
+            id: id.to_string(),
+            name: tool.to_string(),
+            input,
+        },
+    ]
+}
+
+/// The four-turn script both plan tests drive.
+fn planning_script(
+    provider_id: &str,
+    expect_reminder: bool,
+) -> legion_ai::tool_calls::ScriptedToolCallingProvider {
+    planning_script_from(
+        planning_turn(
+            STATED_PLAN,
+            "p1",
+            "read",
+            serde_json::json!({ "path": "a.txt" }),
+        ),
+        provider_id,
+        expect_reminder.then_some(REMINDER_MARKER),
+    )
+}
+
+/// The same script, over a caller-supplied opening turn and needle.
+fn planning_script_from(
+    opening: Vec<legion_ai::tool_calls::ToolTurnBlock>,
+    provider_id: &str,
+    expect: Option<&str>,
+) -> legion_ai::tool_calls::ScriptedToolCallingProvider {
+    let mut builder = ScriptedToolCallingProviderBuilder::new()
+        .turn(
+            opening,
+            legion_ai::tool_calls::ToolCompletionStopReason::ToolUse,
+        )
+        .tool_use("p2", "read", serde_json::json!({ "path": "b.txt" }))
+        .tool_use("p3", "read", serde_json::json!({ "path": "c.txt" }))
+        .tool_use("p4", "read", serde_json::json!({ "path": "d.txt" }));
+    if let Some(needle) = expect {
+        builder = builder.expect_prior_result_contains(needle);
+    }
+    builder.end_turn("Done.").build(provider_id)
+}
+
+/// The plan the model stated comes back to it, through the real loop.
+///
+/// `PlanAnchor` is unit-tested in isolation, and those tests keep passing
+/// whether or not `run_delegated_task_loop` still calls it. This drives the
+/// loop: the model states a plan in turn one, works three more turns, and the
+/// provider asserts on turn five that the plan came back.
+///
+/// `expect_prior_result_contains` is the mechanism, so the assertion runs
+/// inside the provider against the conversation the loop actually built rather
+/// than a reconstruction of it afterwards.
+#[test]
+fn a_stated_plan_is_reinjected_by_the_loop() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("on") };
+
+    let provider = planning_script("plan-anchor-provider", true);
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    // The expectation inside the provider is the assertion: reaching Completed
+    // means it saw the reminder rather than panicking on its absence.
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "expected Completed, got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}
+
+/// A plan split across text blocks is still one plan.
+///
+/// Anthropic keeps each native text block separate, so a model that writes an
+/// introduction and then its steps sends two. Parsing them independently meant
+/// the anchor took whichever block first held two steps -- or, with one step
+/// per block, nothing at all -- and then held that partial plan for the rest of
+/// the run.
+///
+/// Driven through the loop rather than the parser, because the joining happens
+/// in the loop and a `PlanAnchor` unit test cannot see it.
+#[test]
+fn a_plan_split_across_text_blocks_is_reinjected_whole() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("on") };
+
+    // The needle spans the notice header and its first step, which is text
+    // only `anchor_notice` produces. `REMINDER_MARKER` alone would not do:
+    // capturing steps two and three still emits a reminder, so a header-only
+    // assertion passes on exactly the partial plan this test exists to catch.
+    let provider = planning_script_from(
+        split_planning_turn(
+            "I will work in three steps:\n1. Read a.txt",
+            "2. Check the contents\n3. Report back\n",
+            "p1",
+            "read",
+            serde_json::json!({ "path": "a.txt" }),
+        ),
+        "split-plan-provider",
+        Some("the plan you stated for this task:\n1. Read a.txt"),
+    );
+    let (result, _sink) = run_recording(&dir, &provider);
+
+    assert!(
+        matches!(result, DelegatedTaskLoopResult::Completed { .. }),
+        "the reminder must carry a plan assembled from both blocks; got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}
+
+/// With governors off the loop restates nothing.
+///
+/// Asserted by demanding the reminder and requiring the run to fail. The
+/// scripted provider ignores extra conversation unless something inspects it,
+/// so a test that only checked the terminal result would pass whether or not a
+/// reminder had been injected -- and the regression that matters is plan
+/// anchoring quietly switching on in the raw arm, which would make the bench's
+/// A/B comparison meaningless while every check stayed green.
+///
+/// So the same script that proves presence in the enabled test proves absence
+/// here: it expects the reminder, and with governors off that expectation must
+/// go unmet. A run that completes is a run where the reminder arrived.
+#[test]
+fn a_disabled_run_does_not_reinject_a_plan() {
+    let _guard = ENV_GUARD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // SAFETY: `_guard` is held for the rest of this test.
+    let dir = unsafe { planning_fixture("off") };
+
+    // Expecting the reminder deliberately: this run must not satisfy it.
+    let provider = planning_script("plan-anchor-disabled-provider", true);
+    let mut sink = RecordingSink::default();
+    let result = run_delegated_task_loop(
+        &config(&dir),
+        &provider,
+        &NoOpToolHost,
+        &mut sink,
+        &NeverCancelled,
+        &AllowAllBroker,
+    );
+
+    assert!(
+        result.is_err(),
+        "the raw arm restated a plan -- the provider's expectation was met with \
+         governors off, so the bench's A/B comparison would be measuring the same \
+         behaviour twice. got {result:?}"
+    );
+
+    unsafe {
+        std::env::remove_var("LEGION_AI_GOVERNORS");
+    }
+}

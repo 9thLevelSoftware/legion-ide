@@ -36,6 +36,7 @@ pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
 pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str {
     match backend {
         ProductAiLiveBackend::Ollama => "ollama",
+        ProductAiLiveBackend::LlamaCpp => "llama-cpp",
         ProductAiLiveBackend::Anthropic => "anthropic",
     }
 }
@@ -98,6 +99,47 @@ pub(crate) fn complete_product_chat(
                 }
                 return Some(ProductChatCompletion {
                     provider_id: "ollama".to_string(),
+                    model: response.model,
+                    stream_chunks: vec![text.clone()],
+                    text,
+                    streamed: false,
+                });
+            }
+            None
+        }
+        ProductAiLiveBackend::LlamaCpp => {
+            // The OpenAI-compatible dialect the adapter already speaks. Built
+            // here rather than reaching for a second client type: the provider
+            // registry has had `LlamaCppProvider` all along, and the only thing
+            // missing was a path to it.
+            let model = crate::llama_cpp_model_label();
+            let client = legion_ai_providers::LlamaCppProvider::default();
+            let request = ChatCompletionRequest {
+                provider: "llama-cpp".to_string(),
+                model: model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.to_string(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.to_string(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            };
+            if let Ok(response) = client.complete(request)
+                && !response.text.trim().is_empty()
+            {
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                return Some(ProductChatCompletion {
+                    provider_id: "llama-cpp".to_string(),
                     model: response.model,
                     stream_chunks: vec![text.clone()],
                     text,
@@ -197,17 +239,117 @@ pub(crate) struct AssistedEditProposalSource {
     pub(crate) summary: String,
     pub(crate) details: Vec<String>,
     pub(crate) replacement: String,
+    /// The text the model quoted, kept so uniqueness can be re-checked.
+    ///
+    /// Resolution runs against the excerpt, which is the only text the model
+    /// saw. That makes the span right and the uniqueness claim incomplete: an
+    /// anchor appearing once in the excerpt can appear again further down the
+    /// file, and the prompt asked for text unique in the *file*. Empty when
+    /// there is no edit to check.
+    pub(crate) anchor: String,
+    /// Byte span in the buffer this replacement occupies.
+    ///
+    /// `(0, 0)` is an insertion at the top of the file, which is all this
+    /// path could express before: the model was asked for "the exact text to
+    /// insert at the top of the file" and its answer was placed at
+    /// `TextRange::byte(0, 0)`. Internally consistent and useless -- Assist
+    /// could prepend a comment and nothing else, for the fixture, for Ollama
+    /// and for Anthropic alike, which is the insertion path the roadmap says
+    /// a real model never ships through.
+    pub(crate) span: (usize, usize),
 }
 
 pub(crate) fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
+    deterministic_assisted_edit_proposal_because(None)
+}
+
+/// The fixture proposal, carrying why a live model did not answer.
+///
+/// `reason` is `None` when the fixture is what was configured, in which case
+/// nothing is wrong and nothing is reported.
+pub(crate) fn deterministic_assisted_edit_proposal_because(
+    reason: Option<String>,
+) -> AssistedEditProposalSource {
+    let mut source = deterministic_assisted_edit_proposal_base();
+    if let Some(reason) = reason {
+        // The summary as well as the details, because the details do not
+        // travel. `bounded_proposal_title` reads only `preview.summary`, and
+        // `AssistedAiProposalPreviewSummary` carries neither field -- so a
+        // projection-only surface showed "Phase 4 local AI edit proposal" and
+        // the explanation reached nobody who had not opened the raw payload.
+        source.summary = format!("Fixture edit \u{2014} {}", reason_headline(&reason));
+        // First, because it is the line that explains every other line under
+        // it. A reader who does not know why they got a fixture cannot make
+        // sense of a proposal that inserts a comment.
+        //
+        // Bounded, like the Delegate label and for the same reason: this is
+        // copied into `PreviewSummary.details` and persisted with every
+        // proposal, and the reason is built from configuration -- an
+        // environment-supplied base URL with a very long or malformed host.
+        // Only the headline above it was capped, so the detail was the
+        // unbounded half.
+        source
+            .details
+            .insert(0, bounded_label(reason, ASSIST_DETAIL_MAX_CHARS));
+    }
+    source
+}
+
+/// Most characters one proposal detail line may carry.
+///
+/// `PreviewSummary.details` is persisted with the proposal and rendered beside
+/// it. The reason is built from configuration, so its length is not ours to
+/// assume -- and the headline above it was capped while this was not.
+const ASSIST_DETAIL_MAX_CHARS: usize = 1_200;
+
+/// How long a headline may be before the proposal title truncates it anyway.
+///
+/// `bounded_proposal_title` caps at 120 characters and the prefix takes some of
+/// those, so anything longer is cut with nothing saying it was.
+const REASON_HEADLINE_MAX_BYTES: usize = 96;
+
+/// The first sentence of a reason, short enough to be a title.
+///
+/// Cut at `". "` rather than at `'.'`, because `127.0.0.1` is full of periods
+/// and the first one produces "Ollama did not answer at http://127". A newline
+/// ends it too: the Auto reason follows its opening sentence with one bullet
+/// per backend, and the bullets belong in the details where there is room.
+fn reason_headline(reason: &str) -> String {
+    let sentence = reason.find(". ");
+    let line = reason.find('\n');
+    let cut = match (sentence, line) {
+        (Some(sentence), Some(line)) => Some(sentence.min(line)),
+        (sentence, line) => sentence.or(line),
+    };
+    let first = cut
+        .map_or(reason, |end| &reason[..end])
+        .trim()
+        .trim_end_matches('.');
+    if first.len() <= REASON_HEADLINE_MAX_BYTES {
+        return first.to_string();
+    }
+    let mut end = REASON_HEADLINE_MAX_BYTES;
+    while end > 0 && !first.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &first[..end])
+}
+
+fn deterministic_assisted_edit_proposal_base() -> AssistedEditProposalSource {
     AssistedEditProposalSource {
         provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
         summary: "Phase 4 local AI edit proposal".to_string(),
         details: vec![
-            "Generated by deterministic local provider (no live credentials)".to_string(),
+            "Generated by the deterministic local provider".to_string(),
             "Proposal is registered only; app/editor/workspace own apply".to_string(),
         ],
+        anchor: String::new(),
         replacement: "/* phase4 local AI proposal */\n".to_string(),
+        // The fixture keeps its insertion, and honestly so: it is a canned
+        // comment, it says it is a canned comment, and prepending one is
+        // exactly what it claims to do. Only a live model is held to
+        // producing an edit that resolves.
+        span: (0, 0),
     }
 }
 
@@ -234,6 +376,8 @@ pub struct ProductAiStreamProjection {
 #[cfg(feature = "ai")]
 pub(crate) fn resolve_assisted_edit_proposal_text(
     backend: Option<ProductAiLiveBackend>,
+    preference: crate::ProductAiProviderPreference,
+    anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     instruction_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -242,9 +386,20 @@ pub(crate) fn resolve_assisted_edit_proposal_text(
     AssistedEditProposalSource,
     Option<ProductAiStreamProjection>,
 ) {
-    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
-Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
-no markdown fences, no explanation.";
+    // A search/replace block, because that is the format the resolver already
+    // reads and the one small local models were measured against. The anchor
+    // has to be quoted from the file rather than described, which is what
+    // makes the edit checkable: `resolve_edit_span` refuses anything it
+    // cannot find exactly once.
+    let system = "You are Legion's Assist mode. Propose one small, reviewable edit. \
+Reply with exactly one search/replace block and nothing else:\n\n\
+<<<<<<< SEARCH\n\
+(the exact lines to replace, copied character-for-character from the file)\n\
+=======\n\
+(the replacement lines)\n\
+>>>>>>> REPLACE\n\n\
+The SEARCH text must appear exactly once in the file. \
+No explanation, no second block.";
     let user = format!(
         "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
     );
@@ -260,15 +415,44 @@ no markdown fences, no explanation.";
         on_delta,
     ) {
         Some(completion) => {
-            let mut text = completion.text.clone();
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
             let stream = product_stream_from_completion(&completion, "assist.proposal");
+            // Read once, in one match. Four accessors that all cloned out of
+            // the same arm was the enum paying rent for something one
+            // destructure does, and a `resolved` bool alongside it was paying
+            // twice -- the match already knows which arm it took, and the
+            // summary is the only thing that needed telling.
+            let (span, anchor, replacement, summary, detail) =
+                match resolve_assist_placement(buffer_excerpt, file_path, &completion.text) {
+                    AssistPlacement::Resolved {
+                        span,
+                        anchor,
+                        replacement,
+                        outcome_label,
+                    } => (
+                        span,
+                        anchor,
+                        replacement,
+                        format!("Assist edit proposal from {}", completion.provider_id),
+                        format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
+                    ),
+                    // An empty replacement over an empty span changes nothing,
+                    // and `finish_assisted_edit_proposal_registration` declines
+                    // to register it rather than offering an approvable no-op.
+                    AssistPlacement::Unresolved { reason } => (
+                        (0, 0),
+                        String::new(),
+                        String::new(),
+                        format!(
+                            "Assist edit from {} did not resolve",
+                            completion.provider_id
+                        ),
+                        format!("edit=unresolved: {reason}"),
+                    ),
+                };
             (
                 AssistedEditProposalSource {
                     provider_id: completion.provider_id.clone(),
-                    summary: format!("Assist edit proposal from {}", completion.provider_id),
+                    summary,
                     details: vec![
                         format!("model={}", completion.model),
                         // The backend that actually answered, not the
@@ -281,9 +465,12 @@ no markdown fences, no explanation.";
                             completion.streamed,
                             completion.stream_chunks.len()
                         ),
+                        detail,
                         "Proposal is registered only; app/editor/workspace own apply".to_string(),
                     ],
-                    replacement: text,
+                    anchor,
+                    replacement,
+                    span,
                 },
                 Some(stream),
             )
@@ -300,10 +487,181 @@ no markdown fences, no explanation.";
         None => (
             match backend {
                 Some(backend) => failed_live_assisted_edit_proposal(backend),
-                None => deterministic_assisted_edit_proposal(),
+                // No live backend was selected at all, which is the case a
+                // person is most likely to be confused by: they asked for an
+                // edit and got a canned comment. The reason names the endpoint
+                // that was probed, because "not running" and "running somewhere
+                // else" look identical from here and have different fixes.
+                None => deterministic_assisted_edit_proposal_because(
+                    crate::local_ai_unavailable_reason(preference, anthropic),
+                ),
             },
             None,
         ),
+    }
+}
+
+/// Build an edit source from an answer, as though a provider had returned it.
+///
+/// The deterministic fixture is a canned insertion, so it always resolves. That
+/// makes every outcome which produces *no* proposal -- a malformed reply, an
+/// anchor duplicated below the excerpt, a replacement identical to the text
+/// under it -- unreachable from a test unless a real model can be persuaded to
+/// make the mistake on demand.
+///
+/// This is the seam that makes them reachable, and it runs the same
+/// `resolve_assist_placement` the live path runs: a test exercises the resolver
+/// rather than a stand-in that can drift away from it.
+#[cfg(all(
+    any(test, feature = "test-helpers"),
+    any(feature = "ai", feature = "offline")
+))]
+pub(crate) fn assisted_edit_proposal_source_from_answer(
+    buffer_excerpt: &str,
+    file_path: &str,
+    answer: &str,
+) -> AssistedEditProposalSource {
+    let (span, anchor, replacement, summary, detail) =
+        match resolve_assist_placement(buffer_excerpt, file_path, answer) {
+            AssistPlacement::Resolved {
+                span,
+                anchor,
+                replacement,
+                outcome_label,
+            } => (
+                span,
+                anchor,
+                replacement,
+                "Assist edit proposal from injected-reply".to_string(),
+                format!("edit={outcome_label} bytes={}..{}", span.0, span.1),
+            ),
+            AssistPlacement::Unresolved { reason } => (
+                (0, 0),
+                String::new(),
+                String::new(),
+                "Assist edit from injected-reply did not resolve".to_string(),
+                format!("edit=unresolved: {reason}"),
+            ),
+        };
+    AssistedEditProposalSource {
+        provider_id: "injected-reply".to_string(),
+        summary,
+        details: vec![
+            "model=injected-reply".to_string(),
+            "backend=none".to_string(),
+            detail,
+            "Proposal is registered only; app/editor/workspace own apply".to_string(),
+        ],
+        anchor,
+        replacement,
+        span,
+    }
+}
+
+/// Where a live model's answer lands in the buffer, or why it does not.
+enum AssistPlacement {
+    /// The block resolved to a unique span.
+    Resolved {
+        span: (usize, usize),
+        anchor: String,
+        replacement: String,
+        /// How the match was obtained, as a label rather than the resolver's
+        /// enum: `legion-ai` is an optional dependency (`ai` or `offline`),
+        /// and a type from it in this signature would make the whole Assist
+        /// path fail to compile in a build with neither.
+        outcome_label: String,
+    },
+    /// Nothing usable came back, and this says what.
+    Unresolved { reason: String },
+}
+
+/// Read the model's search/replace block and locate it in the buffer.
+///
+/// Resolved against the excerpt, and the spans that come back are still
+/// absolute buffer offsets: `bounded_by_bytes` returns a prefix, so the two
+/// coordinate systems agree for every byte the model was shown. Resolving
+/// against the excerpt is also the honest bound on uniqueness -- the model
+/// cannot anchor on text it never saw, and a duplicate past the cut is not
+/// something it could have disambiguated. It avoids copying a 100MB buffer
+/// into the worker thread as a side benefit, not as the reason.
+///
+/// A block that cannot be found, or that matches twice, produces no edit at
+/// all. That is the point of the change: the previous path took whatever came
+/// back and prepended it, so a model that misread the file still produced a
+/// confident-looking proposal that corrupted it. A proposal that changes
+/// nothing and says why is a worse outcome for the model and a much better one
+/// for the person reviewing it.
+#[cfg(any(feature = "ai", feature = "offline"))]
+fn resolve_assist_placement(
+    buffer_excerpt: &str,
+    file_path: &str,
+    answer: &str,
+) -> AssistPlacement {
+    let blocks = legion_ai::patch::parse_edit_blocks_for_file(answer, file_path);
+    let Some(block) = blocks.first() else {
+        return AssistPlacement::Unresolved {
+            reason: "no search/replace block in the reply".to_string(),
+        };
+    };
+    if blocks.len() > 1 {
+        // Deliberately not "apply the first". Assist proposes one reviewable
+        // edit; silently dropping the rest would make the preview a partial
+        // account of what the model intended.
+        return AssistPlacement::Unresolved {
+            reason: format!(
+                "{} blocks in the reply; Assist proposes one edit at a time",
+                blocks.len()
+            ),
+        };
+    }
+    match legion_ai::patch::resolve_edit_span(buffer_excerpt, &block.old_str, &block.new_str) {
+        legion_ai::patch::PatchSpan::Resolved {
+            start,
+            end,
+            replacement,
+            outcome,
+        } => AssistPlacement::Resolved {
+            span: (start, end),
+            anchor: block.old_str.clone(),
+            replacement,
+            // Named rather than `{outcome:?}`. `Fuzzy` reads as "the edit is
+            // approximate", and the resolver's own doc says the opposite: the
+            // bytes replaced are the file's, and only the *search* was
+            // tolerant. A reviewer acts on this line.
+            outcome_label: match outcome {
+                legion_ai::patch::EditResolutionOutcome::Exact => "exact",
+                legion_ai::patch::EditResolutionOutcome::Fuzzy => "whitespace-tolerant-anchor",
+                legion_ai::patch::EditResolutionOutcome::WholeFileFallback => "whole-file",
+            }
+            .to_string(),
+        },
+        legion_ai::patch::PatchSpan::NoMatch(diagnostic) => AssistPlacement::Unresolved {
+            reason: diagnostic.message,
+        },
+        legion_ai::patch::PatchSpan::Ambiguous { occurrences } => AssistPlacement::Unresolved {
+            reason: format!("the quoted text appears {occurrences} times; it must be unique"),
+        },
+        legion_ai::patch::PatchSpan::ValidationError { reason } => {
+            AssistPlacement::Unresolved { reason }
+        }
+    }
+}
+
+/// Without `legion-ai` there is no resolver, so there is no edit.
+///
+/// Unreachable in practice -- a build with neither `ai` nor `offline` has no
+/// provider to answer with either -- but it must compile, and it must not
+/// fall back to inserting the reply at the top of the file. That fallback is
+/// the behaviour this whole change exists to remove; leaving it in one
+/// configuration would leave it in the product.
+#[cfg(not(any(feature = "ai", feature = "offline")))]
+fn resolve_assist_placement(
+    _buffer_excerpt: &str,
+    _file_path: &str,
+    _answer: &str,
+) -> AssistPlacement {
+    AssistPlacement::Unresolved {
+        reason: "this build has no patch resolver".to_string(),
     }
 }
 
@@ -330,6 +688,8 @@ pub(crate) fn failed_live_assisted_edit_proposal(
 #[cfg(not(feature = "ai"))]
 pub(crate) fn resolve_assisted_edit_proposal_text(
     _backend: Option<ProductAiLiveBackend>,
+    _preference: crate::ProductAiProviderPreference,
+    _anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     _instruction_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -338,14 +698,28 @@ pub(crate) fn resolve_assisted_edit_proposal_text(
     AssistedEditProposalSource,
     Option<ProductAiStreamProjection>,
 ) {
+    // No reason is attached: a build without the `ai` feature has no provider
+    // to have failed, so the fixture is the product working as compiled rather
+    // than a local model that did not answer.
     (deterministic_assisted_edit_proposal(), None)
 }
+
+/// Most characters a Delegate chat label may carry.
+///
+/// `DelegatedTaskChatMessage.content_label` is a bounded, display-safe label by
+/// contract. The live reply was bounded and the fallbacks were not, and the
+/// fallbacks are the ones built from configuration -- an environment-supplied
+/// base URL, a route label list -- so they were the unbounded half.
+#[cfg(feature = "ai")]
+pub(crate) const DELEGATE_REPLY_LABEL_MAX_CHARS: usize = 1_200;
 
 /// Resolve Delegate chat assistant body via product preference routing.
 #[cfg(feature = "ai")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_delegate_chat_reply(
     backend: Option<ProductAiLiveBackend>,
+    preference: ProductAiProviderPreference,
+    anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     prompt_label: &str,
     buffer_excerpt: &str,
     file_path: &str,
@@ -370,7 +744,10 @@ Do not invent file paths. Keep the reply under ~800 characters.";
     ) {
         Some(completion) => {
             let stream = product_stream_from_completion(&completion, "delegate.chat");
-            (bounded_label(completion.text, 1_200), Some(stream))
+            (
+                bounded_label(completion.text, DELEGATE_REPLY_LABEL_MAX_CHARS),
+                Some(stream),
+            )
         }
         // No completion. Which of the two reasons matters to whoever reads the
         // reply, exactly as it does on the Assist path.
@@ -379,18 +756,43 @@ Do not invent file paths. Keep the reply under ~800 characters.";
         // question had been answered when the provider they had selected never
         // replied -- and then advised them to enable the very backend that was
         // already selected and had just failed.
+        // Bounded like a live reply, and for the same reason.
+        //
+        // This becomes `DelegatedTaskChatMessage.content_label`, which the
+        // protocol defines as a bounded, display-safe label -- and every string
+        // interpolated below comes from configuration: an environment-supplied
+        // base URL with a very long host, or a route label list of any size.
+        // The success path went through `bounded_label` and this one did not, so
+        // a misconfigured URL could put megabytes into every persisted
+        // transcript and every projection built from it.
         None => (
-            match backend {
-                Some(backend) => format!(
-                    "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
-                    live_backend_label(backend),
-                    route_labels.join(",")
-                ),
-                None => format!(
-                    "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
-                    route_labels.join(",")
-                ),
-            },
+            bounded_label(
+                match backend {
+                    Some(backend) => format!(
+                        "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
+                        live_backend_label(backend),
+                        route_labels.join(",")
+                    ),
+                    // The same explanation Assist gives, for the same fallback.
+                    //
+                    // "answer ready … enable Ollama loopback" told somebody who had
+                    // selected Ollama to enable the thing they had selected, and
+                    // said nothing about which endpoint was probed or whether it
+                    // was even contacted. The diagnosis knows all of that; it was
+                    // simply never asked on this path.
+                    None => match crate::local_ai_unavailable_reason(preference, anthropic) {
+                        Some(reason) => format!(
+                            "{reason} (route={route_id} labels={}, {citation_count} citation(s))",
+                            route_labels.join(",")
+                        ),
+                        None => format!(
+                            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (backend=none; deterministic fixture, as configured)",
+                            route_labels.join(",")
+                        ),
+                    },
+                },
+                DELEGATE_REPLY_LABEL_MAX_CHARS,
+            ),
             None,
         ),
     }
@@ -400,6 +802,8 @@ Do not invent file paths. Keep the reply under ~800 characters.";
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_delegate_chat_reply(
     _backend: Option<ProductAiLiveBackend>,
+    _preference: ProductAiProviderPreference,
+    _anthropic: Option<crate::local_ai_diagnosis::AnthropicKeyState>,
     _prompt_label: &str,
     _buffer_excerpt: &str,
     _file_path: &str,
@@ -429,5 +833,402 @@ pub(crate) fn product_stream_from_completion(
         streamed: completion.streamed,
         in_flight: false,
         text_preview: bounded_label(completion.text.as_str(), 480),
+    }
+}
+
+#[cfg(all(test, any(feature = "ai", feature = "offline")))]
+mod assist_placement_tests {
+    use super::*;
+
+    const FILE: &str = "fn main() {\n    println!(\"one\");\n    println!(\"two\");\n}\n";
+
+    /// Destructure a placement the way the call site does.
+    ///
+    /// Returns `(span, anchor, replacement, detail)`. The accessors this
+    /// replaces cloned out of one arm four times; the tests read the same shape
+    /// the product does, so a change to that shape breaks them together.
+    fn parts(placement: AssistPlacement) -> ((usize, usize), String, String, String) {
+        match placement {
+            AssistPlacement::Resolved {
+                span,
+                anchor,
+                replacement,
+                outcome_label,
+            } => {
+                let detail = format!("edit={outcome_label} bytes={}..{}", span.0, span.1);
+                (span, anchor, replacement, detail)
+            }
+            AssistPlacement::Unresolved { reason } => (
+                (0, 0),
+                String::new(),
+                String::new(),
+                format!("edit=unresolved: {reason}"),
+            ),
+        }
+    }
+
+    fn block(old: &str, new: &str) -> String {
+        format!("<<<<<<< SEARCH\n{old}\n=======\n{new}\n>>>>>>> REPLACE\n")
+    }
+
+    /// The edit lands where the model pointed, not at the top of the file.
+    ///
+    /// This is the whole point of the change. Assist asked for "the exact text
+    /// to insert at the top of the file" and placed the answer at
+    /// `TextRange::byte(0, 0)`, so the feature could prepend and nothing else --
+    /// for the fixture, for Ollama and for Anthropic alike. A span that starts
+    /// at 0 here means the regression is back.
+    #[test]
+    fn a_resolved_block_edits_where_the_model_pointed() {
+        let answer = block("    println!(\"two\");", "    println!(\"three\");");
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        let (start, end) = span;
+        assert!(
+            start > 0,
+            "the edit must land at the quoted text, not at the top of the file; got {start}..{end}"
+        );
+        // Exactly the quoted text, and not the newline after it: the span is
+        // the match, so the file keeps its own line ending and the diff is one
+        // line rather than two.
+        assert_eq!(
+            &FILE[start..end],
+            "    println!(\"two\");",
+            "the span must cover exactly the quoted text"
+        );
+        assert_eq!(replacement, "    println!(\"three\");");
+    }
+
+    /// Applying the resolved span to the buffer produces the intended file.
+    ///
+    /// The span and the replacement are handed to the proposal separately, so
+    /// a test that only checks the span could pass while the two disagree.
+    #[test]
+    fn the_resolved_span_and_replacement_compose_into_the_intended_file() {
+        let answer = block("    println!(\"one\");", "    println!(\"uno\");");
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+        let (start, end) = span;
+
+        let mut applied = String::new();
+        applied.push_str(&FILE[..start]);
+        applied.push_str(&replacement);
+        applied.push_str(&FILE[end..]);
+
+        assert_eq!(
+            applied,
+            "fn main() {\n    println!(\"uno\");\n    println!(\"two\");\n}\n"
+        );
+    }
+
+    /// An anchor that is not in the file proposes nothing at all.
+    ///
+    /// The old path took whatever came back and prepended it, so a model that
+    /// misread the file still produced a confident-looking proposal that
+    /// corrupted it. Changing nothing and saying why is the better failure.
+    #[test]
+    fn an_anchor_that_is_not_in_the_file_proposes_no_edit() {
+        let answer = block("    println!(\"nowhere\");", "    println!(\"x\");");
+        let (span, _anchor, replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert_eq!(span, (0, 0));
+        assert!(
+            replacement.is_empty(),
+            "an unresolved edit must replace nothing, or it corrupts the file"
+        );
+        assert!(
+            detail.starts_with("edit=unresolved"),
+            "the reviewer has to be told why; got {:?}",
+            detail
+        );
+    }
+
+    /// An anchor that matches twice is refused rather than guessed at.
+    #[test]
+    fn an_ambiguous_anchor_proposes_no_edit() {
+        let repeated = "a();\nb();\na();\n";
+        let answer = block("a();", "c();");
+        let (span, _anchor, replacement, detail) =
+            parts(resolve_assist_placement(repeated, "src/main.rs", &answer));
+
+        assert_eq!(span, (0, 0));
+        assert!(replacement.is_empty());
+        assert!(
+            detail.contains("2 times"),
+            "the reason should name the ambiguity; got {:?}",
+            detail
+        );
+    }
+
+    /// A reply with no block at all is not silently treated as text to insert.
+    #[test]
+    fn prose_with_no_block_proposes_no_edit() {
+        let (span, _anchor, replacement, detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "Sure! You could rename the function.",
+        ));
+
+        assert_eq!(span, (0, 0));
+        assert!(replacement.is_empty());
+        assert!(
+            detail.contains("no search/replace block"),
+            "got {:?}",
+            detail
+        );
+    }
+
+    /// Several blocks are refused, not silently reduced to the first.
+    ///
+    /// Assist proposes one reviewable edit; applying block one and dropping the
+    /// rest would make the preview a partial account of what the model meant.
+    #[test]
+    fn more_than_one_block_proposes_no_edit() {
+        let answer = format!(
+            "{}{}",
+            block("    println!(\"one\");", "    println!(\"uno\");"),
+            block("    println!(\"two\");", "    println!(\"dos\");")
+        );
+        let (span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert_eq!(span, (0, 0));
+        assert!(detail.contains("one edit at a time"), "got {:?}", detail);
+    }
+
+    /// The resolved placement reports the anchor it matched.
+    ///
+    /// Carried so the completion path can re-check uniqueness against the whole
+    /// file: resolution sees only the excerpt, and an anchor unique there can
+    /// occur again past the cut. Without the anchor travelling with the source
+    /// that check has nothing to count.
+    #[test]
+    fn a_resolved_placement_reports_the_anchor_it_matched() {
+        let answer = block("    println!(\"two\");", "    println!(\"three\");");
+        let (_span, anchor, _replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert_eq!(anchor, "    println!(\"two\");");
+    }
+
+    /// An unresolved placement has no anchor to re-check.
+    #[test]
+    fn an_unresolved_placement_reports_no_anchor() {
+        let (_span, anchor, _replacement, _detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "no block here",
+        ));
+
+        assert!(anchor.is_empty());
+    }
+
+    /// The outcome label says what happened, not what the enum is called.
+    ///
+    /// `Fuzzy` reads as "the edit is approximate" and the resolver's own doc
+    /// says the opposite: the bytes replaced are the file's, only the search was
+    /// tolerant. This line ends up in a proposal a person reads before
+    /// approving an edit.
+    #[test]
+    fn the_outcome_label_describes_the_match_not_the_enum() {
+        // Indentation the model got wrong across two lines, so the exact
+        // substring is absent and only the normalized search finds it. A
+        // single mis-indented line would still match exactly, as a substring
+        // of the indented one.
+        let answer = block(
+            "println!(\"one\");\n      println!(\"two\");",
+            "println!(\"uno\");",
+        );
+        let (_span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert!(
+            detail.contains("whitespace-tolerant-anchor"),
+            "the label must say the anchor was matched tolerantly, not `Fuzzy`; got {detail:?}"
+        );
+        assert!(
+            !detail.contains("Fuzzy"),
+            "the enum's own name must not reach the reviewer; got {detail:?}"
+        );
+    }
+
+    /// A block wrapped in a diff fence is accepted, because the parser accepts it.
+    ///
+    /// The prompt used to forbid markdown fences while `parse_diff_fences` read
+    /// them anyway -- a rule the code did not enforce and the model was
+    /// penalised for breaking, since a fenced block plus any other block became
+    /// "two blocks" with no explanation a reader could act on.
+    #[test]
+    fn a_fenced_block_is_not_penalised_for_a_rule_the_parser_does_not_keep() {
+        let answer = format!(
+            "```diff\n{}```\n",
+            block("    println!(\"two\");", "    println!(\"three\");")
+        );
+        let (span, _anchor, _replacement, detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        let (start, _) = span;
+        assert!(
+            start > 0,
+            "a fenced search/replace block should still resolve; detail was {:?}",
+            detail
+        );
+    }
+
+    /// An unresolved edit is never registered as a proposal.
+    ///
+    /// It used to be, as an empty replacement over an empty span. Approving
+    /// that is a real transaction: `EditorEngine::apply_edits` increments the
+    /// buffer version, writes an undo entry, and marks the buffer dirty for
+    /// text it did not change -- a button that looks like it worked and did
+    /// nothing, which is worse than the prepend it replaced.
+    ///
+    /// Asserted at the source rather than through a run: an empty replacement
+    /// is the condition `finish_assisted_edit_proposal_registration` declines
+    /// on, so this pins the property that decision reads.
+    #[test]
+    fn an_unresolved_edit_carries_no_replacement_to_register() {
+        let (_span, _anchor, replacement, _detail) = parts(resolve_assist_placement(
+            FILE,
+            "src/main.rs",
+            "no block here",
+        ));
+        assert!(
+            replacement.is_empty(),
+            "an unresolved edit must carry nothing to apply, or a no-op reaches the              proposal lifecycle"
+        );
+
+        // And a resolved one does, so the guard cannot swallow real edits.
+        let answer = block("    println!(\"two\");", "    println!(\"three\");");
+        let (_span, _anchor, resolved, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+        assert!(!resolved.is_empty());
+    }
+
+    /// The reason a fixture answered reaches the title, not just the details.
+    ///
+    /// `bounded_proposal_title` reads only `preview.summary`, and
+    /// `AssistedAiProposalPreviewSummary` carries neither the summary nor the
+    /// details -- so a projection-only surface showed "Phase 4 local AI edit
+    /// proposal" and the explanation reached nobody who had not opened the raw
+    /// payload.
+    #[test]
+    fn the_fallback_reason_reaches_the_proposal_summary() {
+        let source = deterministic_assisted_edit_proposal_because(Some(
+            "Ollama did not answer at http://127.0.0.1:11434. Start Ollama, or set \
+             OLLAMA_BASE_URL if yours listens elsewhere."
+                .to_string(),
+        ));
+
+        assert!(
+            source
+                .summary
+                .contains("Ollama did not answer at http://127.0.0.1:11434"),
+            "the title must carry the endpoint, periods and all; got {:?}",
+            source.summary
+        );
+        assert!(
+            !source.summary.contains("Start Ollama"),
+            "the remedy belongs in the details, where there is room; got {:?}",
+            source.summary
+        );
+        assert!(
+            source
+                .details
+                .first()
+                .is_some_and(|line| line.contains("Start Ollama")),
+            "and it must still be there; got {:?}",
+            source.details
+        );
+    }
+
+    /// A headline stops at the first bullet, not at the end of the list.
+    #[test]
+    fn a_multi_line_reason_headlines_only_its_first_line() {
+        let source = deterministic_assisted_edit_proposal_because(Some(
+            "No local model server answered, so the deterministic fixture answered \
+             instead.\n- Ollama did not answer at http://127.0.0.1:11434.\n- A \
+             llama.cpp server did not answer at http://localhost:8080/v1."
+                .to_string(),
+        ));
+
+        assert!(
+            !source.summary.contains('\n'),
+            "a title is one line; got {:?}",
+            source.summary
+        );
+        assert!(
+            source.summary.contains("No local model server answered"),
+            "got {:?}",
+            source.summary
+        );
+    }
+
+    /// A proposal detail is bounded, like the headline above it.
+    ///
+    /// It is copied into `PreviewSummary.details` and persisted with every
+    /// proposal, and the reason is built from configuration -- an
+    /// environment-supplied base URL with a very long host. The headline was
+    /// capped and this was not, so the detail was the unbounded half.
+    #[test]
+    fn a_fallback_detail_is_bounded() {
+        let long_reason = format!(
+            "Ollama did not answer at http://{}:11434. Start Ollama.",
+            "x".repeat(50_000)
+        );
+
+        let source = deterministic_assisted_edit_proposal_because(Some(long_reason));
+
+        for detail in &source.details {
+            assert!(
+                detail.chars().count() <= ASSIST_DETAIL_MAX_CHARS,
+                "a persisted detail has a bound; got {} chars",
+                detail.chars().count()
+            );
+        }
+    }
+
+    /// A fixture asked for on purpose is not explained as a failure.
+    #[test]
+    fn a_deliberate_fixture_keeps_its_plain_summary() {
+        let source = deterministic_assisted_edit_proposal_because(None);
+
+        assert_eq!(source.summary, "Phase 4 local AI edit proposal");
+    }
+
+    /// A deletion is a real edit and must survive the no-op guard.
+    ///
+    /// A valid block with a non-empty SEARCH and an empty REPLACE resolves to a
+    /// non-empty span with an empty replacement. Testing emptiness of the
+    /// replacement alone classified that as unresolved, so Assist silently
+    /// rejected every deletion it was asked for. "Changes nothing" is an empty
+    /// span *and* an empty replacement.
+    #[test]
+    fn a_deletion_resolves_to_a_span_with_no_replacement() {
+        let answer = block("    println!(\"two\");", "");
+        let (span, _anchor, replacement, _detail) =
+            parts(resolve_assist_placement(FILE, "src/main.rs", &answer));
+
+        assert!(span.0 < span.1, "a deletion covers the text it removes");
+        assert!(replacement.is_empty(), "and puts nothing in its place");
+        assert_ne!(
+            span,
+            (0, 0),
+            "so the registration guard, which tests both, keeps it"
+        );
+    }
+
+    /// The deterministic fixture keeps prepending, and that stays honest.
+    ///
+    /// It is a canned comment that says it is a canned comment; inserting one
+    /// at the top is exactly what it claims to do. Only a live model is held to
+    /// producing an edit that resolves.
+    #[test]
+    fn the_fixture_proposal_still_inserts_at_the_top() {
+        let fixture = deterministic_assisted_edit_proposal();
+        assert_eq!(fixture.span, (0, 0));
+        assert!(!fixture.replacement.is_empty());
     }
 }

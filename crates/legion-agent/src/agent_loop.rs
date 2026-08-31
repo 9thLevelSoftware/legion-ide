@@ -101,11 +101,21 @@ mod forbidden_walk_tests {
             )],
         );
 
-        let grep = execute_grep(&serde_json::json!({"pattern": "CANARY"}), &config).unwrap();
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
         assert!(grep.contains("allowed.txt"));
         assert!(!grep.contains("secret"));
 
-        let glob = execute_glob(&serde_json::json!({"pattern": "**/*.txt"}), &config).unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
         assert!(glob.contains("allowed.txt"));
         assert!(!glob.contains("secret"));
     }
@@ -251,12 +261,28 @@ fn restore_pre_port_edit_schema(mut definition: ToolDefinition) -> ToolDefinitio
     definition
 }
 
-/// The tool set as advertised to the model, for A/B seam assertions.
+/// The tool set advertised for a mutation directive, for A/B seam assertions.
 ///
-/// Exposed so a test can check that the *advertised* contract moves with the
-/// enforced one; the loop itself uses [`tool_defs_from_registry`].
+/// Answers one question: does the advertised contract move with the enforced
+/// one as the governor flag changes. It deliberately does **not** exercise
+/// intent narrowing — it always asks as `Mutate`, which is the wider set — and
+/// saying so matters, because for a `Query` directive the advertised set is now
+/// narrower than the scope and a helper claiming to compare the two would be
+/// describing something it never looks at.
+///
+/// [`tool_definitions_for_query_tests`] is the other half.
 pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
-    tool_defs_from_registry(scope)
+    tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Mutate)
+}
+
+/// The tool set advertised for a query directive.
+///
+/// The narrowing seam, exposed so a test can assert that a question is not
+/// offered the edit tool through the same path the loop uses -- rather than
+/// only through `tools_for_action` in isolation, which would pass even if the
+/// loop stopped calling it.
+pub fn tool_definitions_for_query_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+    tool_defs_from_registry(scope, legion_ai::routing::ActionClass::Query)
 }
 
 /// Build a `ToolDefinition` from a `LegionToolSchemaDefinition`.
@@ -271,11 +297,26 @@ pub fn tool_definitions_for_tests(scope: &DelegatedTaskScope) -> Vec<ToolDefinit
 /// something the model merely might reach for: a benchmark run with
 /// `terminal-command` in the schema but not in the scope blocked on all 13
 /// tasks, because the model kept picking a branch that could only fail.
-fn tool_defs_from_registry(scope: &DelegatedTaskScope) -> Vec<ToolDefinition> {
+fn tool_defs_from_registry(
+    scope: &DelegatedTaskScope,
+    action: legion_ai::routing::ActionClass,
+) -> Vec<ToolDefinition> {
     let governed = legion_ai::governance::small_model_governors_enabled();
+    // The scope decides what is permitted; the turn's intent decides what is
+    // worth advertising within that. Behind the governor flag with the rest of
+    // the small-model behaviour, so `LEGION_AI_GOVERNORS=off` still measures
+    // the un-ported loop and the bench's A/B arms stay comparable.
+    let offered: Vec<legion_protocol::tools::LegionToolKind> = if governed {
+        legion_ai::routing::tools_for_action(action, &scope.allowed_tools)
+    } else {
+        scope.allowed_tools.clone()
+    };
     legion_protocol::tools::tool_schema_definitions()
         .into_iter()
-        .filter(|def| parse_tool_kind(&def.tool_name).is_some_and(|kind| scope.allows_tool(kind)))
+        .filter(|def| {
+            parse_tool_kind(&def.tool_name)
+                .is_some_and(|kind| scope.allows_tool(kind) && offered.contains(&kind))
+        })
         .map(|def| ToolDefinition {
             name: def.tool_name,
             description: def.description_label,
@@ -440,6 +481,7 @@ fn check_broker_capability(
 fn execute_read(
     input: &serde_json::Value,
     worktree_root: &Path,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::Read)?;
     let start_line = input
@@ -466,6 +508,11 @@ fn execute_read(
     })?;
 
     let abs_path = resolved;
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     let content = std::fs::read_to_string(&abs_path).map_err(|e| {
         LegionToolCallFeedback::new(
             LegionToolKind::Read,
@@ -506,6 +553,7 @@ fn execute_read(
 fn execute_grep(
     input: &serde_json::Value,
     config: &DelegatedTaskLoopConfig,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Grep)?;
@@ -570,6 +618,11 @@ fn execute_grep(
     };
 
     let mut results = Vec::new();
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     grep_walk(
         &search_root,
         &search_root,
@@ -661,6 +714,7 @@ fn looks_binary(path: &Path) -> bool {
 fn execute_glob(
     input: &serde_json::Value,
     config: &DelegatedTaskLoopConfig,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let worktree_root = &config.worktree_root;
     let pattern = require_string_field(input, "pattern", LegionToolKind::Glob)?;
@@ -710,6 +764,11 @@ fn execute_glob(
     };
 
     let mut results = Vec::new();
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     glob_walk(
         &search_root,
         &search_root,
@@ -767,6 +826,7 @@ fn glob_walk(
 fn execute_outline(
     input: &serde_json::Value,
     worktree_root: &Path,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::Outline)?;
     let max_symbols = input
@@ -786,6 +846,11 @@ fn execute_outline(
     })?;
 
     let abs_path = resolved;
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     let content = std::fs::read_to_string(&abs_path).map_err(|e| {
         LegionToolCallFeedback::new(
             LegionToolKind::Outline,
@@ -948,6 +1013,7 @@ fn execute_edit_as_proposal(
     loop_correlation_id: u64,
     causality_id: Uuid,
     pending_edits: &mut PendingEditContent,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     let path_str = require_string_field(input, "path", LegionToolKind::EditAsProposal)?;
     let proposal_title = input
@@ -992,8 +1058,19 @@ fn execute_edit_as_proposal(
                 Some(path_str.to_string()),
             ));
         }
-        None => resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?,
+        None => {
+            // Reads the file on disk to place the fragment, so the machine has
+            // been touched by the time this returns either way.
+            reached_the_machine();
+            resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?
+        }
     };
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
+
     // Stage the result so a later edit to the same file composes with this one
     // instead of resolving against stale content.
     pending_edits.insert(resolved_edit_path.clone(), replacement.clone());
@@ -1071,6 +1148,7 @@ fn execute_terminal_command(
     input: &serde_json::Value,
     worktree_root: &Path,
     tool_host: &dyn DelegatedToolHost,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let command = require_string_field(input, "command", LegionToolKind::TerminalCommand)?;
     let workdir = input.get("workdir").and_then(|v| v.as_str());
@@ -1094,6 +1172,11 @@ fn execute_terminal_command(
         None
     };
 
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     tool_host
         .run_terminal_command(command, workdir_path.as_deref(), timeout_seconds)
         .map_err(|e| {
@@ -1109,6 +1192,7 @@ fn execute_terminal_command(
 fn execute_mcp_passthrough(
     input: &serde_json::Value,
     tool_host: &dyn DelegatedToolHost,
+    reached_the_machine: &mut dyn FnMut(),
 ) -> Result<String, LegionToolCallFeedback> {
     let server_id = require_string_field(input, "server_id", LegionToolKind::McpPassthrough)?;
     let tool_name = require_string_field(input, "tool_name", LegionToolKind::McpPassthrough)?;
@@ -1121,6 +1205,11 @@ fn execute_mcp_passthrough(
         )
     })?;
 
+    // The operation is about to happen, so the record is written now. Not
+    // afterwards: a host that hangs, panics or takes the process down with it
+    // never returns, and an execution nobody can distinguish from a refusal is
+    // exactly what this event exists to prevent.
+    reached_the_machine();
     tool_host
         .call_mcp_tool(server_id, tool_name, arguments)
         .map_err(|e| {
@@ -1148,6 +1237,12 @@ fn validate_and_execute(
     loop_correlation_id: u64,
     causality_id: Uuid,
     pending_edits: &mut PendingEditContent,
+    // Called by the executor at the moment it reaches the host or the
+    // filesystem, so the record exists before the operation does rather than
+    // after it returns. Not called by the gates: passing them means execution is
+    // about to be attempted, and each executor validates its own arguments
+    // afterwards.
+    dispatched: &mut dyn FnMut(),
 ) -> Result<ToolExecutionOutput, LegionToolCallFeedback> {
     // Step 1: parse tool kind
     let tool = parse_tool_kind(tool_name).ok_or_else(|| {
@@ -1280,26 +1375,45 @@ fn validate_and_execute(
     // Step 5: broker capability check
     check_broker_capability(broker, tool, input, loop_correlation_id)?;
 
-    // Execute tool — non-proposal tools wrap their String output in ToolExecutionOutput.
+    // Every gate has passed, so execution is about to be *attempted*. That is
+    // not the same as reaching the machine, and this used to say it was.
+    //
+    // Each executor validates its own arguments after the shared gates: a
+    // terminal call with a `workdir` that escapes the worktree is refused
+    // inside `execute_terminal_command`, before `run_terminal_command` is ever
+    // called. Marking dispatch here recorded that command as having run --
+    // false audit evidence in the worst direction, since the whole point of
+    // this event is to answer "did anything execute" when the outcome cannot.
+    //
+    // So each executor sets the flag itself, at the moment it reaches the host
+    // or the filesystem, and not before.
     match tool {
         LegionToolKind::Read => {
-            execute_read(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+            execute_read(input, &config.worktree_root, dispatched).map(|content| {
+                ToolExecutionOutput {
+                    content,
+                    proposal: None,
+                }
+            })
+        }
+        LegionToolKind::Grep => {
+            execute_grep(input, config, dispatched).map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
             })
         }
-        LegionToolKind::Grep => execute_grep(input, config).map(|content| ToolExecutionOutput {
-            content,
-            proposal: None,
-        }),
-        LegionToolKind::Glob => execute_glob(input, config).map(|content| ToolExecutionOutput {
-            content,
-            proposal: None,
-        }),
-        LegionToolKind::Outline => {
-            execute_outline(input, &config.worktree_root).map(|content| ToolExecutionOutput {
+        LegionToolKind::Glob => {
+            execute_glob(input, config, dispatched).map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
+            })
+        }
+        LegionToolKind::Outline => {
+            execute_outline(input, &config.worktree_root, dispatched).map(|content| {
+                ToolExecutionOutput {
+                    content,
+                    proposal: None,
+                }
             })
         }
         LegionToolKind::EditAsProposal => execute_edit_as_proposal(
@@ -1308,21 +1422,21 @@ fn validate_and_execute(
             loop_correlation_id,
             causality_id,
             pending_edits,
+            dispatched,
         ),
         LegionToolKind::TerminalCommand => {
-            execute_terminal_command(input, &config.worktree_root, tool_host).map(|content| {
-                ToolExecutionOutput {
+            execute_terminal_command(input, &config.worktree_root, tool_host, dispatched).map(
+                |content| ToolExecutionOutput {
                     content,
                     proposal: None,
-                }
-            })
+                },
+            )
         }
-        LegionToolKind::McpPassthrough => {
-            execute_mcp_passthrough(input, tool_host).map(|content| ToolExecutionOutput {
+        LegionToolKind::McpPassthrough => execute_mcp_passthrough(input, tool_host, dispatched)
+            .map(|content| ToolExecutionOutput {
                 content,
                 proposal: None,
-            })
-        }
+            }),
     }
 }
 
@@ -1351,7 +1465,19 @@ pub fn run_delegated_task_loop(
         u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
     };
 
-    let tool_defs = tool_defs_from_registry(&config.scope);
+    // What the task is asking for decides which tools it is shown.
+    //
+    // A directive that asked a question has no reading under which a workspace
+    // edit helps, and a small model offered one will eventually take it -- the
+    // same failure `tool_defs_from_registry` already documents for tools the
+    // scope forbids, one step earlier. Classified once from the task text
+    // rather than per turn: the task does not change intent halfway through,
+    // and re-deciding each turn would let a single reply talk the loop into a
+    // wider tool set than the task was admitted with.
+    let action_class = legion_ai::routing::classify_action(&config.initial_message);
+    let tool_defs = tool_defs_from_registry(&config.scope, action_class);
+    let mut plan_anchor =
+        crate::plan_anchor::PlanAnchor::new(legion_ai::governance::small_model_governors_enabled());
 
     // Initialize conversation with the user's task message.
     let mut turns: Vec<ToolConversationTurn> = vec![ToolConversationTurn {
@@ -1525,9 +1651,26 @@ pub fn run_delegated_task_loop(
                                 ),
                             });
                         }
-                        tool_result_blocks.push(ToolTurnBlock::Text(format!(
-                            "Tool call `{name}` was rejected: {diagnostic}"
-                        )));
+                        // A malformed call is a failure of this tool.
+                        //
+                        // It never reaches `validate_and_execute`, so the
+                        // streak was blind to it -- and the interleaving that
+                        // hides it is ordinary: broken `grep` arguments between
+                        // working `read` calls keep resetting
+                        // `max_consecutive_retries`, so a model that can only
+                        // emit invalid JSON for one tool retries it forever
+                        // without ever being told which tool is the problem.
+                        let mut rejection =
+                            format!("Tool call `{name}` was rejected: {diagnostic}");
+                        if let Some(notice) = governors.note_tool_failure(name) {
+                            rejection.push_str(
+                                "
+
+",
+                            );
+                            rejection.push_str(&notice);
+                        }
+                        tool_result_blocks.push(ToolTurnBlock::Text(rejection));
                         continue;
                     }
                     let ToolTurnBlock::ToolUse { id, name, input } = block else {
@@ -1584,8 +1727,18 @@ pub fn run_delegated_task_loop(
                     // the model made it, and a governor that hid model actions
                     // from the audit would be trading one honesty problem for
                     // another.
-                    if let Some(cached) = governors.cached_result(name, input) {
-                        let notice = crate::governors::dedup_notice(name, cached);
+                    // Owned, so the immutable borrow ends before the streak
+                    // reset below needs `&mut`.
+                    if let Some(cached) = governors.cached_result(name, input).map(str::to_string) {
+                        // A cache hit is a success, and the failure streak has
+                        // to hear about it. Only the fresh-execution path reset
+                        // it, so a tool that failed twice, was then answered
+                        // from cache, and failed once more still reported three
+                        // in a row -- a demotion notice describing a streak that
+                        // a success had already broken. "Consecutive" has to
+                        // mean consecutive on every path that ends in an answer.
+                        governors.note_tool_success(name);
+                        let notice = crate::governors::dedup_notice(name, &cached);
                         // A cache hit still sends the whole result to the model,
                         // so it costs exactly what a fresh call costs and is
                         // charged the same. Serving it free would let repeated
@@ -1663,16 +1816,43 @@ pub fn run_delegated_task_loop(
                     }
 
                     // Validate + execute the tool.
-                    match validate_and_execute(
-                        config,
-                        name,
-                        input,
-                        broker,
-                        tool_host,
-                        correlation_id_u64,
-                        causality_uuid,
-                        &mut pending_edits,
-                    ) {
+                    //
+                    // The dispatch record is written from inside the executor,
+                    // at the instant it reaches the host or the filesystem, and
+                    // not from out here once execution returns. A command that
+                    // hangs or takes the process down never returns, and the
+                    // record that says it ran is the only thing separating that
+                    // from a refusal before it ran -- so it cannot be waiting on
+                    // the call that may never come back.
+                    let execution = {
+                        let mut on_dispatch = || {
+                            event_seq += 1;
+                            step_index += 1;
+                            audit_sink.record_step(DelegatedTaskLoopStepRecord {
+                                run_id: run_id.clone(),
+                                step_index,
+                                kind: DelegatedTaskLoopStepKind::ToolCallDispatched,
+                                correlation_id: correlation_id_str.clone(),
+                                causality_id: causality_id_str.clone(),
+                                event_sequence: event_seq,
+                                tool_name: Some(name.clone()),
+                                allowed: Some(true),
+                                reason: None,
+                            });
+                        };
+                        validate_and_execute(
+                            config,
+                            name,
+                            input,
+                            broker,
+                            tool_host,
+                            correlation_id_u64,
+                            causality_uuid,
+                            &mut pending_edits,
+                            &mut on_dispatch,
+                        )
+                    };
+                    match execution {
                         Ok(ToolExecutionOutput {
                             content: raw_output,
                             proposal,
@@ -1752,6 +1932,10 @@ pub fn run_delegated_task_loop(
                             // later cache hit hands the model exactly what a
                             // fresh call would have.
                             governors.record_execution(name, input, &bound.redacted_text);
+                            // A success ends this tool's failure streak. The
+                            // streak is consecutive, so working once is exactly
+                            // what makes the earlier failures not a pattern.
+                            governors.note_tool_success(name);
 
                             tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                 tool_use_id: id.clone(),
@@ -1831,6 +2015,21 @@ pub fn run_delegated_task_loop(
                                     feedback_content
                                         .push_str(&crate::governors::read_first_hint(path));
                                 }
+                                // One tool failing repeatedly is information the
+                                // model cannot see: it gets each diagnostic
+                                // separately and nothing tells it they are the
+                                // same tool three times. `max_consecutive_retries`
+                                // counts across every tool and ends the run, which
+                                // cannot distinguish "stuck" from "this one tool
+                                // does not work here".
+                                if let Some(notice) = governors.note_tool_failure(name) {
+                                    feedback_content.push_str(
+                                        "
+
+",
+                                    );
+                                    feedback_content.push_str(&notice);
+                                }
                                 tool_result_blocks.push(ToolTurnBlock::ToolResult {
                                     tool_use_id: id.clone(),
                                     content: feedback_content,
@@ -1876,13 +2075,52 @@ pub fn run_delegated_task_loop(
                     });
                 }
 
+                // Capture the plan from the model's own words before the
+                // turn is filed away. First statement only -- a model that
+                // rewrites its plan mid-run is often already drifting, and
+                // adopting the rewrite would make this agree with the drift it
+                // exists to catch.
+                //
+                // The turn's text blocks are joined first, because a turn is one
+                // statement however many blocks it arrived in. Anthropic
+                // preserves every native text block separately, so a plan split
+                // across two of them was parsed as two lists: the anchor locked
+                // onto whichever block first held two steps and dropped the
+                // rest, or -- with one step per block -- captured nothing at
+                // all.
+                let assistant_text = response
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ToolTurnBlock::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                plan_anchor.capture(&assistant_text);
+
                 // Append the assistant's turn to conversation history.
                 turns.push(ToolConversationTurn {
                     role: "assistant".to_string(),
                     blocks: response.blocks,
                 });
 
-                // Append all tool results as a user turn.
+                // Put the plan back in front of the model on the interval.
+                //
+                // By turn ten the conversation is mostly file contents and
+                // diagnostics; the directive is far away and the model starts
+                // solving whatever the last tool output suggested. It does not
+                // announce that, which is why the other governors cannot see
+                // it -- idle detection sees progress, dedup sees distinct
+                // calls, retry counting sees successes.
+                //
+                // Carried on the same user turn as the tool results when there
+                // are any, so a reminder never becomes a turn of its own that
+                // the model has to answer.
+                let reanchor = plan_anchor.reanchor();
+                if let Some(notice) = reanchor {
+                    tool_result_blocks.push(ToolTurnBlock::Text(notice));
+                }
                 if !tool_result_blocks.is_empty() {
                     turns.push(ToolConversationTurn {
                         role: "user".to_string(),
