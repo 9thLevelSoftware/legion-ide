@@ -33,7 +33,19 @@ impl AppComposition {
         // the worker resolves an empty branch label off the app thread.
         let branch = self.git_projection.branch_label.clone().unwrap_or_default();
 
-        let remote_url = legion_project::git_remote_configured_url(Path::new(&root_path), remote);
+        // App-thread dispatch cannot spawn git.exe: the 4ms
+        // git.remote_push_does_not_block_dispatch budget is intent-to-return
+        // with no child process. Origin's URL is already on the projection
+        // from inspection; a named remote that is not origin is evaluated
+        // with no URL, which policy denies (cannot evaluate a target it
+        // cannot see) rather than blocking the UI on `git remote get-url`.
+        let remote_url = if remote == "origin" {
+            self.git_projection.remote_url.clone().or_else(|| {
+                legion_project::git_remote_configured_url(Path::new(&root_path), remote)
+            })
+        } else {
+            None
+        };
         let trust = self
             .active_documents
             .active_workspace_trust

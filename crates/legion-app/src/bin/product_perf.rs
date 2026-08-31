@@ -584,10 +584,31 @@ fn measure_memory_ceiling(ready: &ReadyWorkspace) -> WorkloadRecord {
     }
 }
 
+/// Join the background search worker. Dispatch now returns a running
+/// projection immediately; the planted-needle check has to wait for the
+/// walk, or it reports 0 hits and the harness treats the row as unmeasured.
+fn settle_search(app: &mut AppComposition, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        app.drain_search_worker();
+        if !app.search_worker_in_flight() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.drain_search_worker();
+}
+
+fn search_hit_count(app: &AppComposition) -> usize {
+    app.shell_projection_snapshot("product-perf")
+        .map(|snapshot| snapshot.search_projection.results.len())
+        .unwrap_or(0)
+}
+
 /// Real product workspace search over this repository.
 fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
     let start = Instant::now();
-    let outcome = ready
+    match ready
         .app
         .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
             scope: SearchScopeProjection::Workspace,
@@ -598,11 +619,8 @@ fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
             case_sensitive: Some(true),
             whole_word: None,
             use_regex: None,
-        });
-    let elapsed = start.elapsed();
-
-    let hits = match outcome {
-        Ok(AppCommandOutcome::SearchUpdated(projection)) => projection.results.len(),
+        }) {
+        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
         Ok(other) => {
             return WorkloadRecord::unmeasured(
                 "p8.legion_repo",
@@ -615,7 +633,10 @@ fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
                 format!("RunSearch dispatch failed: {err:?}"),
             );
         }
-    };
+    }
+    settle_search(&mut ready.app, Duration::from_secs(120));
+    let elapsed = start.elapsed();
+    let hits = search_hit_count(&ready.app);
     if hits == 0 {
         // Zero hits means the walk never read this file's contents, so the
         // number would describe a directory listing rather than a search.
@@ -676,18 +697,15 @@ fn measure_fixture_100k() -> WorkloadRecord {
     let open_elapsed = open_start.elapsed();
 
     let start = Instant::now();
-    let outcome = app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
+    match app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
         scope: SearchScopeProjection::Workspace,
         query: FIXTURE_NEEDLE.to_string(),
         limit: 100_000,
         case_sensitive: Some(true),
         whole_word: None,
         use_regex: None,
-    });
-    let elapsed = start.elapsed();
-
-    let hits = match outcome {
-        Ok(AppCommandOutcome::SearchUpdated(projection)) => projection.results.len(),
+    }) {
+        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
         Ok(other) => {
             let _ = std::fs::remove_dir_all(&root);
             return WorkloadRecord::unmeasured(
@@ -702,7 +720,10 @@ fn measure_fixture_100k() -> WorkloadRecord {
                 format!("RunSearch dispatch failed: {err:?}"),
             );
         }
-    };
+    }
+    settle_search(&mut app, Duration::from_secs(1_800));
+    let elapsed = start.elapsed();
+    let hits = search_hit_count(&app);
     let _ = std::fs::remove_dir_all(&root);
 
     if hits == 0 {
