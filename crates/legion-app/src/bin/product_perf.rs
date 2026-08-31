@@ -584,84 +584,66 @@ fn measure_memory_ceiling(ready: &ReadyWorkspace) -> WorkloadRecord {
     }
 }
 
-/// Join the background search worker. Dispatch now returns a running
-/// projection immediately; the planted-needle check has to wait for the
-/// walk, or it reports 0 hits and the harness treats the row as unmeasured.
-fn settle_search(app: &mut AppComposition, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        app.drain_search_worker();
-        if !app.search_worker_in_flight() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    app.drain_search_worker();
-}
-
-fn search_hit_count(app: &AppComposition) -> usize {
-    app.shell_projection_snapshot("product-perf")
-        .map(|snapshot| snapshot.search_projection.results.len())
-        .unwrap_or(0)
-}
-
 /// Real product workspace search over this repository.
 fn measure_legion_repo_search(ready: &mut ReadyWorkspace) -> WorkloadRecord {
-    let start = Instant::now();
-    match ready
-        .app
-        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-            scope: SearchScopeProjection::Workspace,
-            query: REPO_NEEDLE.to_string(),
-            // High enough that the walker cannot stop early: the workload is a
-            // full-repo scan, and a search that quits at 50 hits measures nothing.
-            limit: 100_000,
-            case_sensitive: Some(true),
-            whole_word: None,
-            use_regex: None,
-        }) {
-        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
-        Ok(other) => {
-            return WorkloadRecord::unmeasured(
+    match run_workspace_search(&mut ready.app, REPO_NEEDLE, 100_000) {
+        Ok((hits, elapsed)) if hits == 0 => {
+            // Zero hits means the walk never read this file's contents, so the
+            // number would describe a directory listing rather than a search.
+            WorkloadRecord::unmeasured(
                 "p8.legion_repo",
-                format!("expected SearchUpdated, got {other:?}"),
-            );
+                format!("repo search found 0 hits for the planted needle after {elapsed:?}"),
+            )
         }
-        Err(err) => {
-            return WorkloadRecord::unmeasured(
-                "p8.legion_repo",
-                format!("RunSearch dispatch failed: {err:?}"),
-            );
+        Ok((hits, elapsed)) => {
+            let micros = elapsed.as_micros() as u64;
+            WorkloadRecord {
+                name: "p8.legion_repo",
+                measured: true,
+                sample_count: 1,
+                fixture_bytes: 0,
+                p50_micros: micros,
+                p95_micros: micros,
+                total_micros: micros,
+                bytes_value: 0,
+                detail: format!(
+                    "real product RunSearch over the Legion repository: {:.0}ms, {hits} hit(s) for the \
+                     planted needle",
+                    elapsed.as_secs_f64() * 1000.0
+                ),
+            }
         }
+        Err(reason) => WorkloadRecord::unmeasured("p8.legion_repo", reason),
     }
-    settle_search(&mut ready.app, Duration::from_secs(120));
-    let elapsed = start.elapsed();
-    let hits = search_hit_count(&ready.app);
-    if hits == 0 {
-        // Zero hits means the walk never read this file's contents, so the
-        // number would describe a directory listing rather than a search.
-        return WorkloadRecord::unmeasured(
-            "p8.legion_repo",
-            format!("repo search found 0 hits for the planted needle after {elapsed:?}"),
-        );
-    }
+}
 
-    let micros = elapsed.as_micros() as u64;
-    WorkloadRecord {
-        name: "p8.legion_repo",
-        measured: true,
-        sample_count: 1,
-        fixture_bytes: 0,
-        p50_micros: micros,
-        p95_micros: micros,
-        total_micros: micros,
-        bytes_value: 0,
-        detail: format!(
-            "real product RunSearch over the Legion repository: {:.0}ms, {hits} hit(s) for the \
-             planted needle",
-            elapsed.as_secs_f64() * 1000.0
-        ),
+/// Dispatch a workspace search and wait for the off-thread worker to finish.
+///
+/// `RunSearch` returns a Running snapshot immediately; the planted-needle
+/// workloads measure the completed walk, so they have to drain the worker
+/// before counting hits.
+fn run_workspace_search(
+    app: &mut AppComposition,
+    query: &str,
+    limit: usize,
+) -> Result<(usize, Duration), String> {
+    let start = Instant::now();
+    match app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
+        scope: SearchScopeProjection::Workspace,
+        query: query.to_string(),
+        // High enough that the walker cannot stop early: the workload is a
+        // full-repo scan, and a search that quits at 50 hits measures nothing.
+        limit,
+        case_sensitive: Some(true),
+        whole_word: None,
+        use_regex: None,
+    }) {
+        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
+        Ok(other) => return Err(format!("expected SearchUpdated, got {other:?}")),
+        Err(err) => return Err(format!("RunSearch dispatch failed: {err:?}")),
     }
+    let projection = app.drain_search_until_idle();
+    Ok((projection.results.len(), start.elapsed()))
 }
 
 /// Generate the 100K-file reference workspace and search it through the real
@@ -696,36 +678,15 @@ fn measure_fixture_100k() -> WorkloadRecord {
     // which of them moved.
     let open_elapsed = open_start.elapsed();
 
-    let start = Instant::now();
-    match app.dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-        scope: SearchScopeProjection::Workspace,
-        query: FIXTURE_NEEDLE.to_string(),
-        limit: 100_000,
-        case_sensitive: Some(true),
-        whole_word: None,
-        use_regex: None,
-    }) {
-        Ok(AppCommandOutcome::SearchUpdated(_)) => {}
-        Ok(other) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return WorkloadRecord::unmeasured(
-                "p8.fixture_100k_files",
-                format!("expected SearchUpdated, got {other:?}"),
-            );
-        }
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(&root);
-            return WorkloadRecord::unmeasured(
-                "p8.fixture_100k_files",
-                format!("RunSearch dispatch failed: {err:?}"),
-            );
-        }
-    }
-    settle_search(&mut app, Duration::from_secs(1_800));
-    let elapsed = start.elapsed();
-    let hits = search_hit_count(&app);
+    let search = run_workspace_search(&mut app, FIXTURE_NEEDLE, 100_000);
     let _ = std::fs::remove_dir_all(&root);
 
+    let (hits, elapsed) = match search {
+        Ok(result) => result,
+        Err(reason) => {
+            return WorkloadRecord::unmeasured("p8.fixture_100k_files", reason);
+        }
+    };
     if hits == 0 {
         return WorkloadRecord::unmeasured(
             "p8.fixture_100k_files",

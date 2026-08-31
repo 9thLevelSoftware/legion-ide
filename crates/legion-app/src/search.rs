@@ -796,22 +796,11 @@ impl AppComposition {
             })
             .map_err(AppCompositionError::SearchValidation)?;
         #[cfg(feature = "test-helpers")]
-        self.wait_for_search_result(self.search_generation);
+        {
+            let _ = self.drain_search_until_idle();
+        }
         self.sync_search_palette_results();
         Ok(self.search_projection.clone())
-    }
-
-    #[cfg(feature = "test-helpers")]
-    fn wait_for_search_result(&mut self, generation: u64) {
-        for _ in 0..200 {
-            self.drain_search_worker();
-            if self.search_generation != generation
-                || self.search_projection.status.kind != SearchStatusKindProjection::Running
-            {
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(1));
-        }
     }
 
     /// Drain completed search work without blocking the app thread.
@@ -845,6 +834,23 @@ impl AppComposition {
         }
         self.sync_search_palette_results();
         true
+    }
+
+    /// Drain search worker results until the current query is no longer running.
+    ///
+    /// `RunSearch` returns as soon as the worker accepts the query so the app
+    /// thread stays free. Callers that need the completed result — golden
+    /// paths, the product-perf harness, and tests — wait here instead of
+    /// treating the Running snapshot as the answer.
+    pub fn drain_search_until_idle(&mut self) -> SearchProjection {
+        while self.search_worker_in_flight() {
+            self.drain_search_worker();
+            if self.search_worker_in_flight() {
+                thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        self.drain_search_worker();
+        self.search_projection.clone()
     }
 
     fn snapshot_active_search_input(&self) -> Result<SearchActiveSnapshot, AppCompositionError> {
@@ -1508,5 +1514,12 @@ mod worker_tests {
         assert_eq!(latest.generation, 2);
         assert_eq!(latest.query_id, "search:new");
         assert!(worker.drain_latest().is_none());
+    }
+
+    #[test]
+    fn drain_search_until_idle_is_a_no_op_when_no_query_is_running() {
+        let mut app = crate::AppComposition::new();
+        let projection = app.drain_search_until_idle();
+        assert_ne!(projection.status.kind, SearchStatusKindProjection::Running);
     }
 }

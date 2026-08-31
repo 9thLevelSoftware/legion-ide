@@ -42,7 +42,9 @@ use legion_protocol::{
     LspWorkspaceTrustPosture, PrincipalId, RedactionHint, SemanticPrivacyScope,
     TerminalPanelStatusKind, TerminalSessionId, WorkspaceId, WorkspaceRootId, WorkspaceTrustState,
 };
-use legion_ui::{CommandDispatchIntent, GitHunkStageProjection, SearchScopeProjection};
+use legion_ui::{
+    CommandDispatchIntent, GitHunkStageProjection, SearchProjection, SearchScopeProjection,
+};
 use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -952,6 +954,31 @@ fn dump_s3_post_mortem(
 // Step s4: workspace search
 // ─────────────────────────────────────────────────────────────────────────────
 
+fn run_settled_search(
+    app: &mut AppComposition,
+    query: &str,
+    limit: usize,
+    case_sensitive: Option<bool>,
+    whole_word: Option<bool>,
+    use_regex: Option<bool>,
+) -> Result<SearchProjection, String> {
+    match app
+        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
+            scope: SearchScopeProjection::Workspace,
+            query: query.to_string(),
+            limit,
+            case_sensitive,
+            whole_word,
+            use_regex,
+        })
+        .map_err(|e| format!("{e:?}"))?
+    {
+        AppCommandOutcome::SearchUpdated(_) => {}
+        other => return Err(format!("expected SearchUpdated, got {other:?}")),
+    }
+    Ok(app.drain_search_until_idle())
+}
+
 fn run_s4(app: &mut AppComposition) -> Result<(), String> {
     const MARKER: &str = "SMOKE_MARKER_ALPHA";
 
@@ -959,20 +986,8 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
     // (The workspace search is not scoped to the active file, but we need at
     // least one buffer open for workspace context.)
     eprintln!("[s4] running workspace search for '{MARKER}' ...");
-    let search_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-            scope: SearchScopeProjection::Workspace,
-            query: MARKER.to_string(),
-            limit: 50,
-            case_sensitive: None,
-            whole_word: None,
-            use_regex: None,
-        })
-        .map_err(|e| format!("search dispatch: {e:?}"))?;
-    let projection = match search_result {
-        AppCommandOutcome::SearchUpdated(p) => p,
-        other => return Err(format!("s4: expected SearchUpdated, got {other:?}")),
-    };
+    let projection = run_settled_search(app, MARKER, 50, None, None, None)
+        .map_err(|e| format!("search dispatch: {e}"))?;
     let hit_count = projection.results.len();
     eprintln!("[s4] search results: {hit_count}");
     if hit_count == 0 {
@@ -997,26 +1012,10 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
     eprintln!(
         "[s4] case-sensitivity proof: searching lowercase '{cs_lower_query}' (expected 0) ..."
     );
-    let cs_lower_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-            scope: SearchScopeProjection::Workspace,
-            query: cs_lower_query.clone(),
-            limit: 50,
-            // Explicit end-to-end exercise of the WS-SEARCH-01 option
-            // threading (stronger than relying on the default).
-            case_sensitive: Some(true),
-            whole_word: None,
-            use_regex: None,
-        })
-        .map_err(|e| format!("cs-lower search dispatch: {e:?}"))?;
-    let cs_lower_projection = match cs_lower_result {
-        AppCommandOutcome::SearchUpdated(p) => p,
-        other => {
-            return Err(format!(
-                "s4: expected SearchUpdated for cs-lower, got {other:?}"
-            ));
-        }
-    };
+    // Explicit end-to-end exercise of the WS-SEARCH-01 option
+    // threading (stronger than relying on the default).
+    let cs_lower_projection = run_settled_search(app, &cs_lower_query, 50, Some(true), None, None)
+        .map_err(|e| format!("cs-lower search dispatch: {e}"))?;
     let cs_lower_count = cs_lower_projection.results.len();
     eprintln!("[s4] case-sensitive lowercase results: {cs_lower_count} (expected 0)");
     if cs_lower_count != 0 {
@@ -1030,24 +1029,8 @@ fn run_s4(app: &mut AppComposition) -> Result<(), String> {
     // Verify we also get hits when we explicitly opt into case-insensitive mode.
     let nocase_query = format!("nocase {}", MARKER.to_ascii_lowercase());
     eprintln!("[s4] running case-insensitive search: '{nocase_query}' ...");
-    let nocase_result = app
-        .dispatch_ui_intent(CommandDispatchIntent::RunSearch {
-            scope: SearchScopeProjection::Workspace,
-            query: nocase_query.clone(),
-            limit: 50,
-            case_sensitive: Some(false),
-            whole_word: None,
-            use_regex: None,
-        })
-        .map_err(|e| format!("nocase search dispatch: {e:?}"))?;
-    let nocase_projection = match nocase_result {
-        AppCommandOutcome::SearchUpdated(p) => p,
-        other => {
-            return Err(format!(
-                "s4: expected SearchUpdated for nocase, got {other:?}"
-            ));
-        }
-    };
+    let nocase_projection = run_settled_search(app, &nocase_query, 50, Some(false), None, None)
+        .map_err(|e| format!("nocase search dispatch: {e}"))?;
     let nocase_count = nocase_projection.results.len();
     eprintln!("[s4] nocase search results: {nocase_count}");
     if nocase_count == 0 {
@@ -1292,17 +1275,18 @@ fn run_s6(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
     eprintln!("[s6] saved edit to src/main.rs; refreshing git projection ...");
 
     // RefreshGit — expect dirty file.
-    let git_projection = match app
+    match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .map_err(|e| format!("s6: RefreshGit: {e:?}"))?
     {
-        AppCommandOutcome::GitUpdated(p) => p,
+        AppCommandOutcome::GitUpdated(_) => {}
         other => {
             return Err(format!(
                 "s6: expected GitUpdated from RefreshGit, got {other:?}"
             ));
         }
-    };
+    }
+    let git_projection = app.drain_git_until_idle();
 
     if git_projection.changed_files.is_empty() {
         return Err(
@@ -1332,23 +1316,25 @@ fn run_s6(temp_dir: &Path, app: &mut AppComposition) -> Result<(), String> {
                 "s6: expected GitUpdated from StageGitHunk, got {other:?}"
             ));
         }
-    };
+    }
+    app.drain_git_until_idle();
 
     // Commit via app authority.
     eprintln!("[s6] committing via app authority ...");
-    let committed = match app
+    match app
         .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
             message: "smoke: gp1 git workflow verification".to_string(),
         })
         .map_err(|e| format!("s6: CommitGitChanges: {e:?}"))?
     {
-        AppCommandOutcome::GitUpdated(p) => p,
+        AppCommandOutcome::GitUpdated(_) => {}
         other => {
             return Err(format!(
                 "s6: expected GitUpdated from CommitGitChanges, got {other:?}"
             ));
         }
-    };
+    }
+    let committed = app.drain_git_until_idle();
     eprintln!(
         "[s6] committed; post-commit changed_files={}",
         committed.changed_files.len()

@@ -168,6 +168,7 @@ fn desktop_git_workflow_projects_diff_blame_graph_and_hunk_actions() {
             .expect("hunk stage should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
     let cached = run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]);
     assert!(cached.contains("first_changed"));
     assert!(!cached.contains("second_changed"));
