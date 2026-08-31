@@ -68,12 +68,22 @@ fn open_app(root: &Path) -> DesktopEframeApp {
     DesktopEframeApp::new(runtime)
 }
 
+fn settle_git(app: &mut DesktopEframeApp) -> egui::FullOutput {
+    app.runtime_mut_for_test().drain_git_until_idle();
+    app.run_headless_full_frame(full_frame_input(Vec::new()))
+}
+
+fn click_and_settle_git(app: &mut DesktopEframeApp, pos: egui::Pos2) -> egui::FullOutput {
+    let _ = click_at(app, pos);
+    settle_git(app)
+}
+
 /// Click the Source Control rail control and return the settled frame.
 fn open_source_control(app: &mut DesktopEframeApp) -> egui::FullOutput {
     let primed = app.run_headless_full_frame(full_frame_input(Vec::new()));
     let rail = clickable_center(&primed, "Source Control")
         .unwrap_or_else(|| panic!("the Source Control rail control must exist to reach the panel"));
-    click_at(app, rail)
+    click_and_settle_git(app, rail)
 }
 
 /// Paths git reports as staged, straight from the index.
@@ -221,7 +231,7 @@ fn staging_a_hunk_from_the_panel_reaches_the_index() {
              some other tool staged."
         )
     });
-    let after = click_at(&mut app, control);
+    let after = click_and_settle_git(&mut app, control);
 
     assert_eq!(
         staged_paths(&root),
@@ -257,7 +267,7 @@ fn unstaging_a_hunk_from_the_panel_reaches_the_index() {
     let label = hunk_control_label(&app, "tracked.rs", true);
     let control = clickable_center(&panel, &label)
         .unwrap_or_else(|| panic!("the Source Control panel offers no `{label}` control"));
-    let _ = click_at(&mut app, control);
+    let _ = click_and_settle_git(&mut app, control);
 
     assert!(
         staged_paths(&root).is_empty(),
@@ -340,7 +350,7 @@ fn an_untracked_file_can_be_staged_from_the_panel() {
             rendered_text(&panel)
         )
     });
-    let _ = click_at(&mut app, stage);
+    let _ = click_and_settle_git(&mut app, stage);
 
     assert!(
         staged_paths(&root)
@@ -397,7 +407,7 @@ fn committing_from_the_panel_creates_a_real_commit() {
         repeat: false,
         modifiers: egui::Modifiers::default(),
     }]));
-    app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let _ = settle_git(&mut app);
 
     assert_eq!(
         git(&root, &["log", "-1", "--pretty=%s"]).trim(),
@@ -757,7 +767,7 @@ fn commit_survives_a_merge_resolved_to_the_current_side() {
         repeat: false,
         modifiers: egui::Modifiers::default(),
     }]));
-    app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let _ = settle_git(&mut app);
 
     assert!(
         !root.join(".git").join("MERGE_HEAD").exists(),
@@ -818,7 +828,7 @@ fn a_binary_change_can_be_staged_and_committed_from_the_panel() {
             rendered_text(&panel)
         )
     });
-    let _ = click_at(&mut app, stage);
+    let _ = click_and_settle_git(&mut app, stage);
 
     // git is the witness.
     assert!(

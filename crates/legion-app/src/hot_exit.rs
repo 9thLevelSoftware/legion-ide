@@ -56,17 +56,16 @@ impl AppComposition {
             let Some(metadata) = self.active_documents.metadata_for_buffer(buffer_id) else {
                 continue;
             };
-            match &snapshot.disk_fingerprint {
-                Some(expected) if expected == &metadata.fingerprint => {}
-                _ => {
-                    // Disk changed while the process was down, or the sidecar
-                    // predates fingerprint capture. Do not replace the opened
-                    // body and then treat the new disk hash as expected.
-                    continue;
-                }
-            }
+            let Some(expected_fingerprint) = snapshot.disk_fingerprint.clone() else {
+                continue;
+            };
+            let fingerprint_matches = expected_fingerprint == metadata.fingerprint;
             let current = self.editor.text(buffer_id)?;
             if current == snapshot.body {
+                if !fingerprint_matches {
+                    self.active_documents
+                        .restore_expected_fingerprint(buffer_id, expected_fingerprint);
+                }
                 continue;
             }
             let end = end_position(current);
@@ -79,6 +78,14 @@ impl AppComposition {
                 ),
                 correlation_id,
             )?;
+            if !fingerprint_matches {
+                // Keep the pre-crash expected fingerprint so a later proposal-
+                // mediated save conflicts instead of overwriting the external
+                // edit, and so the dirty sidecar is recaptured rather than
+                // deleted by the next empty save_session_state.
+                self.active_documents
+                    .restore_expected_fingerprint(buffer_id, expected_fingerprint);
+            }
             restored += 1;
         }
         Ok(restored)

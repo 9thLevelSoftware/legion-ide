@@ -617,10 +617,19 @@ pub fn discover_cargo_tests(
     )
 }
 
-/// Drop a cached discovery result so the next [`discover_cargo_tests`] call reruns `cargo test --list`.
-pub fn invalidate_discovery_cache(workspace_root: &Path) {
+/// Drop a *published* discovery result so the next explicit Refresh reruns `cargo test --list`.
+///
+/// In-flight workers are left alone: killing them on every Refresh would
+/// prevent `refresh_until_settled` (and the UI) from ever observing `ready`.
+pub fn invalidate_published_discovery_cache(workspace_root: &Path) {
     if let Ok(mut worker) = discovery_worker().lock() {
-        worker.remove(&workspace_root.to_path_buf());
+        let key = workspace_root.to_path_buf();
+        if worker
+            .get(&key)
+            .is_some_and(|existing| existing.result.is_some())
+        {
+            worker.remove(&key);
+        }
     }
 }
 

@@ -6422,6 +6422,17 @@ impl ActiveDocumentController {
         })
     }
 
+    fn restore_expected_fingerprint(&mut self, buffer_id: BufferId, fingerprint: FileFingerprint) {
+        if let Some(metadata) = self.buffer_file_metadata.get_mut(&buffer_id) {
+            metadata.fingerprint = fingerprint.clone();
+        }
+        if self.active_buffer_id == Some(buffer_id)
+            && let Some(metadata) = self.active_file_metadata.as_mut()
+        {
+            metadata.fingerprint = fingerprint;
+        }
+    }
+
     fn require_open_buffer(&self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
         if self.open_tabs.contains(&buffer_id) && self.metadata_for_buffer(buffer_id).is_some() {
             Ok(())
@@ -25287,7 +25298,7 @@ impl AppComposition {
                     "cargo test discovery requires a trusted workspace".to_string(),
                 ));
             }
-            test_explorer::invalidate_discovery_cache(Path::new(root_path));
+            test_explorer::invalidate_published_discovery_cache(Path::new(root_path));
             test_explorer::discover_cargo_tests(
                 Path::new(root_path),
                 test_explorer::DEFAULT_DISCOVER_TIMEOUT,

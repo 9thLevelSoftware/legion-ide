@@ -793,6 +793,7 @@ fn palette_git_commit_and_stash_use_only_exact_parsed_messages() {
             .expect("commit command should dispatch"),
         AppCommandOutcome::GitUpdated(_)
     ));
+    app.drain_git_until_idle();
     assert_eq!(
         run_git(workspace.path(), &["log", "-1", "--pretty=%s"]).trim(),
         "fix(parser): preserve café exactly"
@@ -810,6 +811,7 @@ fn palette_git_commit_and_stash_use_only_exact_parsed_messages() {
             .expect("stash command should dispatch"),
         AppCommandOutcome::GitUpdated(_)
     ));
+    app.drain_git_until_idle();
     let stash_subject = run_git(workspace.path(), &["stash", "list", "--format=%gs"]);
     assert!(
         stash_subject
@@ -1142,6 +1144,12 @@ fn palette_command_mode_covers_registered_command_catalog() {
         "Git: Push",
         "Git: Fetch",
         "Git: Pull",
+        "Git: Stage Focused Hunk",
+        "ACP: Attach Host",
+        "Language: Format Document",
+        "Language: Rename Symbol",
+        "Language: Organize Imports",
+        "Language: Code Action",
     ]
     .into_iter()
     .map(str::to_string)

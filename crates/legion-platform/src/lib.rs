@@ -2257,7 +2257,17 @@ impl EnvironmentService for NativeEnvironmentService {
     }
 }
 
+fn env_key_is_agent_socket(key: &str) -> bool {
+    matches!(
+        key,
+        "SSH_AUTH_SOCK" | "SSH_AGENT_PID" | "SSH_ASKPASS" | "GIT_SSH" | "GIT_SSH_COMMAND"
+    )
+}
+
 fn env_key_looks_secret(key: &str) -> bool {
+    if env_key_is_agent_socket(key) {
+        return false;
+    }
     let key = key.to_ascii_lowercase();
     [
         "secret",
@@ -2408,6 +2418,26 @@ mod tests {
         );
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn child_env_keeps_ssh_agent_socket_variables() {
+        let vars = sanitized_child_env([
+            (
+                "SSH_AUTH_SOCK".to_string(),
+                "/tmp/ssh-agent.sock".to_string(),
+            ),
+            ("SSH_AGENT_PID".to_string(), "123".to_string()),
+            ("AWS_SECRET_ACCESS_KEY".to_string(), "nope".to_string()),
+            ("AUTHORIZATION".to_string(), "bearer nope".to_string()),
+        ]);
+        assert!(
+            vars.iter()
+                .any(|(key, value)| key == "SSH_AUTH_SOCK" && value == "/tmp/ssh-agent.sock")
+        );
+        assert!(vars.iter().any(|(key, _)| key == "SSH_AGENT_PID"));
+        assert!(!vars.iter().any(|(key, _)| key == "AWS_SECRET_ACCESS_KEY"));
+        assert!(!vars.iter().any(|(key, _)| key == "AUTHORIZATION"));
     }
 
     #[test]

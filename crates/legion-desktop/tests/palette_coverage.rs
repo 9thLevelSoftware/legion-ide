@@ -522,21 +522,21 @@ fn product_loop_commands_match_live_registry_shell_and_keymap_surfaces() {
     }
 
     let default_keymap = legion_ui::ui::default_keymap();
-    for combo in [
-        ("F8", false, false, false),
-        ("F8", false, true, false),
-        ("ArrowUp", false, false, true),
-        ("ArrowDown", false, false, true),
-        ("F2", false, false, false),
-        ("F", false, true, true),
-        ("O", true, true, false),
-        ("G", true, true, false),
+    for (combo, action) in [
+        (("F8", false, false, false), "ProblemNext"),
+        (("F8", false, true, false), "ProblemPrev"),
+        (("ArrowUp", false, false, true), "DebugStackPrevious"),
+        (("ArrowDown", false, false, true), "DebugStackNext"),
+        (("F2", false, false, false), "RenameSymbol"),
+        (("F", false, true, true), "FormatDocument"),
+        (("O", true, true, false), "OrganizeImports"),
     ] {
         assert!(
-            !default_keymap.iter().any(|entry| {
+            default_keymap.iter().any(|entry| {
                 entry.combo == legion_ui::ui::KeyCombo::new(combo.0, combo.1, combo.2, combo.3)
+                    && entry.action_label == action
             }),
-            "unsupported default keymap entry {:?} must stay absent",
+            "default keymap must bind {:?} to {action}",
             combo
         );
     }

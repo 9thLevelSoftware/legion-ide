@@ -610,7 +610,7 @@ fn daily_editing_contracts_hot_exit_restores_dirty_body_without_writing_disk() {
 }
 
 #[test]
-fn daily_editing_contracts_hot_exit_skips_restore_when_disk_fingerprint_changed() {
+fn daily_editing_contracts_hot_exit_conflicts_when_disk_fingerprint_changed() {
     let root = create_root();
     let target = root.join("session.txt");
     std::fs::write(&target, "seed").expect("seed target");
@@ -639,7 +639,7 @@ fn daily_editing_contracts_hot_exit_skips_restore_when_disk_fingerprint_changed(
     let count = restored
         .restore_hot_exit_snapshots(&loaded)
         .expect("restore hot-exit");
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
     let snapshot = restored
         .shell_projection_snapshot("daily")
         .expect("snapshot");
@@ -648,10 +648,21 @@ fn daily_editing_contracts_hot_exit_skips_restore_when_disk_fingerprint_changed(
         .small_buffer_text()
         .expect("text");
     assert!(
-        text.contains("external-edit"),
-        "fingerprint mismatch must keep disk body, got {text:?}"
+        text.contains(dirty_body),
+        "fingerprint mismatch must restore dirty body as unsaved, got {text:?}"
     );
-    assert!(!text.contains(dirty_body));
+    let recapture = restored
+        .capture_hot_exit_snapshots()
+        .expect("recapture hot-exit");
+    assert_eq!(recapture.len(), 1);
+    assert!(recapture[0].body.contains(dirty_body));
+    let outcome = restored.save_active_buffer().expect("save");
+    assert!(
+        matches!(outcome, AppSaveOutcome::Rejected(_)),
+        "save must conflict against the external edit, got {outcome:?}"
+    );
+    let disk = std::fs::read_to_string(&target).expect("disk");
+    assert_eq!(disk, "external-edit");
 }
 
 #[test]
