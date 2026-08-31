@@ -1,7 +1,7 @@
 # Legion User Guide
 
 This guide is the end-user entry point for the current Legion product paths.
-It assumes the reader already has a working build or a packaged desktop app.
+A packaged desktop app is not required to read it: a local `cargo run -p legion-desktop` build is enough to follow the smoke-oriented steps, and many surfaces below are test-exercised only.
 
 > **Current state caveat.** The repo currently proves a validated substrate and a deterministic desktop projection workflow (CLI `:w` / `:q`, projection-only UI, headless desktop smoke harness). It is **not** a renderer-backed daily-driver product yet. Treat anything below as a description of the design and the gated surfaces that are exercised by tests, not as a claim of a shipped user experience. For the readiness matrix and remaining product gaps, see `plans/product-readiness-ledger.md` and `README.md` "Current Status".
 

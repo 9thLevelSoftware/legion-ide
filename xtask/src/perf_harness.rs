@@ -1403,10 +1403,9 @@ pub fn run_renderer_backed_large_file_measurement(
             Err(read_err) => {
                 let output_text = subprocess_output_text(&output);
                 let status = if !output.status.success()
-                    && manual_renderer_environment_blocked(&output_text)
+                    && (manual_renderer_environment_blocked(&output_text)
+                        || manual_renderer_build_failed(&output_text))
                 {
-                    SkeletonStatus::Skipped
-                } else if !output.status.success() && manual_renderer_build_failed(&output_text) {
                     SkeletonStatus::Skipped
                 } else {
                     SkeletonStatus::Failed

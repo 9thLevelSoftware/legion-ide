@@ -26,6 +26,7 @@ Use these docs first:
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
 - `plans/legion-production-master-plan-v0.2.md` — the current production master plan (current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, milestones to production utility).
+- `plans/p0-installed-product-sequence-v0.1.md` — sequenced P0 close-out after the 2026-08-31 release-gap full pass (honesty → data safety → windowed proof → signing). Does not promote ledger rows.
 - `plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking the v0.2 rebaseline and product-readiness ledger.
 - `plans/control-first-adaptive-ide-technical-design-v0.1.md` and `plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.

@@ -32,6 +32,14 @@ If any command fails, save exact output under `plans/evidence/legion-e2e/` befor
 
 Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly smoke remain the primary GP evidence sources. See `plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`.
 
+## Release-blocker queue (QUAL.11)
+
+File gaps that forbid a named release claim with `.github/ISSUE_TEMPLATE/release-blocker.yml` (labels `qual-11` and `release-blocker`). Do not use Bug report for that queue. Taxonomy: `plans/qual-11-release-blocker-taxonomy.md`.
+
+## Protected `main` (GAP-07.3)
+
+Ruleset `protect-main` (id `21950476`) is active on `refs/heads/main`: pull requests only, no force-push, no deletion, and required checks `Standing gates` (ubuntu/windows/macos), `cargo-deny`, and `Legion bench recorded`. Evidence: `plans/evidence/production/WS-P0/gap-07-3-main-ruleset.md`. Direct pushes to `origin/main` fail. Independent review is **not** required yet (single owner).
+
 ## Deferred surfaces and what unfreezing costs
 
 Three readiness gates are deferred: **PR-VSC-002** (isolated extension host),

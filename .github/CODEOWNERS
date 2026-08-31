@@ -1,0 +1,12 @@
+# GAP-07.1: review owners for workflows, gates, protocol, app, desktop, and plans.
+# The GitHub login is the repository owner (`9thLevelSoftware`).
+# CODEOWNERS only requires reviews once a branch ruleset names this file.
+
+* @9thLevelSoftware
+
+/.github/workflows/ @9thLevelSoftware
+/xtask/ @9thLevelSoftware
+/crates/legion-protocol/ @9thLevelSoftware
+/crates/legion-app/ @9thLevelSoftware
+/crates/legion-desktop/ @9thLevelSoftware
+/plans/ @9thLevelSoftware

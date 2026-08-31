@@ -1036,7 +1036,7 @@ The most important external design signals used in this plan:
 | PR-LANG-001 Rust language workflow | Substrate validated | M8 |
 | PR-LANG-002 debug/test/SCM | Substrate validated | M8/M10/M12 |
 | PR-AI-001 inspectable local-first AI | Product workflow validated | Keep green; refresh in M9 |
-| PR-AI-002 proposal safety/evals | Substrate validated; adversarial evals deferred | M9/M10 |
+| PR-AI-002 proposal safety/evals | Substrate validated (hostile evals + xtask hostile-evals); live-model evals remain deferred | M9/M10 |
 | PR-VSC-001 manifest/contribution compatibility | Substrate validated | M12 |
 | PR-VSC-002 isolated extension host | Deferred | M13+ unless reduced WASM launch surface ships |
 | PR-ENT-001 remote development UX | Deferred | M13+ |

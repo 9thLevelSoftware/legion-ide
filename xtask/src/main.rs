@@ -1324,12 +1324,15 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         .iter()
         .all(|row| row.status == "Product workflow validated");
 
-    // Canonical public-doc scan set: README.md and top-level docs/*.md only.
-    // docs/releases/ (forward templates),
+    // Canonical public-doc scan set: README.md, AGENTS.md, and top-level
+    // docs/*.md only. docs/releases/ (forward templates),
     // docs/superpowers/ (plans quote forbidden phrases as code literals),
     // and plans/evidence/ (historical) are intentionally excluded, matching
     // how docs-hygiene allowlists archived material.
     let mut scan_files: Vec<String> = vec!["README.md".to_string()];
+    if workspace_root.join("AGENTS.md").is_file() {
+        scan_files.push("AGENTS.md".to_string());
+    }
     let docs_dir = workspace_root.join("docs");
     let entries = match fs::read_dir(&docs_dir) {
         Ok(entries) => entries,
@@ -1368,6 +1371,8 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
 
     let mut violations: Vec<xtask::claim_audit::ClaimViolation> = Vec::new();
     let mut readme_text = String::new();
+    let mut agents_text = String::new();
+    let mut user_guide_text = String::new();
     for rel_path in &scan_files {
         let path = workspace_root.join(rel_path);
         let text = match fs::read_to_string(&path) {
@@ -1383,12 +1388,39 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         if rel_path == "README.md" {
             readme_text = text.clone();
         }
+        if rel_path == "AGENTS.md" {
+            agents_text = text.clone();
+        }
+        if rel_path == "docs/USER_GUIDE.md" {
+            user_guide_text = text.clone();
+        }
         violations.extend(xtask::claim_audit::audit_text(rel_path, &text));
     }
 
     if !all_validated && !xtask::claim_audit::readme_caveat_present(&readme_text) {
         violations.push(xtask::claim_audit::ClaimViolation::MissingReadmeCaveat);
     }
+
+    let facts = match hosted_facts_from_workspace(&workspace_root) {
+        Ok(facts) => facts,
+        Err(code) => return code,
+    };
+    violations.extend(xtask::claim_audit::audit_cross_docs(
+        xtask::claim_audit::CrossDocInputs {
+            agents: if agents_text.is_empty() {
+                None
+            } else {
+                Some(agents_text.as_str())
+            },
+            ledger: &ledger_text,
+            user_guide: if user_guide_text.is_empty() {
+                None
+            } else {
+                Some(user_guide_text.as_str())
+            },
+            facts,
+        },
+    ));
 
     if violations.is_empty() {
         println!("claim audit passed");
@@ -1411,10 +1443,44 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
                          while ledger rows remain below `Product workflow validated`"
                     );
                 }
+                xtask::claim_audit::ClaimViolation::CrossDocContradiction {
+                    file,
+                    line_number,
+                    message,
+                } => {
+                    eprintln!("{file}:{line_number}: {message}");
+                }
             }
         }
         1
     }
+}
+
+fn hosted_facts_from_workspace(
+    workspace_root: &Path,
+) -> Result<xtask::claim_audit::HostedFacts, i32> {
+    fn optional_workflow(root: &Path, rel: &str) -> Result<Option<String>, i32> {
+        let path = root.join(rel);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) => {
+                eprintln!("claim audit failed: unable to read `{rel}`: {err}");
+                Err(1)
+            }
+        }
+    }
+
+    let release = optional_workflow(workspace_root, ".github/workflows/legion-release.yml")?;
+    let gates = optional_workflow(workspace_root, ".github/workflows/legion-gates.yml")?;
+    let smoke = optional_workflow(workspace_root, ".github/workflows/legion-smoke.yml")?;
+    Ok(xtask::claim_audit::HostedFacts::from_workflow_texts(
+        release.as_deref(),
+        gates.as_deref(),
+        smoke.as_deref(),
+    ))
 }
 
 fn run_deferred_surfaces_command(config_path: &str) -> i32 {
