@@ -36,6 +36,8 @@ struct DiscoveryWorker {
 
 struct RunWorker {
     handle: JoinHandle<Result<CargoTestItemRunResult, String>>,
+    workspace_root: PathBuf,
+    started_at: TimestampMillis,
 }
 
 static DISCOVERY_WORKER: OnceLock<Mutex<HashMap<PathBuf, DiscoveryWorker>>> = OnceLock::new();
@@ -382,13 +384,22 @@ pub fn run_cargo_test_filter(
     }
     let workspace_root = workspace_root.to_path_buf();
     let filter_owned = filter.to_string();
+    let started_at = TimestampMillis::now();
     let handle = std::thread::Builder::new()
         .name("legion-test-runner".to_string())
-        .spawn(move || {
-            run_cargo_test_filter_blocking(&workspace_root, &filter_owned, exact, timeout)
+        .spawn({
+            let workspace_root = workspace_root.clone();
+            move || run_cargo_test_filter_blocking(&workspace_root, &filter_owned, exact, timeout)
         })
         .map_err(|err| format!("spawn-failed:{err}"))?;
-    worker.insert(key, RunWorker { handle });
+    worker.insert(
+        key,
+        RunWorker {
+            handle,
+            workspace_root,
+            started_at,
+        },
+    );
     Ok(CargoTestItemRunResult {
         item_id: filter.to_string(),
         status_label: "running".to_string(),
@@ -502,6 +513,13 @@ fn run_cargo_test_filter_blocking(
 
 /// Cap retained protocol test-run summaries for agent evidence (P2.F3.T5).
 pub fn push_test_run_summary(summaries: &mut Vec<TestRunSummary>, summary: TestRunSummary) {
+    if let Some(existing) = summaries
+        .iter_mut()
+        .find(|existing| existing.run_id == summary.run_id)
+    {
+        *existing = summary;
+        return;
+    }
     summaries.insert(0, summary);
     if summaries.len() > MAX_RECENT_RUNS {
         summaries.truncate(MAX_RECENT_RUNS);
@@ -544,6 +562,15 @@ pub fn apply_run_to_projection(
 
 /// Prepend a run row and cap recent history.
 pub fn push_recent_run(runs: &mut Vec<VerificationRunRow>, row: VerificationRunRow) {
+    if let Some(existing) = runs.iter_mut().find(|existing| {
+        existing.run_id == row.run_id
+            || (row.state != VerificationRunState::Running
+                && existing.state == VerificationRunState::Running
+                && existing.target_labels == row.target_labels)
+    }) {
+        *existing = row;
+        return;
+    }
     runs.insert(0, row);
     if runs.len() > MAX_RECENT_RUNS {
         runs.truncate(MAX_RECENT_RUNS);
@@ -633,27 +660,35 @@ pub fn invalidate_published_discovery_cache(workspace_root: &Path) {
     }
 }
 
+struct FinishedRun {
+    started_at: TimestampMillis,
+    result: Result<CargoTestItemRunResult, String>,
+}
+
 /// Join cargo-test workers that have finished, without requiring another Run click.
-pub fn poll_finished_runs() -> Vec<Result<CargoTestItemRunResult, String>> {
+fn poll_finished_runs(workspace_root: &Path) -> Vec<FinishedRun> {
     let mut finished = Vec::new();
     let Ok(mut worker) = run_worker().lock() else {
         return finished;
     };
     let keys: Vec<String> = worker
         .iter()
-        .filter(|(_, existing)| existing.handle.is_finished())
+        .filter(|(_, existing)| {
+            existing.handle.is_finished() && existing.workspace_root == workspace_root
+        })
         .map(|(key, _)| key.clone())
         .collect();
     for key in keys {
         let Some(existing) = worker.remove(&key) else {
             continue;
         };
-        finished.push(
-            existing
+        finished.push(FinishedRun {
+            started_at: existing.started_at,
+            result: existing
                 .handle
                 .join()
                 .unwrap_or_else(|_| Err("test-worker-panicked".to_string())),
-        );
+        });
     }
     finished
 }
@@ -661,26 +696,28 @@ pub fn poll_finished_runs() -> Vec<Result<CargoTestItemRunResult, String>> {
 impl crate::AppComposition {
     /// Apply completed cargo-test workers without requiring another Run click.
     pub fn drain_test_explorer_runs(&mut self) -> bool {
-        let results = poll_finished_runs();
-        if results.is_empty() {
+        let Some(root) = self.active_documents.workspace_root_path.clone() else {
             return false;
-        }
-        let started_at = TimestampMillis::now();
-        for result in results {
-            let Ok(result) = result else {
+        };
+        let root = PathBuf::from(root);
+        let results = poll_finished_runs(&root);
+        let mut applied = false;
+        for finished in results {
+            let Ok(result) = finished.result else {
                 continue;
             };
             if result.status_label == "running" {
                 continue;
             }
-            self.record_test_explorer_run_result(&result, started_at);
+            self.record_test_explorer_run_result(&result, finished.started_at);
             self.test_explorer_projection = apply_run_to_projection(
                 self.test_explorer_projection.clone(),
                 &result,
                 TimestampMillis::now(),
             );
+            applied = true;
         }
-        true
+        applied
     }
 }
 
@@ -929,6 +966,71 @@ nested::deep::case: test
                 .iter()
                 .any(|d| d.starts_with("last-run:t::one:passed"))
         );
+    }
+
+    #[test]
+    fn push_recent_run_replaces_running_row_for_same_target() {
+        let running = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        }
+        .to_verification_row(TimestampMillis(10));
+        let passed = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "passed".to_string(),
+            exit_code: Some(0),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 12,
+            diagnostics: Vec::new(),
+        }
+        .to_verification_row(TimestampMillis(10));
+        let mut runs = Vec::new();
+        push_recent_run(&mut runs, running);
+        push_recent_run(&mut runs, passed);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].state, VerificationRunState::Passed);
+        assert_eq!(runs[0].exit_code, Some(0));
+        assert_eq!(runs[0].target_labels, vec!["t::one".to_string()]);
+    }
+
+    #[test]
+    fn push_test_run_summary_replaces_same_run_id() {
+        let running = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "running".to_string(),
+            exit_code: None,
+            passed: 0,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 0,
+            diagnostics: Vec::new(),
+        }
+        .to_test_run_summary(TimestampMillis(10));
+        let passed = CargoTestItemRunResult {
+            item_id: "t::one".to_string(),
+            status_label: "passed".to_string(),
+            exit_code: Some(0),
+            passed: 1,
+            failed: 0,
+            skipped: 0,
+            duration_ms: 12,
+            diagnostics: Vec::new(),
+        }
+        .to_test_run_summary(TimestampMillis(10));
+        let mut summaries = Vec::new();
+        push_test_run_summary(&mut summaries, running);
+        push_test_run_summary(&mut summaries, passed);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].state, TestRunState::Passed);
+        assert_eq!(summaries[0].passed, 1);
     }
 
     #[test]

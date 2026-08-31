@@ -20001,7 +20001,7 @@ impl AppComposition {
             let _spawn_message_id = self.delegate_workflow.record_system_message(
                 format!(
                     "acp.host.spawn status={} stdout_bytes={} stderr_bytes={}",
-                    host_output.status,
+                    host_output.status_label,
                     host_output.stdout.len(),
                     host_output.stderr.len()
                 ),
@@ -20010,7 +20010,7 @@ impl AppComposition {
                 correlation_id,
                 causality_id,
             );
-            if !host_output.status.success() {
+            if !host_output.success {
                 let _terminate_message_id = self.delegate_workflow.record_system_message(
                     format!(
                         "acp.host.terminate failure stdout={} stderr={}",

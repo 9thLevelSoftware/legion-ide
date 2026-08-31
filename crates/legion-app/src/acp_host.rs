@@ -1,7 +1,9 @@
 //! Optional ACP host command used by delegated-task proposal generation.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::time::Duration;
+
+use legion_platform::{NativeProcessService, ProcessRequest, ProcessService};
 
 #[cfg(feature = "ai")]
 use legion_agent::{DelegatedTaskProposalGenerator, DelegatedTaskProposalInput};
@@ -12,6 +14,18 @@ use legion_protocol::{
 
 #[cfg(feature = "ai")]
 use crate::{AppCompositionError, trust_reference};
+
+/// Hard bound so a hung ACP host cannot pin the delegated worker forever.
+const ACP_HOST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bytes captured from a supervised ACP host process.
+#[derive(Debug, Clone)]
+pub(crate) struct AcpHostOutput {
+    pub(crate) success: bool,
+    pub(crate) status_label: String,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
 
 /// ACP host command configured by the app.
 #[derive(Debug, Clone)]
@@ -33,25 +47,47 @@ impl AcpHostCommand {
         sandbox_path: &Path,
         target_path: &Path,
         plan_id: &str,
-    ) -> std::io::Result<std::process::Output> {
-        let mut command = Command::new(&self.program);
-        command.args(&self.args);
-        command.current_dir(sandbox_path);
-        command.env("LEGION_ACP_PLAN_ID", plan_id);
-        command.env("LEGION_ACP_SANDBOX_PATH", sandbox_path);
-        command.env("LEGION_ACP_TARGET_PATH", target_path);
-        command.env(
-            "LEGION_ACP_TARGET_DIR",
-            target_path.parent().unwrap_or(sandbox_path),
-        );
-        command.env(
-            "LEGION_ACP_TARGET_FILE",
-            target_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("proposal.txt"),
-        );
-        command.output()
+    ) -> Result<AcpHostOutput, String> {
+        let mut request = ProcessRequest::new(self.program.to_string_lossy().into_owned());
+        request.args = self.args.clone();
+        request.cwd = Some(sandbox_path.to_path_buf());
+        request.env = vec![
+            ("LEGION_ACP_PLAN_ID".to_string(), plan_id.to_string()),
+            (
+                "LEGION_ACP_SANDBOX_PATH".to_string(),
+                sandbox_path.display().to_string(),
+            ),
+            (
+                "LEGION_ACP_TARGET_PATH".to_string(),
+                target_path.display().to_string(),
+            ),
+            (
+                "LEGION_ACP_TARGET_DIR".to_string(),
+                target_path
+                    .parent()
+                    .unwrap_or(sandbox_path)
+                    .display()
+                    .to_string(),
+            ),
+            (
+                "LEGION_ACP_TARGET_FILE".to_string(),
+                target_path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("proposal.txt")
+                    .to_string(),
+            ),
+        ];
+        request.timeout = Some(ACP_HOST_TIMEOUT);
+        let result = NativeProcessService.execute(&request).map_err(|error| {
+            format!("ACP host command failed under process supervision: {error}")
+        })?;
+        Ok(AcpHostOutput {
+            success: result.exit_code == 0,
+            status_label: result.exit_code.to_string(),
+            stdout: result.stdout.into_bytes(),
+            stderr: result.stderr.into_bytes(),
+        })
     }
 }
 
@@ -82,10 +118,8 @@ pub(crate) fn run_acp_host_proposal(
 
     let output = command
         .run(sandbox_path, target_file, task_id)
-        .map_err(|error| {
-            AppCompositionError::AiRuntime(format!("ACP host command failed to start: {error}"))
-        })?;
-    if !output.status.success() {
+        .map_err(AppCompositionError::AiRuntime)?;
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(AppCompositionError::AiRuntime(format!(
             "ACP host command exited unsuccessfully: {}",

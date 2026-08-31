@@ -11140,6 +11140,19 @@ mod tests {
     }
 
     #[test]
+    fn format_and_organize_imports_keybindings_dispatch_proposals() {
+        let snapshot = Shell::empty("Format keybinding test").projection_snapshot();
+        assert_eq!(
+            action_label_to_desktop_action("FormatDocument", &snapshot),
+            Some(DesktopAction::RequestFormattingProposal)
+        );
+        assert_eq!(
+            action_label_to_desktop_action("OrganizeImports", &snapshot),
+            Some(DesktopAction::RequestOrganizeImportsProposal)
+        );
+    }
+
+    #[test]
     fn problem_keybindings_route_to_navigation_actions() {
         let snapshot = Shell::empty("Problem keybinding test").projection_snapshot();
         assert_eq!(

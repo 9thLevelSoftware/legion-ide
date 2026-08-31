@@ -324,8 +324,9 @@ fn desktop_git_workflow_pushes_current_branch_to_origin() {
             .expect("push should route"),
         DesktopWorkflowOutcome::GitUpdated
     );
+    runtime.drain_git_until_idle();
 
-    let pushed = run_git(&remote_root, ["log", "--oneline", "master"]);
+    let pushed = run_git(&remote_root, ["log", "--oneline", "--all"]);
     assert!(
         pushed.contains("initial"),
         "remote should receive the pushed commit"

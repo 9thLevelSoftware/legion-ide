@@ -1885,8 +1885,8 @@ impl DesktopRuntime {
             return Ok(());
         }
         DesktopSessionStore::save(&path, &record)?;
-        self.last_saved_session_fingerprint = fingerprint;
         self.persist_hot_exit_snapshots(&path)?;
+        self.last_saved_session_fingerprint = fingerprint;
         Ok(())
     }
 
@@ -4266,6 +4266,13 @@ impl DesktopEframeApp {
         {
             let snapshot = self.runtime.projection_snapshot();
             if snapshot.git_projection.refresh_state == GitRefreshState::Refreshing {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(50));
+            }
+            if snapshot.test_explorer_projection.status_label == "discovering"
+                || snapshot.test_explorer_projection.status_label == "running"
+                || snapshot.test_explorer_projection.last_run_status.as_deref() == Some("running")
+            {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
