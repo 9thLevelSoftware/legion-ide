@@ -46,7 +46,7 @@ samples is the second-highest rather than the max.
 ```text
 cargo test -p xtask --test perf_harness perf_harness_zero_override_does_not_disarm_renderer_paint_rows
 cargo test -p xtask --test perf_harness perf_harness_zero_override_does_not_zero_large_file_paint_descriptor
-cargo test -p legion-desktop percentile_p95_of_sixteen_is_second_highest_not_max
+cargo test -p legion-desktop --lib percentile_p95_of_sixteen_is_second_highest_not_max
 cargo test -p legion-desktop --test manual_perf
 ```
 
