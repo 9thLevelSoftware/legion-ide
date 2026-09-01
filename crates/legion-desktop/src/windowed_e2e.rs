@@ -4,6 +4,7 @@
 //! `golden-path-5`. A run that cannot create a window is blocked, not passed.
 
 use std::{
+    fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -385,7 +386,6 @@ fn env_or_unknown(name: &str) -> String {
 }
 
 fn toml_string(value: &str) -> String {
-    use std::fmt::Write;
     let mut escaped = String::with_capacity(value.len() + 2);
     escaped.push('"');
     for character in value.chars() {
@@ -403,6 +403,4 @@ fn toml_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
-}
-    format!("\"{escaped}\"")
 }
