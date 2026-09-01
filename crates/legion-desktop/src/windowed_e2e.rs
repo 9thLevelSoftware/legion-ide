@@ -177,14 +177,31 @@ impl WindowedGuiE2eReport {
 /// Run GAP-01.1: create a native window, then open/edit/save through app authority.
 pub fn run_windowed_gui_e2e(config: DesktopLaunchConfig, e2e: WindowedGuiE2eConfig) -> Result<()> {
     let report_path = e2e.report_path.clone();
-    match run_windowed_gui_e2e_window(config) {
-        Ok(report) => finish_windowed_gui_e2e(&report, &report_path),
-        Err(error) => {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_windowed_gui_e2e_window(config)
+    }));
+    match result {
+        Ok(Ok(report)) => finish_windowed_gui_e2e(&report, &report_path),
+        Ok(Err(error)) => {
             let report = WindowedGuiE2eReport::blocked(error.to_string());
             report.write(&report_path)?;
             Err(error)
         }
+        Err(panic) => {
+            let detail = panic_detail(panic);
+            let report = WindowedGuiE2eReport::blocked(detail.clone());
+            report.write(&report_path)?;
+            Err(anyhow!("windowed GUI E2E panicked: {detail}"))
+        }
     }
+}
+
+fn panic_detail(panic: Box<dyn std::any::Any + Send>) -> String {
+    panic
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 fn finish_windowed_gui_e2e(report: &WindowedGuiE2eReport, report_path: &Path) -> Result<()> {
