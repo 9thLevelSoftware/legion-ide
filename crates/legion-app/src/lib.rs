@@ -25657,6 +25657,7 @@ impl AppComposition {
         // Write blob; capture errors for degraded-mode diagnostic — do not fail the save.
         let blob_path = blob_dir.join(format!("{content_hash}.blob"));
         let write_err = write_workspace_state_file(&blob_path, content.as_bytes()).err();
+        let blob_write_failed = write_err.is_some();
         if let Some(err) = write_err {
             self.local_history_last_write_error = Some(err.to_string());
         } else {
@@ -25693,7 +25694,7 @@ impl AppComposition {
         if let Some(history_dir) = blob_dir.parent() {
             match self.local_history_store.persist(history_dir) {
                 Ok(()) => {
-                    if write_err.is_none() {
+                    if !blob_write_failed {
                         self.local_history_last_write_error = None;
                     }
                     for hash in evicted_hashes {
