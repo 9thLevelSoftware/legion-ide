@@ -25558,10 +25558,11 @@ impl AppComposition {
             .local_history_store
             .prune(&canonical, max_count, u64::MAX);
         if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
-            let path_key = canonical.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path_key =
+                legion_storage::local_history::LocalHistoryMetadataStore::path_key(&canonical);
             let blob_dir = std::path::PathBuf::from(root)
                 .join(".legion")
-                .join("local-history")
+                .join(legion_storage::local_history::LOCAL_HISTORY_DIR_NAME)
                 .join(&path_key);
             for hash in &evicted {
                 let _ = std::fs::remove_file(blob_dir.join(format!("{hash}.blob")));
@@ -25628,7 +25629,11 @@ impl AppComposition {
             );
             match create_workspace_state_dir(
                 std::path::Path::new(root),
-                &[".legion", "local-history", &path_key],
+                &[
+                    ".legion",
+                    legion_storage::local_history::LOCAL_HISTORY_DIR_NAME,
+                    &path_key,
+                ],
             ) {
                 Ok(directory) => directory,
                 Err(error) => {
@@ -25677,20 +25682,50 @@ impl AppComposition {
             schema_version: legion_storage::local_history::LOCAL_HISTORY_SCHEMA_VERSION,
         };
 
-        self.local_history_store.push_record(record);
-        // Prune returns evicted content hashes; delete the corresponding blob files.
+        self.local_history_store.push_record(record.clone());
+        // Prune returns evicted content hashes; delete those blobs only after
+        // the manifest commit so a persist failure can reload the last durable
+        // index without losing still-indexed snapshots.
         let blob_dir_for_prune = blob_dir.clone();
         let evicted_hashes = self
             .local_history_store
             .prune(canonical_path, 50, 50 * 1024 * 1024);
-        for hash in evicted_hashes {
-            let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
-            let _ = std::fs::remove_file(&evicted_blob);
-        }
-        if let Some(history_dir) = blob_dir.parent()
-            && let Err(err) = self.local_history_store.persist(history_dir)
-        {
-            self.local_history_last_write_error = Some(err.to_string());
+        if let Some(history_dir) = blob_dir.parent() {
+            match self.local_history_store.persist(history_dir) {
+                Ok(()) => {
+                    if write_err.is_none() {
+                        self.local_history_last_write_error = None;
+                    }
+                    for hash in evicted_hashes {
+                        let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
+                        let _ = std::fs::remove_file(&evicted_blob);
+                    }
+                }
+                Err(err) => {
+                    // persist() already retries once. Reload the last durable
+                    // index so this session does not offer a ghost entry that
+                    // a restart cannot restore.
+                    self.local_history_last_write_error = Some(err.to_string());
+                    match legion_storage::local_history::LocalHistoryMetadataStore::load(
+                        history_dir,
+                    ) {
+                        Ok(store) => self.local_history_store = store,
+                        Err(load_err) => {
+                            self.local_history_last_write_error = Some(format!(
+                                "{err}; reload after persist failure also failed: {load_err}"
+                            ));
+                        }
+                    }
+                    let still_referenced = self
+                        .local_history_store
+                        .records_for_file(canonical_path, usize::MAX)
+                        .iter()
+                        .any(|existing| existing.content_hash == record.content_hash);
+                    if !still_referenced {
+                        let _ = std::fs::remove_file(&blob_path);
+                    }
+                }
+            }
         }
     }
 
@@ -25720,14 +25755,22 @@ impl AppComposition {
             .ok_or(AppCompositionError::WorkspaceNotOpen)?
             .to_string();
 
-        let path_key = legion_storage::local_history::LocalHistoryMetadataStore::path_key(
-            strip_unc_prefix(canonical_path),
-        );
-        let blob_path = std::path::PathBuf::from(&root_path)
-            .join(".legion")
-            .join("local-history")
-            .join(&path_key)
-            .join(format!("{}.blob", record.content_hash));
+        let history_dir =
+            legion_storage::local_history::LocalHistoryMetadataStore::dir_for_workspace(
+                std::path::Path::new(&root_path),
+            );
+        let blob_path =
+            legion_storage::local_history::LocalHistoryMetadataStore::trusted_blob_path(
+                &history_dir,
+                &record.canonical_path,
+                &record.content_hash,
+            )
+            .map_err(|e| {
+                git_protocol_error(
+                    "local_history.blob_untrusted",
+                    format!("refusing to restore untrusted history blob: {e}"),
+                )
+            })?;
 
         let restored_text = std::fs::read_to_string(&blob_path).map_err(|e| {
             git_protocol_error(
