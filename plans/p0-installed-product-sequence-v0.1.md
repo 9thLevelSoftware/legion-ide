@@ -206,7 +206,7 @@ Do not pull these into a P0 wave. They are the full-pass P1–P3 rows:
 3. GAP-07.2 / GAP-07.3. **Landed 2026-08-31:** QUAL.11 taxonomy + release-blocker issue form; GitHub labels `qual-11` / `release-blocker` / `severity-p0`…`p3`; ruleset `protect-main` id `21950476` (see `plans/evidence/production/WS-P0/gap-07-3-main-ruleset.md`). Independent review is still off (single owner). Direct pushes to `origin/main` now fail.
 4. Open GAP-02.1 procurement in parallel (human, not a code PR).
 5. GAP-04.1 crash-safe dirty restore. **Landed 2026-08-31** on this PR: sidecar `.legion/unsaved/` (not session JSON); killed dirty session restores buffer text; disk is unchanged until a proposal-mediated save.
-6. GAP-04.2 local-history metadata reload: tracked on `gap/p0-local-history-reload` (PR #192).
+6. GAP-04.2 local-history metadata reload. **Landed** on #192: `.legion/local-history/manifest.json` round-trips identity/hash/timestamp; blobs without metadata rows are not offered after restart. Typing is unchanged — persist runs on the save path.
 7. GAP-04.3 desktop-integration proof of GAP-04.1. **This change:** `session_restore_killed_dirty_session_restores_sidecar_without_writing_disk` plus `plans/evidence/production/WS-P0/gap-04-3-desktop-hot-exit.md`. Not a windowed GAP-01 GUI run.
 
 ## 7. Standing gates
