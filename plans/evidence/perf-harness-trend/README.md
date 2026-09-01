@@ -12,6 +12,10 @@ anyone seeing the change in a diff is not a budget.
   the product got slower on purpose.
 - `entries/<os>-<sha>-<timestamp>.toml` — one archived run. CI uploads the
   whole directory as an artifact from each of the three OS jobs.
+- `reports/` — copied `manual_renderer_perf.toml` and
+  `large_file_manual_renderer_perf.toml` from hosts that produced paint
+  numbers. GAP-09.1: Windows reference reports for SHA `804fb18b`. These are
+  `legion-desktop --manual-perf` paint, not EditorEngine `large_file_perf`.
 
 ## What counts as a regression
 
