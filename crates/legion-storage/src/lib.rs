@@ -24,6 +24,8 @@ pub use secrets::{
 /// Durable checkpoint store for workspace-level file-mutation rollback.
 pub mod checkpoint;
 
+mod fs_atomic;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -859,7 +861,7 @@ fn write_file_atomically(path: &Path, body: &[u8]) -> StorageResult<()> {
             message: format!("sync storage temp file failed: {err}"),
         })?;
         drop(file);
-        atomic_replace(&temp, path).map_err(|err| StorageError::Failed {
+        fs_atomic::atomic_replace(&temp, path).map_err(|err| StorageError::Failed {
             message: format!("replace storage file failed: {err}"),
         })?;
         sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
@@ -3118,7 +3120,7 @@ impl FileBackedStorage {
                 message: format!("sync storage temp file failed: {err}"),
             })?;
             drop(file);
-            atomic_replace(&temp, &self.path).map_err(|err| StorageError::Failed {
+            fs_atomic::atomic_replace(&temp, &self.path).map_err(|err| StorageError::Failed {
                 message: format!("replace storage file failed: {err}"),
             })?;
             sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
@@ -3131,41 +3133,6 @@ impl FileBackedStorage {
         }
         write_result
     }
-}
-
-#[cfg(windows)]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
-    }
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-
-    let ok = unsafe {
-        MoveFileExW(
-            wide(temp).as_ptr(),
-            wide(target).as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(temp, target)
 }
 
 #[cfg(unix)]

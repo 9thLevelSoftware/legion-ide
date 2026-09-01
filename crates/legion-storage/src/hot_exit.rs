@@ -11,8 +11,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Component, Path, PathBuf},
 };
 
@@ -90,7 +89,12 @@ impl HotExitStore {
                     ),
                 });
             }
-            write_atomically(&dir.join(&file), snapshot.body.as_bytes())?;
+            crate::fs_atomic::write_atomically_with_symlink_guard(
+                &dir.join(&file),
+                "hot-exit",
+                snapshot.body.as_bytes(),
+                "hot-exit",
+            )?;
             entries.push(HotExitManifestEntry {
                 path: snapshot.path.clone(),
                 buffer_version: snapshot.buffer_version,
@@ -113,7 +117,12 @@ impl HotExitStore {
         let encoded = serde_json::to_vec_pretty(&manifest).map_err(|err| StorageError::Failed {
             message: format!("serialize hot-exit manifest failed: {err}"),
         })?;
-        write_atomically(&dir.join("manifest.json"), &encoded)?;
+        crate::fs_atomic::write_atomically_with_symlink_guard(
+            &dir.join("manifest.json"),
+            "hot-exit",
+            &encoded,
+            "hot-exit",
+        )?;
         remove_orphans(&dir, &keep);
         Ok(())
     }
@@ -291,17 +300,11 @@ fn remove_orphans(dir: &Path, keep: &BTreeMap<String, String>) {
 }
 
 fn is_symlink(path: &Path) -> bool {
-    fs::symlink_metadata(path)
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
+    crate::fs_atomic::is_symlink(path)
 }
 
 fn reject_symlink(path: &Path) -> Result<(), StorageError> {
-    if is_symlink(path) {
-        Err(symlink_error(path))
-    } else {
-        Ok(())
-    }
+    crate::fs_atomic::reject_symlink(path, "hot-exit")
 }
 
 fn symlink_error(path: &Path) -> StorageError {
@@ -311,81 +314,6 @@ fn symlink_error(path: &Path) -> StorageError {
             path.display()
         ),
     }
-}
-
-fn write_atomically(dest: &Path, body: &[u8]) -> Result<(), StorageError> {
-    reject_symlink(dest)?;
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    reject_symlink(parent)?;
-    fs::create_dir_all(parent).map_err(|err| StorageError::Failed {
-        message: format!("create hot-exit parent failed: {err}"),
-    })?;
-    let temp = parent.join(format!(
-        ".hot-exit-{}-{}.tmp",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    let write_result = (|| -> Result<(), StorageError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|err| StorageError::Failed {
-                message: format!("create hot-exit temp failed: {err}"),
-            })?;
-        file.write_all(body).map_err(|err| StorageError::Failed {
-            message: format!("write hot-exit temp failed: {err}"),
-        })?;
-        file.sync_all().map_err(|err| StorageError::Failed {
-            message: format!("sync hot-exit temp failed: {err}"),
-        })?;
-        drop(file);
-        atomic_replace(&temp, dest).map_err(|err| StorageError::Failed {
-            message: format!("publish hot-exit file failed: {err}"),
-        })
-    })();
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    write_result
-}
-
-#[cfg(windows)]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
-    }
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-
-    let ok = unsafe {
-        MoveFileExW(
-            wide(temp).as_ptr(),
-            wide(target).as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(temp, target)
 }
 
 #[cfg(test)]
