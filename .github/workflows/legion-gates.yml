@@ -50,6 +50,28 @@ jobs:
           # skip on every run and never say anything.
           fetch-depth: 0
 
+      # Hosted Windows Defender is the 13x spread on the 100K-file search
+      # (74s warm vs ~950s cold; see xtask/src/perf_workloads.rs). That
+      # fixture is written under the process temp dir, not GITHUB_WORKSPACE,
+      # so excluding only the repo does not cover it. The VM is thrown away
+      # after the job; a failed preference change must not fail the gate.
+      - name: Exclude runner paths from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Continue
+          $paths = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            $env:TEMP,
+            $env:TMP,
+            (Join-Path $env:USERPROFILE '.cargo'),
+            (Join-Path $env:USERPROFILE '.rustup')
+          ) | Where-Object { $_ }
+          foreach ($path in $paths) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction Continue
+          }
+
       # Runs before the install it covers, so a broken installer is reported as
       # a failing test rather than as a mystery in the middle of an apt log.
       - name: Shared installer unit test
