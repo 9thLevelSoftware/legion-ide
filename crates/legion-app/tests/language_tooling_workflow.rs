@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use legion_app::{AppCommandOutcome, AppComposition};
+use legion_app::{AppCommandOutcome, AppComposition, AppSaveOutcome};
+use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
     LanguageToolingOperationKind, PrincipalId, ProposalLifecycleState, ProposalPayloadKind,
     ProtocolDiagnosticSeverity, RedactionHint, TextCoordinate, Utf16Position, Utf16Range,
@@ -29,6 +30,74 @@ fn position(byte_offset: u64) -> TextCoordinate {
         byte_offset: Some(byte_offset),
         utf16_offset: Some(byte_offset),
     }
+}
+
+#[test]
+fn open_save_and_first_projection_do_not_wait_on_lexical_indexer() {
+    let root = create_root();
+    let target = root.join("lib.rs");
+    std::fs::write(&target, "pub fn alpha_widget() {}\nfn beta_widget() {}\n")
+        .expect("write source file");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("principal-language".to_string()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy())
+        .expect("open source file");
+    assert_eq!(
+        app.retrieval_indexed_file_count_for_test(),
+        0,
+        "open must not run LexicalIndexer"
+    );
+
+    app.shell_projection_snapshot("open")
+        .expect("first projection");
+    assert_eq!(
+        app.retrieval_indexed_file_count_for_test(),
+        0,
+        "first projection must not run LexicalIndexer"
+    );
+
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 0), "// typed\n"))
+        .expect("type into the open buffer");
+    assert_eq!(
+        app.retrieval_indexed_file_count_for_test(),
+        0,
+        "typing must not run LexicalIndexer"
+    );
+
+    let outcome = app.save_active_buffer().expect("save");
+    assert!(
+        matches!(outcome, AppSaveOutcome::Saved(_)),
+        "save must succeed without indexing, got {outcome:?}"
+    );
+    assert_eq!(
+        app.retrieval_indexed_file_count_for_test(),
+        0,
+        "save must not run LexicalIndexer"
+    );
+
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let hover = app
+        .dispatch_ui_intent(CommandDispatchIntent::RequestHover {
+            buffer_id,
+            position: position(7),
+        })
+        .expect("hover dispatch");
+    assert!(matches!(
+        hover,
+        AppCommandOutcome::LanguageToolingUpdated(_)
+    ));
+    assert!(
+        app.retrieval_indexed_file_count_for_test() > 0,
+        "language-read still indexes on demand"
+    );
+
+    std::fs::remove_dir_all(&root).ok();
 }
 
 #[test]
