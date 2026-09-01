@@ -51,6 +51,20 @@ fn run_worker() -> &'static Mutex<HashMap<String, RunWorker>> {
     RUN_WORKER.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Cargo invoked against an arbitrary workspace must not inherit a host
+/// `CARGO_TARGET_DIR`. Nested discovery under `cargo test` otherwise compiles
+/// into the repo target dir and can sit behind that lock until the poll loop
+/// gives up.
+fn cargo_command_in_workspace(workspace_root: &Path) -> Command {
+    let mut command = Command::new("cargo");
+    let target_dir = workspace_root.join("target");
+    command
+        .current_dir(workspace_root)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("CARGO_BUILD_TARGET_DIR", &target_dir);
+    command
+}
+
 fn pending_projection(
     status_label: &str,
     controller_label: &str,
@@ -424,9 +438,8 @@ fn run_cargo_test_filter_blocking(
         args.push("--exact".to_string());
     }
     args.push(filter.to_string());
-    let mut child = Command::new("cargo")
+    let mut child = cargo_command_in_workspace(workspace_root)
         .args(&args)
-        .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -736,9 +749,8 @@ fn discover_cargo_tests_blocking(
     }
 
     let started = Instant::now();
-    let mut child = match Command::new("cargo")
+    let mut child = match cargo_command_in_workspace(workspace_root)
         .args(["test", "--", "--list"])
-        .current_dir(workspace_root)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1031,6 +1043,19 @@ nested::deep::case: test
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].state, TestRunState::Passed);
         assert_eq!(summaries[0].passed, 1);
+    }
+
+    #[test]
+    fn cargo_command_in_workspace_overrides_host_target_dir() {
+        let root = PathBuf::from("fixture-root");
+        let expected = root.join("target");
+        let command = cargo_command_in_workspace(&root);
+        let target = command
+            .get_envs()
+            .find(|(key, _)| *key == "CARGO_TARGET_DIR")
+            .and_then(|(_, value)| value.map(PathBuf::from));
+        assert_eq!(target.as_deref(), Some(expected.as_path()));
+        assert_eq!(command.get_current_dir(), Some(root.as_path()));
     }
 
     #[test]

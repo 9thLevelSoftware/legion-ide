@@ -3,10 +3,12 @@
 use std::{
     fs,
     sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, Instant},
 };
 
 use legion_app::test_explorer::{
-    parse_cargo_test_list, parse_cargo_test_summary, projection_from_items, validate_test_item_id,
+    DEFAULT_DISCOVER_TIMEOUT, DEFAULT_RUN_TIMEOUT, parse_cargo_test_list, parse_cargo_test_summary,
+    projection_from_items, validate_test_item_id,
 };
 use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{
@@ -24,7 +26,10 @@ use uuid::Uuid;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn refresh_until_settled(app: &mut AppComposition) -> legion_ui::TestExplorerProjection {
-    for _ in 0..120 {
+    let deadline = Instant::now() + DEFAULT_DISCOVER_TIMEOUT;
+    let mut last_status = String::from("(never refreshed)");
+    let mut last_diagnostics: Vec<String> = Vec::new();
+    while Instant::now() < deadline {
         let outcome = app
             .dispatch_ui_intent(CommandDispatchIntent::RefreshTestExplorer)
             .expect("refresh should not fail");
@@ -34,16 +39,22 @@ fn refresh_until_settled(app: &mut AppComposition) -> legion_ui::TestExplorerPro
         if projection.status_label != "discovering" {
             return projection;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        last_status = projection.status_label.clone();
+        last_diagnostics = projection.diagnostics.clone();
+        std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("test explorer discovery did not settle");
+    panic!(
+        "test explorer discovery did not settle; status={last_status} diagnostics={last_diagnostics:?}"
+    );
 }
 
 fn run_item_until_settled(
     app: &mut AppComposition,
     item_id: &str,
 ) -> legion_ui::TestExplorerProjection {
-    for _ in 0..240 {
+    let deadline = Instant::now() + DEFAULT_RUN_TIMEOUT;
+    let mut last_status: Option<String> = None;
+    while Instant::now() < deadline {
         let outcome = app
             .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerItem {
                 item_id: item_id.to_string(),
@@ -55,16 +66,19 @@ fn run_item_until_settled(
         if projection.last_run_status.as_deref() != Some("running") {
             return projection;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        last_status = projection.last_run_status.clone();
+        std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("test explorer item run did not settle");
+    panic!("test explorer item run did not settle; last_run_status={last_status:?}");
 }
 
 fn run_group_until_settled(
     app: &mut AppComposition,
     parent_label: &str,
 ) -> legion_ui::TestExplorerProjection {
-    for _ in 0..240 {
+    let deadline = Instant::now() + DEFAULT_RUN_TIMEOUT;
+    let mut last_status: Option<String> = None;
+    while Instant::now() < deadline {
         let outcome = app
             .dispatch_ui_intent(CommandDispatchIntent::RunTestExplorerGroup {
                 parent_label: parent_label.to_string(),
@@ -76,9 +90,10 @@ fn run_group_until_settled(
         if projection.last_run_status.as_deref() != Some("running") {
             return projection;
         }
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        last_status = projection.last_run_status.clone();
+        std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("test explorer group run did not settle");
+    panic!("test explorer group run did not settle; last_run_status={last_status:?}");
 }
 
 fn create_fixture_crate() -> std::path::PathBuf {
