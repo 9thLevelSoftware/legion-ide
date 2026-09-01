@@ -32,6 +32,12 @@ If any command fails, save exact output under `plans/evidence/legion-e2e/` befor
 
 Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly smoke remain the primary GP evidence sources. See `plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`.
 
+## Windowed GUI E2E (GAP-01.2)
+
+`.github/workflows/legion-windowed-gui.yml` runs `cargo run -p xtask -- windowed-gui-e2e` on ubuntu, windows, and macos (`workflow_dispatch` and weekly Mondays 08:00 UTC). Linux wraps the step in `xvfb-run` so `eframe::run_native` still creates a window. The GUI step is hard-fail: no `continue-on-error`, no `|| true`.
+
+This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **independent**: failures do **not** block PR merges. Use the same four-green-run + owner sign-off clock as the golden-path smoke before adding it as a required check. Evidence stub: `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-3os.md` (hosted URLs filled after the first dispatch against `main`).
+
 ## Release-blocker queue (QUAL.11)
 
 File gaps that forbid a named release claim with `.github/ISSUE_TEMPLATE/release-blocker.yml` (labels `qual-11` and `release-blocker`). Do not use Bug report for that queue. Taxonomy: `plans/qual-11-release-blocker-taxonomy.md`.
@@ -233,7 +239,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (recorded-mode legion-bench on every push to main and every PR: real fixture execution with model responses replayed from committed cassettes, gated against a committed per-task baseline; live provider runs are confined to the opt-in, scheduled, `continue-on-error` `.github/workflows/legion-bench-live.yml` and can never gate a merge), and `.github/workflows/legion-smoke.yml` (GP-1 through GP-4 golden-path smokes and the update-drill, completing the 21 standing gates on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (recorded-mode legion-bench on every push to main and every PR: real fixture execution with model responses replayed from committed cassettes, gated against a committed per-task baseline; live provider runs are confined to the opt-in, scheduled, `continue-on-error` `.github/workflows/legion-bench-live.yml` and can never gate a merge), `.github/workflows/legion-smoke.yml` (GP-1 through GP-4 golden-path smokes and the update-drill, completing the 21 standing gates on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker), and `.github/workflows/legion-windowed-gui.yml` (GAP-01 windowed `eframe::run_native` E2E on dispatch and weekly, 3-OS matrix, independent — GUI step hard-fail, not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 

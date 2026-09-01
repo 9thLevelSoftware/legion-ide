@@ -120,7 +120,7 @@ Depends on: Wave 1. GAP-01, GAP-09, and GAP-05 may run in parallel.
 
 | Task | Outcome | Primary files | Verification | Acceptance | Stop condition |
 | --- | --- | --- | --- | --- | --- |
-| GAP-01.1 | Windowed GUI E2E on an extracted native package (unsigned allowed) | `crates/legion-desktop/src/smoke.rs`, `scripts/verify-native-package.*`, new xtask | local 1-OS run that launches `eframe::run_native` (not `--beta-smoke`) and completes open/edit/save | Report names the binary path, OS, and that a window was created | Do not accept AppComposition `golden-path-5` as this task |
+| GAP-01.1 | Windowed GUI E2E on an extracted native package (unsigned allowed) | `crates/legion-desktop/src/smoke.rs`, `scripts/verify-native-package.*`, new xtask | local 1-OS run that launches `eframe::run_native` (not `--beta-smoke`) and completes open/edit/save | Report names the binary path, OS, and that a window was created | Do not accept AppComposition `golden-path-5` as this task. **Landed 2026-09-01** on #196 |
 | GAP-01.2 | 3-OS CI job, hard-fail, independent first | `.github/workflows/` (new or extend preview/release verify) | hosted run URLs | Evidence file with three OS artifacts; `continue-on-error` forbidden on the GUI step | Do not fold into PR gates until the T0-D four-green-run clock plus owner sign-off |
 | GAP-01.3 | Filled installed-preview journal | `plans/evidence/dogfood/` | journal template fields complete | `YYYY-MM-DD-installed-preview-journal.md` names SHA, OS, result | Checklist-only files are not evidence |
 

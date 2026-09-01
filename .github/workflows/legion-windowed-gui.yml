@@ -1,0 +1,92 @@
+name: Legion Windowed GUI
+
+# GAP-01.2: 3-OS windowed GUI E2E (`xtask windowed-gui-e2e` → packaged
+# legion-desktop --windowed-e2e → eframe::run_native open/edit/save).
+#
+# This is not --beta-smoke, not AppComposition golden-path-5, and not the
+# preview job's best-effort GUI step (that one uses continue-on-error and
+# `|| true`). The GUI step here is hard-fail. continue-on-error is forbidden
+# on that step.
+#
+# INDEPENDENT: workflow_dispatch + weekly. Failures do NOT block PR merges.
+# Do not add this as a required check or fold it into legion-gates.yml until
+# the T0-D clock (four consecutive green 3-OS runs + owner sign-off) in
+# docs/OPERATOR_RUNBOOK.md and
+# plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly Mondays 08:00 UTC (after smoke at 06:00 and preview at 07:00)
+    - cron: '0 8 * * 1'
+
+concurrency:
+  group: legion-windowed-gui-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windowed-gui:
+    name: Windowed GUI E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_BUILD_JOBS: "4"
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Exclude runner paths from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Continue
+          $paths = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            $env:TEMP,
+            $env:TMP,
+            (Join-Path $env:USERPROFILE '.cargo'),
+            (Join-Path $env:USERPROFILE '.rustup')
+          ) | Where-Object { $_ }
+          foreach ($path in $paths) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction Continue
+          }
+
+      - name: Install Linux GUI build dependencies
+        if: runner.os == 'Linux'
+        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Run windowed GUI E2E
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: ${{ runner.os == 'Linux' && '1' || '' }}
+          WGPU_BACKEND: ${{ runner.os == 'Linux' && 'gl' || '' }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+              cargo run -p xtask -- windowed-gui-e2e
+          else
+            cargo run -p xtask -- windowed-gui-e2e
+          fi
+
+      - name: Upload windowed GUI report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windowed-gui-report-${{ matrix.os }}
+          path: target/windowed-gui/report.toml
+          if-no-files-found: warn
