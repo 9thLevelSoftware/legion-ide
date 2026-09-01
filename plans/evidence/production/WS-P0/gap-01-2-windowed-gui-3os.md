@@ -30,20 +30,21 @@ path. It is not headless `--beta-smoke` and not AppComposition `golden-path-5`.
 - Not folded into `legion-gates.yml`
 - Not a 22nd local standing gate
 - Not GAP-01.1 local proof (that landed on #196)
-- Not hosted run URLs yet — those exist only after a dispatch against `main`
+- Not a green 3-OS clock start — first dispatch hard-failed (see below)
 
 Promote to merge-blocking only after four consecutive green 3-OS runs and
 owner sign-off (`docs/OPERATOR_RUNBOOK.md`, `T0-D-smoke-promotion-criteria.md`).
 
 ## Hosted evidence
 
-| OS | Run URL | Artifact | Result |
-| --- | --- | --- | --- |
-| ubuntu-latest | pending first dispatch after merge | `windowed-gui-report-ubuntu-latest` | |
-| windows-latest | pending first dispatch after merge | `windowed-gui-report-windows-latest` | |
-| macos-latest | pending first dispatch after merge | `windowed-gui-report-macos-latest` | |
+First dispatch after merge: [run 33553239633](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33553239633) on `804fb18b`. The GUI step hard-failed on all three OSes (`continue-on-error` was not used).
 
-A filled row needs the run URL plus the uploaded `report.toml` with
-`window_created = true`. Until those exist, GAP-01.2 is not closed.
+| OS | Artifact | `window_created` | Result |
+| --- | --- | --- | --- |
+| ubuntu-latest | none (panic before report) | n/a | panic: `libxkbcommon-x11.so` not loaded |
+| windows-latest | `windowed-gui-report-windows-latest` | false | blocked: `WGPU error: Failed to create surface for any enabled backend` |
+| macos-latest | `windowed-gui-report-macos-latest` | false | blocked: `WGPU error: Failed to create surface for any enabled backend` |
+
+Follow-up in this change: install `libxkbcommon-x11-0` + Mesa dri on Linux, write a blocked report on panic (so Ubuntu still uploads `report.toml`), and prefer WARP (`Microsoft Basic Render Driver`) on Windows. A later dispatch must still show `window_created = true` on each OS before GAP-01.2 is closed.
 
 Ledger row statuses are unchanged.

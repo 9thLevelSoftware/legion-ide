@@ -61,7 +61,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers
+        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -80,6 +80,9 @@ jobs:
             xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
               cargo run -p xtask -- windowed-gui-e2e
           else
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              export WGPU_ADAPTER_NAME="Microsoft Basic Render Driver"
+            fi
             cargo run -p xtask -- windowed-gui-e2e
           fi
 
