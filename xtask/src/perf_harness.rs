@@ -1176,19 +1176,27 @@ pub fn apply_fail_on_budget_override(skeleton: &mut SkeletonDescriptor) {
 /// ignored, leaving the descriptor budget unchanged. An explicit `0`
 /// disables the gate (report-only) just like setting the budget to `0`.
 pub fn apply_fail_on_budget_value(skeleton: &mut SkeletonDescriptor, value: &str) {
+    // GAP-09.2: renderer-backed paint rows keep their own budgets even when
+    // hosted CI sets `LEGION_PERF_FAIL_ON_BUDGET_MS=0` for synthetic m0/m1.
+    if matches!(
+        skeleton.kind,
+        SkeletonKind::RendererBackedManualInputToPaint | SkeletonKind::LargeFile100Mb
+    ) {
+        return;
+    }
     let Ok(parsed) = value.trim().parse::<u64>() else {
         return;
     };
     skeleton.budget_millis = parsed;
 }
 
-/// Applies the [`FAIL_ON_BUDGET_ENV`] override to the renderer-backed Manual
-/// measurement. Unlike the descriptor-driven skeletons (which flow through
-/// [`apply_fail_on_budget_override`] before classification), this measurement
-/// is derived from the desktop manual-perf report with its own internal
-/// budgets, so without this hook the env override silently does not apply —
-/// hosted CI running report-only (`0`) would still fail the step on a shared
-/// runner's timing noise.
+/// Applies the [`FAIL_ON_BUDGET_ENV`] override to a measurement that did not
+/// flow through a [`SkeletonDescriptor`].
+///
+/// GAP-09.2: renderer-backed paint rows (`manual.renderer_input_to_paint` and
+/// `m9.large_file_100mb`) ignore this override, matching product workloads.
+/// Hosted `LEGION_PERF_FAIL_ON_BUDGET_MS=0` stays for synthetic m0/m1 noise
+/// only. A renderer budget miss must fail the gate.
 pub fn apply_fail_on_budget_to_manual_measurement(measurement: &mut SkeletonMeasurement) {
     let Ok(value) = std::env::var(FAIL_ON_BUDGET_ENV) else {
         return;
@@ -1196,18 +1204,22 @@ pub fn apply_fail_on_budget_to_manual_measurement(measurement: &mut SkeletonMeas
     apply_fail_on_budget_value_to_manual_measurement(measurement, &value);
 }
 
-/// Value-based twin of [`apply_fail_on_budget_to_manual_measurement`] so
-/// tests can exercise the override without mutating process-global
-/// environment state. Semantics mirror [`apply_fail_on_budget_value`]:
-/// non-numeric values are ignored; `0` means report-only (a budget failure is
-/// reclassified as Skipped, measured numbers preserved); a non-zero value
-/// re-gates the measured p95 against the override budget in milliseconds.
-/// Measurements already Skipped (environment-blocked placeholders) are left
-/// untouched.
+/// Value-based twin of [`apply_fail_on_budget_to_manual_measurement`].
+///
+/// Renderer-backed kinds ignore the override. Other kinds: non-numeric values
+/// are ignored; `0` means report-only (a budget failure is reclassified as
+/// Skipped, measured numbers preserved); a non-zero value re-gates p95 against
+/// the override in milliseconds. Already-Skipped placeholders are untouched.
 pub fn apply_fail_on_budget_value_to_manual_measurement(
     measurement: &mut SkeletonMeasurement,
     value: &str,
 ) {
+    if matches!(
+        measurement.kind,
+        SkeletonKind::RendererBackedManualInputToPaint | SkeletonKind::LargeFile100Mb
+    ) {
+        return;
+    }
     let Ok(parsed) = value.trim().parse::<u64>() else {
         return;
     };
