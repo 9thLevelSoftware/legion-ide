@@ -150,6 +150,10 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::CancelPaletteConfirmation { token })
             }
             CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
+            CommandDispatchIntent::OpenAbout => Ok(AppCommandRequest::OpenAbout),
+            CommandDispatchIntent::ExportSupportBundle => {
+                Ok(AppCommandRequest::ExportSupportBundle)
+            }
             CommandDispatchIntent::AttachAcpHost { program, args } => {
                 Ok(AppCommandRequest::AttachAcpHost { program, args })
             }

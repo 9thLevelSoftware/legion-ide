@@ -2,6 +2,8 @@
 
 This document describes the public-facing security posture of Legion IDE as it exists today: what the product is designed to protect, which boundaries are enforced in code, where the platform is intentionally weaker, and how to report vulnerabilities responsibly.
 
+For the user-facing data-handling policy (Manual zero-egress, opt-in AI, metadata-only support bundles), see [`PRIVACY.md`](PRIVACY.md).
+
 ## Security principles
 
 Legion is built around deny-by-default policy. The product is designed so that:

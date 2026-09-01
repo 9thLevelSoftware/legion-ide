@@ -1,5 +1,6 @@
 //! Projection rendering for the desktop adapter.
 
+mod about;
 #[cfg(feature = "ai")]
 mod assistant_rail;
 mod brand_mark;
@@ -1369,6 +1370,8 @@ pub enum UtilitySurface {
     Settings,
     /// Reopenable setup and welcome overlay.
     Setup,
+    /// Help/About overlay (version, license, privacy).
+    About,
     /// Raw internal diagnostics in the bottom panel.
     Diagnostics,
 }
@@ -1515,7 +1518,7 @@ impl ProjectionView {
     fn open_utility_overlay(&mut self, surface: UtilitySurface, origin: egui::Id) {
         debug_assert!(matches!(
             surface,
-            UtilitySurface::Settings | UtilitySurface::Setup
+            UtilitySurface::Settings | UtilitySurface::Setup | UtilitySurface::About
         ));
         self.utility_surface = Some(surface);
         self.utility_overlay_origin = Some(origin);
@@ -1526,7 +1529,7 @@ impl ProjectionView {
     fn close_utility_overlay(&mut self, restore_focus: bool) {
         if !matches!(
             self.utility_surface,
-            Some(UtilitySurface::Settings | UtilitySurface::Setup)
+            Some(UtilitySurface::Settings | UtilitySurface::Setup | UtilitySurface::About)
         ) {
             return;
         }
@@ -1540,6 +1543,17 @@ impl ProjectionView {
     pub(crate) fn open_settings_from_palette(&mut self) {
         if let Some(origin) = self.command_palette_origin {
             self.open_utility_overlay(UtilitySurface::Settings, origin);
+        }
+    }
+
+    /// Open the Help/About overlay from a palette dispatch.
+    pub(crate) fn open_about_from_palette(&mut self) {
+        if let Some(origin) = self.command_palette_origin {
+            self.open_utility_overlay(UtilitySurface::About, origin);
+        } else {
+            self.utility_surface = Some(UtilitySurface::About);
+            self.utility_overlay_needs_focus = true;
+            self.utility_overlay_focus_bounds = None;
         }
     }
 
@@ -2000,7 +2014,7 @@ fn render_compact_drawer_overlay(
     let escape_requested = ctx.input(|input| input.key_pressed(egui::Key::Escape))
         && !matches!(
             view.utility_surface,
-            Some(UtilitySurface::Settings | UtilitySurface::Setup)
+            Some(UtilitySurface::Settings | UtilitySurface::Setup | UtilitySurface::About)
         )
         && view.pending_mode_confirmation.is_none();
     egui::Window::new(title)
@@ -5146,13 +5160,15 @@ fn render_utility_overlay(
     view: &mut ProjectionView,
     actions: &mut Vec<DesktopAction>,
 ) {
-    let Some(surface @ (UtilitySurface::Settings | UtilitySurface::Setup)) = view.utility_surface
+    let Some(surface @ (UtilitySurface::Settings | UtilitySurface::Setup | UtilitySurface::About)) =
+        view.utility_surface
     else {
         return;
     };
     let title = match surface {
         UtilitySurface::Settings => "Settings",
         UtilitySurface::Setup => "Welcome to Legion",
+        UtilitySurface::About => "About Legion",
         UtilitySurface::Diagnostics => unreachable!(),
     };
     let content_rect = ctx.content_rect();
@@ -5199,6 +5215,7 @@ fn render_utility_overlay(
                     let close_label = match surface {
                         UtilitySurface::Settings => "Close Settings",
                         UtilitySurface::Setup => "Close Setup",
+                        UtilitySurface::About => "Close About",
                         UtilitySurface::Diagnostics => unreachable!(),
                     };
                     let close_response = soft_button(ui, close_label);
@@ -5220,6 +5237,11 @@ fn render_utility_overlay(
                     UtilitySurface::Setup => {
                         last_focus = Some(render_setup_panel(
                             ui, snapshot, model, view, actions, &mut close,
+                        ));
+                    }
+                    UtilitySurface::About => {
+                        last_focus = Some(about::render_about_panel(
+                            ui, snapshot, model, view, actions,
                         ));
                     }
                     UtilitySurface::Diagnostics => unreachable!(),
@@ -5562,6 +5584,13 @@ fn render_settings_panel(
                 "Data sharing: {}",
                 model.settings.telemetry_label
             )));
+            ui.add_space(8.0);
+            if soft_button(ui, "Export support bundle").clicked() {
+                actions.push(DesktopAction::ExportSupportBundle);
+            }
+            ui.label(theme::muted(
+                "Writes .legion/support-bundle.md. Metadata only: no editor text, secrets, or raw crash bodies.",
+            ));
         }
         if view.settings_section == SettingsSection::Advanced {
             let mut indexed_workspace_search_enabled =

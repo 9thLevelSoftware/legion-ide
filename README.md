@@ -15,6 +15,8 @@ Legion is not yet a general-availability desktop product. The current repo is be
 Use these docs first:
 
 - `AGENTS.md` — concise agent/developer invariants and required gates.
+- `LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
+- `docs/PRIVACY.md` — user-facing privacy policy (Manual zero-egress, opt-in AI, no phone-home).
 - `docs/INDEX.md` — entry point for the canonical documentation set.
 - `docs/USER_GUIDE.md` — end-user guide for the current product paths.
 - `docs/KEYBOARD_REFERENCE.md` — projected shortcut labels that are currently surfaced by the product UI.

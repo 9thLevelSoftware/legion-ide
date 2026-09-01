@@ -3358,6 +3358,17 @@ impl DesktopRuntime {
                 );
                 DesktopWorkflowOutcome::Noop
             }
+            AppCommandOutcome::AboutOpened => {
+                self.set_status(StatusSeverity::Info, "About Legion".to_string());
+                DesktopWorkflowOutcome::Noop
+            }
+            AppCommandOutcome::SupportBundleExported(path) => {
+                self.set_status(
+                    StatusSeverity::Info,
+                    format!("Support bundle exported to {path}"),
+                );
+                DesktopWorkflowOutcome::Noop
+            }
             AppCommandOutcome::DelegatedTaskCompleted(outcome) => {
                 use legion_app::AppDelegatedTaskOutcome;
                 let message = match outcome.as_ref() {
@@ -5140,12 +5151,16 @@ impl DesktopEframeApp {
             return;
         }
         let opens_settings = result.id == "command:preferences-open";
+        let opens_about = result.id == "command:help-about";
         match self
             .runtime
             .handle_action(DesktopAction::DispatchPaletteSelection)
         {
             Ok(DesktopWorkflowOutcome::SettingsUpdated { .. }) if opens_settings => {
                 self.runtime.view.open_settings_from_palette();
+            }
+            Ok(_) if opens_about => {
+                self.runtime.view.open_about_from_palette();
             }
             Ok(_) => {}
             Err(error) => {

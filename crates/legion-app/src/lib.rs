@@ -9455,6 +9455,10 @@ pub enum AppCommandRequest {
     },
     /// Open the app-owned Settings projection.
     OpenSettings,
+    /// Open the Help/About projection.
+    OpenAbout,
+    /// Export a metadata-only support bundle through [`crate::diagnostics::SupportBundleAssembler`].
+    ExportSupportBundle,
     /// Attach an optional local ACP adapter host for delegated proposal work.
     AttachAcpHost {
         /// Executable or program path.
@@ -10287,6 +10291,8 @@ impl CommandExecutionService {
             | AppCommandRequest::ConfirmPaletteSelection { .. }
             | AppCommandRequest::CancelPaletteConfirmation { .. }
             | AppCommandRequest::OpenSettings
+            | AppCommandRequest::OpenAbout
+            | AppCommandRequest::ExportSupportBundle
             | AppCommandRequest::AttachAcpHost { .. }
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
@@ -12542,6 +12548,10 @@ pub enum AppCommandOutcome {
     LocalHistoryEntriesUpdated(Vec<legion_ui::LocalHistoryEntryProjection>),
     /// Worktree state evidence was exported; contains the absolute path to the written file.
     WorktreeEvidenceExported(String),
+    /// Help/About overlay should open.
+    AboutOpened,
+    /// Metadata-only support bundle was written; contains the absolute path.
+    SupportBundleExported(String),
 }
 
 /// Per-buffer save-all result.
@@ -13288,6 +13298,18 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "help-about",
+            title: "Help: About",
+            detail: "Show version, license, and privacy posture",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "help-export-support-bundle",
+            title: "Help: Export Support Bundle",
+            detail: "Write a metadata-only support bundle to .legion/",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "preferences-theme-dark",
             title: "Preferences: Theme Dark",
             detail: "Switch to the dark theme",
@@ -13386,6 +13408,8 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "git-export-evidence" => Some(CommandDispatchIntent::ExportWorktreeEvidence),
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
         "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
+        "help-about" => Some(CommandDispatchIntent::OpenAbout),
+        "help-export-support-bundle" => Some(CommandDispatchIntent::ExportSupportBundle),
         "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
             preference: ThemePreferenceProjection::Dark,
         }),
@@ -18400,6 +18424,11 @@ impl AppComposition {
             ),
             AppCommandRequest::OpenSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
+            }
+            AppCommandRequest::OpenAbout => Ok(AppCommandOutcome::AboutOpened),
+            AppCommandRequest::ExportSupportBundle => {
+                let path = self.export_support_bundle()?;
+                Ok(AppCommandOutcome::SupportBundleExported(path))
             }
             AppCommandRequest::AttachAcpHost { program, args } => {
                 self.set_acp_host_command(program.clone(), args.clone());

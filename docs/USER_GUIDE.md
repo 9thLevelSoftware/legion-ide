@@ -75,8 +75,8 @@ desired program to replace the attached host; restart the app to clear the opt-i
 
 The command dispatcher is the reachable entry point for the product loops covered by the current
 desktop tests. The command palette registry exposes the commands listed by the app projection,
-including `Git: Push`, `Git: Fetch`, `Git: Pull`, `Language Server: Start`, and
-`Language Server: Restart`;
+including `Git: Push`, `Git: Fetch`, `Git: Pull`, `Language Server: Start`,
+`Language Server: Restart`, `Help: About`, and `Help: Export Support Bundle`;
 other product loops use typed shell commands that become app-owned dispatch intents.
 
 Git hunk navigation/staging, test discovery/run, and language write requests are typed shell
@@ -156,6 +156,9 @@ See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Support and release surfaces
 
+- **Help: About** (command palette) opens the About overlay: version, proprietary license, Manual/opt-in AI privacy posture, and crash-report consent. This is not a general-availability claim.
+- **Help: Export Support Bundle** writes a metadata-only file to `.legion/support-bundle.md` through app authority. It does not include editor text, secrets, or raw crash bodies. Settings → Privacy has the same export.
+- Privacy policy: `docs/PRIVACY.md`. License: `LICENSE` (proprietary, not OSI). Third-party notices: `THIRD_PARTY_NOTICES.md`.
 - For packaging and release preparation, start with `docs/OPERATOR_RUNBOOK.md`.
 - For diagnostic exports, session state, and bug-report payloads, use `docs/TROUBLESHOOTING.md`.
 - For release-readiness status, check `plans/product-readiness-ledger.md`.
