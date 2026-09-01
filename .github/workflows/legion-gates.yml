@@ -192,12 +192,13 @@ jobs:
       # Nothing here is behind an opt-in flag — a budget nobody runs is not a
       # budget (P8.F4.T1).
       #
-      # LEGION_PERF_FAIL_ON_BUDGET_MS=0 makes the *skeleton* microbenchmark
-      # budgets report-only, because a 2ms wall-clock microbenchmark on a
-      # shared VM is noise. It does NOT apply to the product workloads: their
-      # ceilings are sized to survive a slow runner and stay armed on all three
-      # OSes, because an override that makes every budget on every OS unfailable
-      # is exactly P8.F4.T2's stop condition.
+      # LEGION_PERF_FAIL_ON_BUDGET_MS=0 makes the *synthetic skeleton*
+      # microbenchmarks (m0/m1) report-only, because a 2ms wall-clock
+      # microbenchmark on a shared VM is noise. It does NOT apply to product
+      # workloads or to renderer-backed paint rows (manual.renderer_input_to_paint
+      # and m9.large_file_100mb, GAP-09.2): those stay fail-closed. An override
+      # that makes every budget on every OS unfailable is P8.F4.T2's stop
+      # condition.
       #
       # Workload COVERAGE is enforced everywhere too. The verify step fails if
       # any required workload did not produce a measurement on this OS, which is
@@ -225,6 +226,7 @@ jobs:
             target/perf-harness/product-perf.toml
             target/perf-harness/large-file-perf.toml
             target/perf-harness/manual_renderer_perf.toml
+            target/perf-harness/large_file_manual_renderer_perf.toml
             plans/evidence/perf-harness-trend/entries/
           if-no-files-found: warn
 
