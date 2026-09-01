@@ -275,12 +275,13 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 
 ## 7. CI/CD Pipeline
 
-6 GitHub Actions workflows:
+GitHub Actions workflows:
 
 | Workflow | Trigger | Jobs |
 |----------|---------|------|
 | `legion-gates.yml` | push/PR | 3-OS matrix: fmt, check, test, clippy + cargo-deny |
 | `legion-smoke.yml` | scheduled | 3-OS smoke tests + golden-path + update-drill |
+| `legion-windowed-gui.yml` | dispatch + weekly | 3-OS windowed GUI E2E (`eframe::run_native`); independent; GUI step hard-fail |
 | `legion-bench.yml` | push/PR | Recorded eval suite: real fixture execution with replayed model responses, gated against a committed baseline |
 | `legion-bench-live.yml` | scheduled, opt-in | Live eval run; `continue-on-error`, never a gate |
 | `legion-preview.yml` | scheduled | Preview builds |
@@ -291,7 +292,7 @@ syntax highlights, diagnostics, terminal, tabs, git via `DesktopProjectionViewMo
 `VerifyReleasePipeline`, `ReleaseManifest`, `PerfHarness`, `VerifyPerfHarness`,
 `LegionBench`, `VerifyLegionBench`, `VerifyKanbanBacklog`,
 `VerifyReadinessConsistency`, `RustAnalyzerSmoke`, `GoldenPath1`–`GoldenPath5`,
-`HostileEvals`, `VerifyHostileEvals`, `UpdateDrill`
+`HostileEvals`, `VerifyHostileEvals`, `UpdateDrill`, `WindowedGuiE2e`
 
 ## 8. Configuration & Environment
 
