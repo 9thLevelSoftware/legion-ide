@@ -404,6 +404,5 @@ fn toml_string(value: &str) -> String {
     escaped.push('"');
     escaped
 }
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
