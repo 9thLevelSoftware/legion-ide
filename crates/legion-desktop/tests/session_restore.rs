@@ -538,9 +538,6 @@ fn session_restore_killed_dirty_session_restores_sidecar_without_writing_disk() 
                 .expect("unsaved edit"),
             DesktopWorkflowOutcome::Edited
         );
-        runtime
-            .save_session_state()
-            .expect("crash-persist session metadata and hot-exit sidecar");
     }
 
     assert_eq!(
@@ -569,10 +566,11 @@ fn session_restore_killed_dirty_session_restores_sidecar_without_writing_disk() 
         Some("cleanDIRTY")
     );
     assert!(
-        snapshot.status_messages.iter().any(|status| {
-            status.message.contains("unsaved buffer") || status.message.contains("Session restored")
-        }),
-        "restore should surface a session/hot-exit status, got {:?}",
+        snapshot
+            .status_messages
+            .iter()
+            .any(|status| status.message.contains("unsaved buffer")),
+        "restore should surface a hot-exit status, got {:?}",
         snapshot.status_messages
     );
     assert_eq!(

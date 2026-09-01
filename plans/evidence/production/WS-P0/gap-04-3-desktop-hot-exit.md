@@ -9,7 +9,7 @@
 DesktopRuntime integration of crash-safe unsaved-buffer restore:
 
 1. Edit a buffer without `SaveActive`.
-2. Persist session metadata + `.legion`-adjacent `unsaved/` sidecar (`save_session_state`).
+2. Let `InsertText` crash-persist through `persist_session_if_configured` (no explicit `save_session_state`).
 3. Drop the runtime (killed session).
 4. Reopen the same workspace from that session path.
 
