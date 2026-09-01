@@ -29,4 +29,5 @@ pub mod session;
 pub mod smoke;
 mod theme;
 pub mod view;
+pub mod windowed_e2e;
 pub mod workflow;

@@ -905,6 +905,28 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// GAP-01.1: unsigned package layout + windowed GUI E2E (`eframe::run_native`).
+    ///
+    /// Builds `legion-desktop`, copies the binary and legal files into
+    /// `target/windowed-gui/package/`, and launches that binary with
+    /// `--windowed-e2e`. This is not `--beta-smoke` and not AppComposition
+    /// `golden-path-5`. A run that cannot create a window fails closed.
+    ///
+    /// Not a standing gate and not merge-blocking. GAP-01.2 is the independent
+    /// 3-OS job; do not fold this into PR gates until the T0-D clock plus
+    /// owner sign-off.
+    #[command(name = "windowed-gui-e2e")]
+    WindowedGuiE2e {
+        /// Output directory for the unsigned package layout and report.
+        #[arg(long, default_value = "target/windowed-gui")]
+        out_dir: String,
+        /// Build the desktop binary in release mode.
+        #[arg(long)]
+        release: bool,
+        /// Copy the report to this path or directory after a successful run.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
     /// Run the scripted GP-5 golden-path acceptance smoke against a throwaway fixture workspace.
     ///
     /// Drives the core IDE user journey through AppComposition: open workspace,
@@ -1115,6 +1137,11 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_4_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::WindowedGuiE2e {
+            out_dir,
+            release,
+            record_evidence,
+        } => run_windowed_gui_e2e_command(&out_dir, release, record_evidence.as_deref()),
         Commands::GoldenPath5 {
             fixture_dir,
             out_dir,
@@ -2799,6 +2826,26 @@ fn run_golden_path_4_command(
         );
     }
     code
+}
+
+fn run_windowed_gui_e2e_command(
+    out_dir: &str,
+    release: bool,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("windowed-gui-e2e failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::windowed_gui_e2e::WindowedGuiE2eOptions {
+        out_dir: out_dir.to_string(),
+        release,
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    xtask::windowed_gui_e2e::run_windowed_gui_e2e(&workspace_root, &opts)
 }
 
 fn run_golden_path_5_command(

@@ -65,6 +65,7 @@ use crate::{
         ime_composition_state, ime_composition_state_id,
         proposal_review::DesktopCheckpointTimelineRow,
     },
+    windowed_e2e::WindowedGuiE2eConfig,
 };
 
 const WINDOW_TITLE: &str = PRODUCT_NAME;
@@ -88,6 +89,8 @@ pub struct DesktopLaunchConfig {
     pub beta: Option<BetaWorkflowConfig>,
     /// Optional desktop-owned Manual renderer performance configuration.
     pub manual_perf: Option<ManualPerfConfig>,
+    /// Optional GAP-01.1 windowed GUI E2E configuration (`eframe::run_native`).
+    pub windowed_e2e: Option<WindowedGuiE2eConfig>,
     /// Optional metadata-only session JSON path.
     pub session_state: Option<PathBuf>,
     /// Optional metadata-only diagnostics markdown path.
@@ -104,6 +107,7 @@ impl DesktopLaunchConfig {
             smoke: None,
             beta: None,
             manual_perf: None,
+            windowed_e2e: None,
             session_state: None,
             diagnostics_export: None,
         }
@@ -143,6 +147,7 @@ impl DesktopLaunchConfig {
         let mut smoke_enabled = false;
         let mut beta_enabled = false;
         let mut manual_perf_enabled = false;
+        let mut windowed_e2e_enabled = false;
         let mut workspace_root = None;
         let mut beta_workspace_root = None;
         let mut initial_file = None;
@@ -155,6 +160,7 @@ impl DesktopLaunchConfig {
         let mut perf_samples_seen = false;
         let mut session_state = None;
         let mut diagnostics_export = None;
+        let mut report_path = None;
         let mut positionals = Vec::new();
         let mut args = args.into_iter();
 
@@ -164,6 +170,7 @@ impl DesktopLaunchConfig {
                 "--smoke" => smoke_enabled = true,
                 "--beta-smoke" => beta_enabled = true,
                 "--manual-perf" => manual_perf_enabled = true,
+                "--windowed-e2e" => windowed_e2e_enabled = true,
                 "--workspace" => {
                     let value = args
                         .next()
@@ -193,6 +200,12 @@ impl DesktopLaunchConfig {
                         .next()
                         .ok_or_else(|| anyhow!("--evidence requires a path"))?;
                     evidence_path = PathBuf::from(value);
+                }
+                "--report" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| anyhow!("--report requires a path"))?;
+                    report_path = Some(PathBuf::from(value));
                 }
                 "--perf-report" => {
                     let value = args
@@ -245,6 +258,11 @@ impl DesktopLaunchConfig {
         }
         if manual_perf_enabled && beta_enabled {
             return Err(anyhow!("--manual-perf and --beta-smoke cannot be combined"));
+        }
+        if windowed_e2e_enabled && (smoke_enabled || beta_enabled || manual_perf_enabled) {
+            return Err(anyhow!(
+                "--windowed-e2e cannot be combined with --smoke, --beta-smoke, or --manual-perf"
+            ));
         }
         if !manual_perf_enabled && (perf_report_seen || perf_samples_seen) {
             return Err(anyhow!(
@@ -310,8 +328,15 @@ impl DesktopLaunchConfig {
         // defaulting earlier would silently redirect beta-smoke evidence into
         // the workspace. Smoke and perf runs are short-lived measurement
         // harnesses and keep whatever they were given.
+        let windowed_e2e = if windowed_e2e_enabled {
+            Some(WindowedGuiE2eConfig::new(
+                report_path.unwrap_or_else(WindowedGuiE2eConfig::default_report_path),
+            )?)
+        } else {
+            None
+        };
         let session_state = session_state.or_else(|| {
-            (!smoke_enabled && !beta_enabled && !manual_perf_enabled)
+            (!smoke_enabled && !beta_enabled && !manual_perf_enabled && !windowed_e2e_enabled)
                 .then(|| Self::default_session_state_path(&workspace_root))
         });
 
@@ -322,6 +347,7 @@ impl DesktopLaunchConfig {
             smoke,
             beta,
             manual_perf,
+            windowed_e2e,
             session_state,
             diagnostics_export,
         })
@@ -4003,6 +4029,8 @@ pub fn run_from_env() -> Result<()> {
         beta::run_beta_workflow(beta_config).map(|_| ())
     } else if let Some(smoke_config) = config.smoke.clone() {
         smoke::run_smoke(config, smoke_config)
+    } else if let Some(e2e_config) = config.windowed_e2e.clone() {
+        crate::windowed_e2e::run_windowed_gui_e2e(config, e2e_config)
     } else {
         run_native(config)
     }

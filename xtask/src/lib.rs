@@ -24,3 +24,4 @@ pub mod release_pipeline;
 pub mod signing;
 pub mod training_corpus;
 pub mod update_drill;
+pub mod windowed_gui_e2e;
