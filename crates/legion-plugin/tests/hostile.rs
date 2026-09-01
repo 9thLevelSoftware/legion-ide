@@ -11,7 +11,8 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 use legion_plugin::{PluginAuditEntry, PluginAuditKind, PluginRuntimeState, WasmPluginHost};
@@ -97,18 +98,25 @@ fn hostile_fixture_path(name: &str) -> PathBuf {
         .join(format!("{name}.wat"))
 }
 
+fn unique_temp_wasm(label: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    // pid + monotonic seq, not the clock: macOS `as_nanos()` can collide when
+    // cargo runs these tests in parallel, and a second writer truncating the
+    // shared path leaves `load_fixture` compiling an empty file.
+    std::env::temp_dir().join(format!(
+        "legion-plugin-hostile-{label}-{}-{}.wasm",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 /// Assemble a hostile WAT fixture into a real `.wasm` file on disk.
 ///
 /// The host reads and compiles these bytes exactly as it would a shipped
 /// plugin artifact: nothing here models a plugin in Rust.
 fn compile_fixture(name: &str) -> PathBuf {
     let source = fs::read_to_string(hostile_fixture_path(name)).expect("read hostile fixture");
-    let mut path = std::env::temp_dir();
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    path.push(format!("legion-plugin-hostile-{name}-{unique}.wasm"));
+    let path = unique_temp_wasm(name);
     let wasm = wat::parse_str(&source).expect("compile hostile fixture");
     assert_eq!(
         &wasm[..4],
@@ -466,13 +474,7 @@ fn a_hostile_plugin_cannot_take_the_host_down_with_it() {
         );
     }
 
-    let benign = std::env::temp_dir().join(format!(
-        "legion-plugin-benign-{}.wasm",
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock")
-            .as_nanos()
-    ));
+    let benign = unique_temp_wasm("benign");
     fs::write(
         &benign,
         wat::parse_str(r#"(module (func (export "run") (result i32) i32.const 42))"#)
