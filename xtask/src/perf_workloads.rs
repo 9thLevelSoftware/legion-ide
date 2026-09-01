@@ -81,7 +81,11 @@ const LEGION_REPO_BUDGET_MILLIS: u64 = 120_000;
 /// and ~950 s with a cold one behind Windows Defender: a 13x spread that has
 /// nothing to do with Legion. Product search opens and reads all 100 000 files
 /// on a single thread (`WalkBuilder::build`, not `build_parallel`), so the
-/// number is dominated by the host's per-file-open cost.
+/// number is dominated by the host's per-file-open cost. Hosted
+/// `legion-gates.yml` disables Defender realtime scanning on the Windows
+/// runner (and excludes workspace/temp/cargo) so that job is not gated on
+/// antivirus. The 30-minute ceiling still has to hold on a laptop that did
+/// not.
 ///
 /// A tight ceiling here would gate on the machine. 30 minutes still catches the
 /// failures worth catching — a search that does not terminate, or one that got
