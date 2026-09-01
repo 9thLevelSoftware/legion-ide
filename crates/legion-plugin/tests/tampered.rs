@@ -15,7 +15,7 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use legion_plugin::{
@@ -148,12 +148,12 @@ fn honest_artifact(manifest_id: &str) -> SignedExtensionArtifact {
 
 /// Write artifact bytes to a real file so the host would genuinely execute them.
 fn spill(label: &str, bytes: &[u8]) -> PathBuf {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    let mut path = std::env::temp_dir();
-    path.push(format!("legion-plugin-tampered-{label}-{unique}.wasm"));
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "legion-plugin-tampered-{label}-{}-{}.wasm",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     fs::write(&path, bytes).expect("fixture write must succeed");
     path
 }

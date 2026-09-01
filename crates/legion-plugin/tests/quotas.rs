@@ -8,7 +8,8 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 use legion_plugin::{PluginAuditKind, PluginRuntimeState, WasmPluginHost};
@@ -72,12 +73,12 @@ fn manifest(max_host_calls: u32) -> PluginManifest {
 }
 
 fn write_fixture_wasm(name: &str, wat_source: &str) -> PathBuf {
-    let mut path = std::env::temp_dir();
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock")
-        .as_nanos();
-    path.push(format!("legion-plugin-{name}-{unique}.wasm"));
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "legion-plugin-{name}-{}-{}.wasm",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let wasm = wat::parse_str(wat_source).expect("compile fixture wat to wasm");
     assert_eq!(
         &wasm[..4],
