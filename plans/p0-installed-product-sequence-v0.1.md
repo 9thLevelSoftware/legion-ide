@@ -132,7 +132,7 @@ Follow the existing smoke-promotion clock in [`plans/evidence/production/WS-P0/T
 | --- | --- | --- | --- | --- | --- |
 | GAP-09.1 | Commit measured renderer reports, including `large_file_manual_renderer_perf.toml` | `xtask/src/perf_harness.rs`, `plans/evidence/perf-harness-trend/` | `cargo run -p xtask -- perf-harness`; `verify-perf-harness` | Reports exist for the current SHA on at least one OS; 100MB row is paint, not text-model | Do not treat `large_file_perf` (EditorEngine) as paint. **Landed 2026-09-01** on #198 |
 | GAP-09.2 | Fail-closed armed budgets for the renderer rows that have reports | `.github/workflows/legion-gates.yml` | gates job without `LEGION_PERF_FAIL_ON_BUDGET_MS=0` on those rows | Red build on budget miss | Keep skeleton rows report-only if still synthetic. **Landed 2026-09-01** on #200 |
-| GAP-09.3 | Lexical indexer off the file-open path | `crates/legion-app/src/lib.rs` `bind_opened_file` | `product_perf` p8.startup; typing tests | Open no longer waits on `LexicalIndexer` | Do not block save or first paint on index |
+| GAP-09.3 | Lexical indexer off the file-open path | `crates/legion-app/src/lib.rs` `bind_opened_file` | `product_perf` p8.startup; typing tests | Open no longer waits on `LexicalIndexer` | Do not block save or first paint on index. **Landed 2026-09-01** on #201 |
 
 ### GAP-05 — Accessibility (P0-05)
 
