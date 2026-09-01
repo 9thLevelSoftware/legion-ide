@@ -109,6 +109,7 @@ render_config() {
     -e "s|__BINARIES_DIR__|$(sed_escape "$(toml_escape "$BINARIES_DIR")")|g" \
     -e "s|__OUT_DIR__|$(sed_escape "$(toml_escape "$STAGING_DIR")")|g" \
     -e "s|__PACKAGING_DIR__|$(sed_escape "$(toml_escape "$PACKAGING_DIR")")|g" \
+    -e "s|__REPO_ROOT__|$(sed_escape "$(toml_escape "$REPO_ROOT")")|g" \
     "$PACKAGING_DIR/Packager.toml" > "$CONFIG_PATH"
 }
 
@@ -127,6 +128,10 @@ mkdir -p "$OUTPUT_DIR"
 mkdir "$STAGING_DIR"
 trap 'rm -rf -- "$STAGING_DIR"' EXIT
 CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" cargo build --release -p legion-desktop
+mkdir -p "$BINARIES_DIR"
+cp "$REPO_ROOT/LICENSE" "$BINARIES_DIR/LICENSE"
+cp "$REPO_ROOT/docs/PRIVACY.md" "$BINARIES_DIR/PRIVACY.md"
+cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$BINARIES_DIR/THIRD_PARTY_NOTICES.md"
 CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" cargo packager --release --config "$CONFIG_PATH"
 
 PACKAGE_CANDIDATE=""

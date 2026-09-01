@@ -8,6 +8,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 | --- | --- |
 | New agent or contributor | `AGENTS.md` at the repo root, then this index |
 | End user or product reader | `USER_GUIDE.md` |
+| Privacy / data-handling reader | `PRIVACY.md` |
 | Architect / reviewer | `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` |
 | Security reviewer / vulnerability reporter | `SECURITY.md` |
 | Operator running the gates | `OPERATOR_RUNBOOK.md` |
@@ -20,6 +21,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 ## Canonical documents
 
 - `USER_GUIDE.md` — end-user entry point for the current product paths, support surfaces, and where to go next.
+- `PRIVACY.md` — user-facing privacy policy: Manual zero-egress, opt-in AI, no phone-home, metadata-only support bundles.
 - `KEYBOARD_REFERENCE.md` — the projected shortcut labels that are currently surfaced by the product UI.
 - `TROUBLESHOOTING.md` — diagnostic bundle guidance for smoke failures, package failures, and release support.
 - `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules across the UI, app composition, workspace/project, AI/provider, and other layers. Read this before making any change that crosses a layer boundary.
@@ -32,6 +34,8 @@ This index is the canonical entry point for the Legion IDE documentation set und
 
 ## Supporting material outside `docs/`
 
+- `../LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
+- `../THIRD_PARTY_NOTICES.md` — third-party notices shipped with native packages.
 - `../AGENTS.md` — concise agent/developer invariants and required phase gates. Lives at the repo root so that agents see it first.
 - `../plans/` — phase plans, evidence packages, ADRs, and the product-readiness ledger.
 - `../plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md` — **historical / supporting.** Pre-rename consolidated E2E plan and the original `plans/legion-e2e/source-package/` planning set. Do not use as current planning input; see `../plans/legion-production-master-plan-v0.2.md` for the current product path.

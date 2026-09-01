@@ -11,6 +11,13 @@ pub const WINDOWS_EXECUTABLE_NAME: &str = "legion-desktop.exe";
 /// The manifest file written into dry-run or package output directories.
 pub const PACKAGE_MANIFEST_NAME: &str = "legion-desktop-package-manifest.txt";
 
+/// Legal files copied next to the packaged executable (source relative to repo root, dest name).
+pub const LEGAL_NOTICE_FILES: &[(&str, &str)] = &[
+    ("LICENSE", "LICENSE"),
+    ("docs/PRIVACY.md", "PRIVACY.md"),
+    ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
+];
+
 /// Supported package build profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageProfile {
@@ -82,6 +89,8 @@ impl WindowsPackageConfig {
 /// Resolved package layout and commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowsPackagePlan {
+    /// Repository root containing `Cargo.toml`.
+    pub workspace_root: PathBuf,
     /// Cargo build profile.
     pub profile: PackageProfile,
     /// Cargo command arguments needed before copying the executable.
@@ -167,6 +176,7 @@ pub fn plan_windows_package(
     }
 
     Ok(WindowsPackagePlan {
+        workspace_root: config.workspace_root.clone(),
         profile: config.profile,
         cargo_args,
         executable_source,
@@ -185,7 +195,7 @@ pub fn package_manifest(plan: &WindowsPackagePlan, dry_run: bool) -> String {
         .join(" ");
 
     format!(
-        "package: legion-desktop\r\nplatform: windows\r\nprofile: {}\r\ndry_run: {}\r\ncargo_command: {}\r\nsource_executable: {}\r\npackage_directory: {}\r\npackage_executable: {}\r\n",
+        "package: legion-desktop\r\nplatform: windows\r\nprofile: {}\r\ndry_run: {}\r\ncargo_command: {}\r\nsource_executable: {}\r\npackage_directory: {}\r\npackage_executable: {}\r\nlegal_license: LICENSE\r\nlegal_privacy: PRIVACY.md\r\nlegal_third_party_notices: THIRD_PARTY_NOTICES.md\r\n",
         plan.profile.as_str(),
         dry_run,
         cargo_command,
@@ -195,9 +205,30 @@ pub fn package_manifest(plan: &WindowsPackagePlan, dry_run: bool) -> String {
     )
 }
 
+/// Copy LICENSE, privacy policy, and third-party notices into a package directory.
+pub fn copy_legal_notices(workspace_root: &Path, package_dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(package_dir)?;
+    for (source, destination) in LEGAL_NOTICE_FILES {
+        let from = workspace_root.join(source);
+        let to = package_dir.join(destination);
+        fs::copy(&from, &to).map_err(|source_err| {
+            io::Error::new(
+                source_err.kind(),
+                format!(
+                    "copy legal notice {} -> {}: {source_err}",
+                    from.display(),
+                    to.display()
+                ),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Writes the package manifest to the plan output directory.
 pub fn write_package_manifest(plan: &WindowsPackagePlan, dry_run: bool) -> io::Result<()> {
     fs::create_dir_all(&plan.package_dir)?;
+    copy_legal_notices(&plan.workspace_root, &plan.package_dir)?;
     fs::write(&plan.manifest_path, package_manifest(plan, dry_run))
 }
 

@@ -901,6 +901,8 @@ fn palette_command_mode_covers_registered_command_catalog() {
         PendingConfirmation,
         /// Command that returns `AppCommandOutcome::Noop` (e.g. LSP lifecycle).
         Noop,
+        AboutOpened,
+        SupportBundleExported,
     }
 
     struct CommandCase {
@@ -1002,6 +1004,18 @@ fn palette_command_mode_covers_registered_command_catalog() {
             expected_outcome: ExpectedOutcome::Noop,
             dirty_before_save: false,
         },
+        CommandCase {
+            query: ">help about",
+            expected_title: "Help: About",
+            expected_outcome: ExpectedOutcome::AboutOpened,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">help export support bundle",
+            expected_title: "Help: Export Support Bundle",
+            expected_outcome: ExpectedOutcome::SupportBundleExported,
+            dirty_before_save: false,
+        },
     ];
 
     let workspace = TempWorkspace::new();
@@ -1078,6 +1092,18 @@ fn palette_command_mode_covers_registered_command_catalog() {
                 assert!(
                     matches!(outcome, AppCommandOutcome::Noop),
                     "expected Noop outcome, got {outcome:?}"
+                )
+            }
+            ExpectedOutcome::AboutOpened => {
+                assert!(
+                    matches!(outcome, AppCommandOutcome::AboutOpened),
+                    "expected AboutOpened, got {outcome:?}"
+                )
+            }
+            ExpectedOutcome::SupportBundleExported => {
+                assert!(
+                    matches!(outcome, AppCommandOutcome::SupportBundleExported(_)),
+                    "expected SupportBundleExported, got {outcome:?}"
                 )
             }
         }

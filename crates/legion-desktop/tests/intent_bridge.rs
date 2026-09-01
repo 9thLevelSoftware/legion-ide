@@ -894,6 +894,14 @@ fn intent_bridge_routes_settings_actions() {
         DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
     );
     assert_eq!(
+        translate(DesktopAction::OpenAbout),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenAbout)
+    );
+    assert_eq!(
+        translate(DesktopAction::ExportSupportBundle),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ExportSupportBundle)
+    );
+    assert_eq!(
         translate(DesktopAction::SetThemePreference {
             preference: ThemePreferenceProjection::System,
         }),

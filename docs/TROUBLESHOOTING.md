@@ -13,6 +13,18 @@ The goal is to capture enough metadata to reproduce the failure without pasting 
 
 ## Common support artifacts
 
+### Help / About support bundle
+
+From a running desktop session, command palette **Help: Export Support Bundle**
+(or Settings → Privacy → Export support bundle) writes
+`.legion/support-bundle.md` in the opened workspace. The file is metadata-only:
+version, mode, consent labels, tab counts, and crash-summary identifiers. It
+must not contain editor text, dirty buffers, queries, prompts, or secrets.
+Attach that file to a bug report instead of pasting buffer contents.
+
+`--diagnostics-export` remains the headless/smoke path used by CI; Help/About is
+the in-app path and does not require that flag.
+
 ### GUI smoke artifacts
 
 - Phase 6 session state: `target/gui-phase6-session.json`

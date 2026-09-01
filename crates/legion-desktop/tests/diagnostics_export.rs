@@ -157,3 +157,66 @@ fn diagnostics_export_writes_metadata_only_runtime_status() {
     assert!(!updated.contains("small_buffer_preview"));
     assert!(!updated.contains("source_body"));
 }
+
+#[test]
+fn help_export_support_bundle_writes_metadata_only_without_diagnostics_flag() {
+    let workspace = TempWorkspace::new("legion_desktop_support_bundle");
+    let file = workspace.write("main.txt", "hello");
+    let session_path = workspace.path().join("session.json");
+    let mut runtime = DesktopRuntime::open(
+        DesktopLaunchConfig::new(
+            workspace.path().to_path_buf(),
+            Some(file.to_string_lossy().into_owned()),
+        )
+        .with_session_state(session_path),
+    )
+    .expect("runtime should open");
+
+    assert!(
+        runtime
+            .handle_action(DesktopAction::ExportSupportBundle)
+            .is_ok(),
+        "Help/About export must work without --diagnostics-export"
+    );
+
+    let bundle_path = workspace.path().join(".legion").join("support-bundle.md");
+    let body = fs::read_to_string(&bundle_path).expect("support bundle should exist");
+    assert!(body.contains("metadata_only: true"));
+    assert!(body.contains("open_tab_count:"));
+    assert!(!body.contains("hello"));
+    assert!(!body.contains("SECRET_DIRTY_BODY"));
+
+    runtime
+        .handle_action(DesktopAction::InsertText {
+            text: "SECRET_DIRTY_BODY".to_string(),
+            at: TextCoordinate {
+                line: 0,
+                character: 5,
+                byte_offset: Some(5),
+                utf16_offset: Some(5),
+            },
+        })
+        .expect("edit should be routed through app authority");
+    runtime
+        .handle_action(DesktopAction::ExportSupportBundle)
+        .expect("re-export after dirty edit");
+    let updated = fs::read_to_string(&bundle_path).expect("updated bundle");
+    assert!(updated.contains("metadata_only: true"));
+    assert!(!updated.contains("SECRET_DIRTY_BODY"));
+    assert!(!updated.contains("hello"));
+}
+
+#[test]
+fn help_about_action_is_reachable_without_diagnostics_flag() {
+    let workspace = TempWorkspace::new("legion_desktop_about");
+    let file = workspace.write("main.txt", "hello");
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        workspace.path().to_path_buf(),
+        Some(file.to_string_lossy().into_owned()),
+    ))
+    .expect("runtime should open");
+
+    runtime
+        .handle_action(DesktopAction::OpenAbout)
+        .expect("Help: About should dispatch without --diagnostics-export");
+}

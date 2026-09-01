@@ -2513,7 +2513,10 @@ pub fn palette_command_group(result_id: &str) -> PaletteCommandGroup {
     if command_id.starts_with("lsp-") {
         return PaletteCommandGroup::Run;
     }
-    if command_id.starts_with("preferences-") || command_id == "close-palette" {
+    if command_id.starts_with("preferences-")
+        || command_id.starts_with("help-")
+        || command_id == "close-palette"
+    {
         return PaletteCommandGroup::View;
     }
     if matches!(
@@ -3019,6 +3022,10 @@ pub enum CommandDispatchIntent {
     },
     /// Open the projected Settings surface.
     OpenSettings,
+    /// Open the Help/About overlay.
+    OpenAbout,
+    /// Export a metadata-only support bundle through app authority.
+    ExportSupportBundle,
     /// Attach an optional local ACP adapter host for delegated proposal work.
     AttachAcpHost {
         /// Executable or program path.

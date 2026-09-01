@@ -285,6 +285,10 @@ pub enum DesktopAction {
     },
     /// Open the projected Settings surface.
     OpenSettings,
+    /// Open the Help/About overlay.
+    OpenAbout,
+    /// Export a metadata-only support bundle through app authority.
+    ExportSupportBundle,
     /// Update theme preference through app authority.
     SetThemePreference {
         /// Requested theme preference.
@@ -1794,6 +1798,12 @@ impl DesktopCommandBridge {
             }
             DesktopAction::OpenSettings => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
+            }
+            DesktopAction::OpenAbout => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenAbout)
+            }
+            DesktopAction::ExportSupportBundle => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ExportSupportBundle)
             }
             DesktopAction::SetThemePreference { preference } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetThemePreference {
