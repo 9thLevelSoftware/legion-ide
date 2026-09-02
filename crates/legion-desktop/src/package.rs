@@ -18,6 +18,30 @@ pub const LEGAL_NOTICE_FILES: &[(&str, &str)] = &[
     ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
 ];
 
+/// Signer status written into unsigned native packages (GAP-06.1).
+/// Authenticode / Developer ID / minisign are GAP-02.2 and are not this SKU.
+pub const UNSIGNED_BETA_SIGNER_STATUS: &str = "unsigned-beta/no-os-code-signing";
+
+/// Product SKU selected at package time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageSku {
+    /// Default `ai` desktop. Not the Manual SKU.
+    Default,
+    /// `--no-default-features --features offline`. Not the default AI desktop.
+    Manual,
+}
+
+impl PackageSku {
+    /// Stable SKU id for manifests and native-package metadata.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Manual => "manual",
+        }
+    }
+}
+
 /// Supported package build profiles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageProfile {
@@ -37,12 +61,21 @@ impl PackageProfile {
         }
     }
 
-    /// Returns cargo arguments for the selected profile.
+    /// Returns cargo arguments for the selected profile and SKU.
     #[must_use]
-    pub fn cargo_args(self) -> Vec<&'static str> {
-        let mut args = vec!["build", "-p", "legion-desktop"];
+    pub fn cargo_args(self, sku: PackageSku) -> Vec<String> {
+        let mut args = vec![
+            "build".to_string(),
+            "-p".to_string(),
+            "legion-desktop".to_string(),
+        ];
+        if matches!(sku, PackageSku::Manual) {
+            args.push("--no-default-features".to_string());
+            args.push("--features".to_string());
+            args.push("offline".to_string());
+        }
         if matches!(self, Self::Release) {
-            args.push("--release");
+            args.push("--release".to_string());
         }
         args
     }
@@ -57,6 +90,8 @@ pub struct WindowsPackageConfig {
     pub output_dir: PathBuf,
     /// Cargo build profile.
     pub profile: PackageProfile,
+    /// Product SKU (default AI vs Manual offline).
+    pub sku: PackageSku,
     /// Optional explicit cargo target triple to cross-compile the Windows
     /// executable. Required when packaging from a non-Windows host.
     pub target_triple: Option<String>,
@@ -74,8 +109,16 @@ impl WindowsPackageConfig {
             workspace_root: workspace_root.into(),
             output_dir: output_dir.into(),
             profile,
+            sku: PackageSku::Default,
             target_triple: None,
         }
+    }
+
+    /// Sets the product SKU. Manual is `--no-default-features --features offline`.
+    #[must_use]
+    pub fn with_sku(mut self, sku: PackageSku) -> Self {
+        self.sku = sku;
+        self
     }
 
     /// Sets the cargo target triple used to cross-compile the Windows binary.
@@ -93,6 +136,8 @@ pub struct WindowsPackagePlan {
     pub workspace_root: PathBuf,
     /// Cargo build profile.
     pub profile: PackageProfile,
+    /// Product SKU used to build this package.
+    pub sku: PackageSku,
     /// Cargo command arguments needed before copying the executable.
     pub cargo_args: Vec<String>,
     /// Expected built executable path.
@@ -164,12 +209,7 @@ pub fn plan_windows_package(
     let executable_destination = config.output_dir.join(WINDOWS_EXECUTABLE_NAME);
     let manifest_path = config.output_dir.join(PACKAGE_MANIFEST_NAME);
 
-    let mut cargo_args: Vec<String> = config
-        .profile
-        .cargo_args()
-        .into_iter()
-        .map(str::to_string)
-        .collect();
+    let mut cargo_args = config.profile.cargo_args(config.sku);
     if let Some(triple) = target_triple {
         cargo_args.push("--target".to_string());
         cargo_args.push(triple.to_string());
@@ -178,6 +218,7 @@ pub fn plan_windows_package(
     Ok(WindowsPackagePlan {
         workspace_root: config.workspace_root.clone(),
         profile: config.profile,
+        sku: config.sku,
         cargo_args,
         executable_source,
         package_dir: config.output_dir.clone(),
@@ -195,8 +236,10 @@ pub fn package_manifest(plan: &WindowsPackagePlan, dry_run: bool) -> String {
         .join(" ");
 
     format!(
-        "package: legion-desktop\r\nplatform: windows\r\nprofile: {}\r\ndry_run: {}\r\ncargo_command: {}\r\nsource_executable: {}\r\npackage_directory: {}\r\npackage_executable: {}\r\nlegal_license: LICENSE\r\nlegal_privacy: PRIVACY.md\r\nlegal_third_party_notices: THIRD_PARTY_NOTICES.md\r\n",
+        "package: legion-desktop\r\nplatform: windows\r\nprofile: {}\r\nsku: {}\r\nsigner_status: {}\r\ndry_run: {}\r\ncargo_command: {}\r\nsource_executable: {}\r\npackage_directory: {}\r\npackage_executable: {}\r\nlegal_license: LICENSE\r\nlegal_privacy: PRIVACY.md\r\nlegal_third_party_notices: THIRD_PARTY_NOTICES.md\r\n",
         plan.profile.as_str(),
+        plan.sku.as_str(),
+        UNSIGNED_BETA_SIGNER_STATUS,
         dry_run,
         cargo_command,
         display_path(&plan.executable_source),

@@ -5,6 +5,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("wix", "dmg", "deb", "appimage")]
     [string]$Format,
+    [ValidateSet("default", "manual")]
+    [string]$Sku = "default",
     [Alias("OutputDir", "Out")]
     [string]$OutDir = "target/native-package/output",
     [switch]$DryRun
@@ -101,7 +103,11 @@ try {
     $env:CARGO_TARGET_DIR = Join-Path $NativeDir "cargo-target"
     Push-Location $RepoRoot
     try {
-        cargo build --release -p legion-desktop
+        if ($Sku -eq "manual") {
+            cargo build --release -p legion-desktop --no-default-features --features offline
+        } else {
+            cargo build --release -p legion-desktop
+        }
         Assert-X64Executable (Join-Path $BinariesDir "legion-desktop.exe")
         New-Item -ItemType Directory -Force -Path $BinariesDir | Out-Null
         Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $BinariesDir "LICENSE") -Force
@@ -130,6 +136,7 @@ try {
         "platform = `"$Platform`""
         "architecture = `"$Architecture`""
         "format = `"$Format`""
+        "sku = `"$Sku`""
         'signer_status = "unsigned-beta/no-os-code-signing"'
     )
     $metadata = ($metadataLines -join "`n") + "`n"

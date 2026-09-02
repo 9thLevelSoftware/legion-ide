@@ -19,6 +19,7 @@ pub(super) fn render_about_panel(
         "Version {}",
         env!("CARGO_PKG_VERSION")
     )));
+    ui.label(theme::muted(compile_time_sku_label()));
     ui.label(theme::muted(format!(
         "Mode: {}",
         snapshot.product_mode.label()
@@ -59,4 +60,12 @@ pub(super) fn render_about_panel(
         "Export writes .legion/support-bundle.md (metadata only: no editor text, secrets, or raw crash bodies).",
     ));
     ui.id()
+}
+
+fn compile_time_sku_label() -> &'static str {
+    if cfg!(all(feature = "offline", not(feature = "ai"))) {
+        "SKU: Manual (offline build; unsigned-beta). Not the default AI desktop."
+    } else {
+        "SKU: Default (AI-capable). Not the Manual SKU."
+    }
 }

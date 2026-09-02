@@ -4,13 +4,15 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/package-native.sh --version 0.0.N --format {dmg|deb|appimage} [--out-dir DIRECTORY] [--dry-run]
+Usage: scripts/package-native.sh --version 0.0.N --format {dmg|deb|appimage} [--sku default|manual] [--out-dir DIRECTORY] [--dry-run]
        N must be at least 1 with no zero padding (for example, 0.0.1).
+       --sku manual builds --no-default-features --features offline (unsigned-beta).
 EOF
 }
 
 VERSION=""
 FORMAT=""
+SKU="default"
 OUT_DIR="target/native-package/output"
 DRY_RUN=0
 
@@ -24,6 +26,11 @@ while [[ $# -gt 0 ]]; do
     --format)
       [[ $# -ge 2 ]] || { echo "--format requires a value" >&2; exit 2; }
       FORMAT="$2"
+      shift 2
+      ;;
+    --sku)
+      [[ $# -ge 2 ]] || { echo "--sku requires a value" >&2; exit 2; }
+      SKU="$2"
       shift 2
       ;;
     --out-dir|--output-dir|--out)
@@ -51,6 +58,10 @@ done
 case "$FORMAT" in
   dmg|deb|appimage) ;;
   *) echo "--format must be one of: dmg, deb, appimage" >&2; exit 2 ;;
+esac
+case "$SKU" in
+  default|manual) ;;
+  *) echo "--sku must be default or manual" >&2; exit 2 ;;
 esac
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -127,7 +138,11 @@ fi
 mkdir -p "$OUTPUT_DIR"
 mkdir "$STAGING_DIR"
 trap 'rm -rf -- "$STAGING_DIR"' EXIT
-CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" cargo build --release -p legion-desktop
+CARGO_BUILD=(cargo build --release -p legion-desktop)
+if [[ "$SKU" == "manual" ]]; then
+  CARGO_BUILD+=(--no-default-features --features offline)
+fi
+CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" "${CARGO_BUILD[@]}"
 mkdir -p "$BINARIES_DIR"
 cp "$REPO_ROOT/LICENSE" "$BINARIES_DIR/LICENSE"
 cp "$REPO_ROOT/docs/PRIVACY.md" "$BINARIES_DIR/PRIVACY.md"
@@ -162,6 +177,7 @@ git_sha = "$GIT_SHA"
 platform = "$PLATFORM"
 architecture = "$ARCH"
 format = "$FORMAT"
+sku = "$SKU"
 signer_status = "unsigned-beta/no-os-code-signing"
 EOF
 

@@ -177,7 +177,7 @@ Depends on: GAP-02.2 for a signed Manual channel; GAP-01.1 for the install/launc
 
 | Task | Outcome | Primary files | Verification | Acceptance | Stop condition |
 | --- | --- | --- | --- | --- | --- |
-| GAP-06.1 | Separate `--no-default-features --features offline` native package channel, labeled Manual in installer and About | `crates/legion-desktop/Cargo.toml`, `scripts/package-native.*`, `xtask` release descriptors | `cargo check -p legion-desktop --no-default-features --features offline`; package layout | Artifact SBOM/deps do not include provider HTTP stacks as product features | Default `ai` desktop build is not the Manual SKU |
+| GAP-06.1 | Separate `--no-default-features --features offline` native package channel, labeled Manual in installer and About | `crates/legion-desktop/Cargo.toml`, `scripts/package-native.*`, `xtask` release descriptors | `cargo check -p legion-desktop --no-default-features --features offline`; package layout | Artifact SBOM/deps do not include provider HTTP stacks as product features | Default `ai` desktop build is not the Manual SKU. **Unsigned packaging 2026-09-02** (`--sku manual`); still unsigned-beta. Signed Manual waits on GAP-02.2. |
 | GAP-06.2 | OS-level no-egress on a clean VM (packet capture) for the Manual artifact | evidence under `plans/evidence/production/WS-MANUAL-01/` | capture logs committed or summarized with SHA | Open/edit/save/search/build/test/git produce zero DNS/TCP/UDP to providers | AppComposition `manual_zero_egress` is not this task |
 
 ---
