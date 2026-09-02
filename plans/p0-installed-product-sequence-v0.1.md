@@ -138,7 +138,7 @@ Follow the existing smoke-promotion clock in [`plans/evidence/production/WS-P0/T
 
 | Task | Outcome | Primary files | Verification | Acceptance | Stop condition |
 | --- | --- | --- | --- | --- | --- |
-| GAP-05.1 | Finish the renderer-backed keyboard-only path in the PR-15 packet | `crates/legion-desktop/tests/keyboard_nav.rs`, `plans/evidence/accessibility/PR-15-manual-keyboard-path.md` | desktop keyboard tests; named remaining keymap routes closed or explicitly cut | Evidence lists which routes are certified vs residual | AccessKit unit roles alone are not certification |
+| GAP-05.1 | Finish the renderer-backed keyboard-only path in the PR-15 packet | `crates/legion-desktop/tests/keyboard_nav.rs`, `plans/evidence/accessibility/PR-15-manual-keyboard-path.md` | desktop keyboard tests; named remaining keymap routes closed or explicitly cut | Evidence lists which routes are certified vs residual | AccessKit unit roles alone are not certification. **Landed 2026-09-02** on #202 |
 | GAP-05.2 | Windows NVDA or Narrator transcript of a live window | `plans/evidence/accessibility/`, `scripts/a11y-uia-walk.ps1` | committed transcript + SHA + OS | Names the AT used | UIA tree dump is not a screen-reader session |
 | GAP-05.3 | macOS AX probe + VoiceOver notes | `scripts/` plus evidence | committed AX dump and VoiceOver notes | macOS is no longer "unobserved" | One-off unreproducible dumps stay insufficient |
 | GAP-05.4 | Linux AT-SPI probe + Orca notes | `scripts/` plus evidence | committed AT-SPI dump and Orca notes | Linux is no longer "unobserved" | Same as GAP-05.3 |
