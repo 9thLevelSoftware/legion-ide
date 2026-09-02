@@ -8,6 +8,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 | --- | --- |
 | New agent or contributor | `AGENTS.md` at the repo root, then this index |
 | End user or product reader | `USER_GUIDE.md` |
+| E2E / dogfood automator | `E2E_TESTING_CATALOG.md` |
 | Privacy / data-handling reader | `PRIVACY.md` |
 | Architect / reviewer | `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` |
 | Security reviewer / vulnerability reporter | `SECURITY.md` |
@@ -21,6 +22,7 @@ This index is the canonical entry point for the Legion IDE documentation set und
 ## Canonical documents
 
 - `USER_GUIDE.md` — end-user entry point for the current product paths, support surfaces, and where to go next.
+- `E2E_TESTING_CATALOG.md` — exhaustive current vs expected product behavior map for automated E2E scoring (not a GA claim).
 - `PRIVACY.md` — user-facing privacy policy: Manual zero-egress, opt-in AI, no phone-home, metadata-only support bundles.
 - `KEYBOARD_REFERENCE.md` — the projected shortcut labels that are currently surfaced by the product UI.
 - `TROUBLESHOOTING.md` — diagnostic bundle guidance for smoke failures, package failures, and release support.

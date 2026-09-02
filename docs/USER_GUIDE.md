@@ -15,6 +15,7 @@ A packaged desktop app is not required to read it: a local `cargo run -p legion-
 2. Use `docs/MODES.md` to understand what each product mode allows and forbids.
 3. Use `docs/KEYBOARD_REFERENCE.md` for the current projected shortcut labels.
 4. Use `docs/TROUBLESHOOTING.md` when a smoke, package, or release path fails.
+5. Use `docs/E2E_TESTING_CATALOG.md` to score what the live window, harnesses, and deferred product are each supposed to do.
 
 ## Core product paths
 
