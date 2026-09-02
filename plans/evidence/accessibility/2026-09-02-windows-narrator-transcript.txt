@@ -1,5 +1,5 @@
 AT=Windows Narrator
-AT_VERSION=10.0.26100.8972 (WinBuild.160101.0800)
+AT_VERSION=10.0.26100.8972
 OS=Microsoft Windows 11 Pro 10.0.26200
 ARCH=Win32NT AMD64
 GIT_SHA=2bbbfb392757a87a8400bec498ae703629db0b1a
@@ -8,6 +8,7 @@ WINDOW_TITLE=Legion IDE Smoke
 PROCESS=legion-desktop
 SPEECH_RECAP_WINDOW=True
 PROBE=scripts/a11y-narrator-transcript.ps1
+UTTERANCE_COUNT=10
 TRANSCRIPT_BEGIN
 Legion IDE Smoke region, Manual, button, current,
 Assist, button,

@@ -1378,18 +1378,83 @@ fn gap05_2_windows_narrator_transcript_names_at_and_live_window() {
     assert!(probe.contains("Speech Recap"));
     assert!(probe.contains("GAP-05.2"));
     assert!(!probe.contains("UIA_WALK_OK"));
+    assert!(
+        probe.contains("LEGION_NARRATOR_SENTINEL_"),
+        "probe must sentinel-clear the clipboard before each copy chord"
+    );
+    assert!(
+        probe.contains("exit 7"),
+        "NARRATOR_NOT_RUNNING must use exit 7, not share exit 6 with no-speech"
+    );
+    assert!(
+        probe.contains("Test-LegionProductSpeech"),
+        "probe must reject stale or non-Legion clipboard text"
+    );
 
     let transcript = fs::read_to_string(
         root.join("plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt"),
     )
     .expect("committed Narrator transcript");
+    let header_keys = [
+        "AT=",
+        "AT_VERSION=",
+        "OS=",
+        "ARCH=",
+        "GIT_SHA=",
+        "CAPTURED_AT_UTC=",
+        "WINDOW_TITLE=",
+        "PROCESS=",
+        "SPEECH_RECAP_WINDOW=",
+        "PROBE=",
+        "UTTERANCE_COUNT=",
+    ];
+    for key in header_keys {
+        assert!(
+            probe.contains(key),
+            "probe must emit header `{key}` so -OutFile matches the committed transcript"
+        );
+        assert!(
+            transcript.contains(key),
+            "committed transcript missing probe header `{key}`"
+        );
+    }
+    let at_version = transcript
+        .lines()
+        .find(|line| line.starts_with("AT_VERSION="))
+        .expect("AT_VERSION header");
+    assert!(
+        !at_version.contains("WinBuild"),
+        "AT_VERSION must be Narrator.exe FileVersion from the probe, not a hand-edited ProductVersion"
+    );
+    let utterance_count = transcript
+        .lines()
+        .find(|line| line.starts_with("UTTERANCE_COUNT="))
+        .and_then(|line| line.strip_prefix("UTTERANCE_COUNT="))
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("UTTERANCE_COUNT header");
+    let body_lines = transcript
+        .lines()
+        .skip_while(|line| *line != "TRANSCRIPT_BEGIN")
+        .skip(1)
+        .take_while(|line| *line != "TRANSCRIPT_END")
+        .count();
+    assert_eq!(
+        utterance_count, body_lines,
+        "UTTERANCE_COUNT must match the committed transcript body"
+    );
     assert!(transcript.contains("AT=Windows Narrator"));
-    assert!(transcript.contains("GIT_SHA="));
-    assert!(transcript.contains("OS=Microsoft Windows"));
     assert!(transcript.contains("WINDOW_TITLE=Legion IDE Smoke"));
-    assert!(transcript.contains("Manual, button"));
-    assert!(transcript.contains("Assist, button"));
-    assert!(transcript.contains("PROBLEMS (0), button"));
+    for needle in [
+        "Manual, button",
+        "Assist, button",
+        "Delegate, button",
+        "PROBLEMS (0), button",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "committed transcript missing {needle}"
+        );
+    }
     assert!(
         !transcript.contains("UIA_WALK_OK"),
         "a UIA tree dump is not a screen-reader session"

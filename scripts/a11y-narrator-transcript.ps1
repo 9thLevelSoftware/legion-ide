@@ -17,7 +17,9 @@
 #      powershell -NoProfile -ExecutionPolicy Bypass -File scripts/a11y-narrator-transcript.ps1
 #
 # Exit codes: 0 captured; 3 UIA unavailable; 4 process not running;
-# 5 no top-level window; 6 Narrator did not record spoken text.
+# 5 no top-level window; 6 Narrator did not record spoken text
+# (empty, stale clipboard, or no Legion product speech);
+# 7 Narrator did not start.
 
 param(
   [string]$ProcName = "legion-desktop",
@@ -116,19 +118,37 @@ if (-not (Get-Process -Name Narrator -ErrorAction SilentlyContinue)) {
 
 if (-not (Get-Process -Name Narrator -ErrorAction SilentlyContinue)) {
   Write-Output "NARRATOR_NOT_RUNNING"
-  exit 6
+  exit 7
 }
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
 
+function Set-ClipboardSentinel([string]$sentinel) {
+  try {
+    [System.Windows.Forms.Clipboard]::SetText($sentinel)
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 function Copy-LastSpokenPhrase {
+  $sentinel = "LEGION_NARRATOR_SENTINEL_{0}" -f [guid]::NewGuid().ToString("N")
+  if (-not (Set-ClipboardSentinel $sentinel)) {
+    return ""
+  }
   Send-NarratorChord @([NarratorKeys]::VK_CONTROL, [NarratorKeys]::VK_X)
   Start-Sleep -Milliseconds 400
+  $text = ""
   try {
-    return [System.Windows.Forms.Clipboard]::GetText()
+    $text = [System.Windows.Forms.Clipboard]::GetText()
   } catch {
     return ""
   }
+  if (-not $text) { return "" }
+  if ($text -eq $sentinel) { return "" }
+  if ($text.StartsWith("LEGION_NARRATOR_SENTINEL_")) { return "" }
+  return $text
 }
 
 [void][NarratorKeys]::ShowWindow($legionHwnd, 9)
@@ -136,10 +156,35 @@ function Copy-LastSpokenPhrase {
 Start-Sleep -Milliseconds 800
 
 $spoken = New-Object "System.Collections.Generic.List[string]"
+function Test-EnvironmentalUtterance([string]$phrase) {
+  # CapsLock chords can make Narrator announce the system volume HUD.
+  return ($phrase -match '(?i)volume level')
+}
+
 function Add-Spoken([string]$phrase) {
-  if ($phrase -and $phrase.Trim().Length -gt 0) {
-    $spoken.Add($phrase.Trim())
+  if (-not $phrase) { return }
+  $trimmed = $phrase.Trim()
+  if ($trimmed.Length -lt 1) { return }
+  if (Test-EnvironmentalUtterance $trimmed) { return }
+  $spoken.Add($trimmed)
+}
+
+function Test-LegionProductSpeech([string]$phrase) {
+  if ($windowName -and $phrase.ToLower().Contains($windowName.ToLower())) {
+    return $true
   }
+  foreach ($needle in @(
+      "Manual, button",
+      "Assist, button",
+      "Delegate, button",
+      "Legion Workflows",
+      "Explorer drawer",
+      "Bottom panel drawer",
+      "PROBLEMS"
+    )) {
+    if ($phrase.ToLower().Contains($needle.ToLower())) { return $true }
+  }
+  return $false
 }
 
 # Narrator+W reads the current window. CapsLock is the default Narrator key.
@@ -203,6 +248,7 @@ $lines = New-Object "System.Collections.Generic.List[string]"
 [void]$lines.Add("WINDOW_TITLE=$windowName")
 [void]$lines.Add("PROCESS=$ProcName")
 [void]$lines.Add("SPEECH_RECAP_WINDOW=$recapFound")
+[void]$lines.Add("PROBE=scripts/a11y-narrator-transcript.ps1")
 [void]$lines.Add("UTTERANCE_COUNT=$($unique.Count)")
 [void]$lines.Add("TRANSCRIPT_BEGIN")
 foreach ($line in $unique) { [void]$lines.Add($line) }
@@ -224,7 +270,11 @@ if ($startedNarrator) {
   }
 }
 
-if ($unique.Count -lt 1) {
+$legionSpoken = 0
+foreach ($line in $unique) {
+  if (Test-LegionProductSpeech $line) { $legionSpoken++ }
+}
+if ($unique.Count -lt 1 -or $legionSpoken -lt 1) {
   Write-Output "NARRATOR_NO_SPEECH"
   exit 6
 }

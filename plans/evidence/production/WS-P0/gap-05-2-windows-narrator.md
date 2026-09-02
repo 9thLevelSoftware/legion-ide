@@ -17,8 +17,19 @@ copied each last-spoken phrase from Narrator itself. Speech Recap opened
 
 Raw capture: [`plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt`](../../accessibility/2026-09-02-windows-narrator-transcript.txt)
 
+That file is the probe's `-OutFile` schema (`AT`, `AT_VERSION` from
+`Narrator.exe` FileVersion, `OS`, `ARCH`, `GIT_SHA`, `CAPTURED_AT_UTC`,
+`WINDOW_TITLE`, `PROCESS`, `SPEECH_RECAP_WINDOW`, `PROBE`,
+`UTTERANCE_COUNT`, then `TRANSCRIPT_BEGIN`/`END`). Re-running
+`scripts/a11y-narrator-transcript.ps1 -OutFile <path>` reproduces those
+header keys; do not hand-edit them.
+
 Repeatable probe: `scripts/a11y-narrator-transcript.ps1` (requires a live
-window, same as `scripts/a11y-uia-walk.ps1`).
+window, same as `scripts/a11y-uia-walk.ps1`). The probe sentinel-clears
+the clipboard before each Narrator+Ctrl+X chord and refuses
+`NARRATOR_TRANSCRIPT_OK` unless at least one utterance is Legion product
+speech (window title or chrome), so a stale clipboard cannot satisfy
+GAP-05.2.
 
 Product utterances Narrator spoke:
 
@@ -43,10 +54,10 @@ to harvest those phrases.
 - Not a ledger promotion of PR-UI-001
 - Not a 3-OS screen-reader bar
 
-The capture also recorded Narrator reading the system volume HUD
-(`N Volume level`) while CapsLock chords were sent. Those lines are
-environmental, not Legion controls, and are omitted from the committed
-product transcript.
+CapsLock chords can make Narrator announce the system volume HUD
+(`N Volume level`). The probe drops those environmental lines before
+writing `-OutFile`, so they do not appear in the committed product
+transcript.
 
 ## Verification
 
