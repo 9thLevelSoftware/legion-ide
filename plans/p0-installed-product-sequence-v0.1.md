@@ -121,7 +121,7 @@ Depends on: Wave 1. GAP-01, GAP-09, and GAP-05 may run in parallel.
 | Task | Outcome | Primary files | Verification | Acceptance | Stop condition |
 | --- | --- | --- | --- | --- | --- |
 | GAP-01.1 | Windowed GUI E2E on an extracted native package (unsigned allowed) | `crates/legion-desktop/src/smoke.rs`, `scripts/verify-native-package.*`, new xtask | local 1-OS run that launches `eframe::run_native` (not `--beta-smoke`) and completes open/edit/save | Report names the binary path, OS, and that a window was created | Do not accept AppComposition `golden-path-5` as this task. **Landed 2026-09-01** on #196 |
-| GAP-01.2 | 3-OS CI job, hard-fail, independent first | `.github/workflows/` (new or extend preview/release verify) | hosted run URLs | Evidence file with three OS artifacts; `continue-on-error` forbidden on the GUI step | Do not fold into PR gates until the T0-D four-green-run clock plus owner sign-off. **Landed 2026-09-02** on #205 (clock 4/4 recorded; not owner sign-off) |
+| GAP-01.2 | 3-OS CI job, hard-fail, independent first | `.github/workflows/` (new or extend preview/release verify) | hosted run URLs | Evidence file with three OS artifacts; `continue-on-error` forbidden on the GUI step | Do not fold into PR gates until the T0-D four-green-run clock plus owner sign-off. **Landed 2026-09-02** on #205; clock 4/4 + owner sign-off in [`gap-01-2-windowed-gui-clock-signoff.md`](evidence/production/WS-P0/gap-01-2-windowed-gui-clock-signoff.md). Still independent; not a required check. |
 | GAP-01.3 | Filled installed-preview journal | `plans/evidence/dogfood/` | journal template fields complete | `YYYY-MM-DD-installed-preview-journal.md` names SHA, OS, result | Checklist-only files are not evidence. **Landed 2026-09-01** on #196 (`plans/evidence/dogfood/2026-09-01-installed-preview-journal.md`) |
 
 Follow the existing smoke-promotion clock in [`plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`](evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md): four consecutive green 3-OS runs and owner sign-off before this job becomes merge-blocking.
@@ -211,4 +211,4 @@ Do not pull these into a P0 wave. They are the full-pass P1–P3 rows:
 
 ## 7. Standing gates
 
-Every implementation PR still runs the 21 local standing gates in `AGENTS.md`. This sequence does not add a 22nd local gate until GAP-01.2's promotion clock completes.
+Every implementation PR still runs the 21 local standing gates in `AGENTS.md`. GAP-01.2's promotion clock is complete (owner sign-off 2026-09-02); windowed-gui remains an independent workflow and is not a 22nd local gate or a `protect-main` required check.
