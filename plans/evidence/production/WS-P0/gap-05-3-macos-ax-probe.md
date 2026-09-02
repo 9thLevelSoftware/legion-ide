@@ -41,6 +41,13 @@ Second hosted dispatch: [run 33636397701](https://github.com/9thLevelSoftware/le
 
 This change: multi-line `if` before `return dumpState`; warm `Atspi.init()` before launching `legion-desktop`.
 
+Third hosted dispatch: [run 33637474631](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33637474631) on `be8e27c7` (#209 branch).
+
+| OS | Result |
+| --- | --- |
+| macos-latest | Still `AX_WALK_FAILED` exit 5. osascript `1228:1236` — `return dumpState` remains a compile error even in a multi-line `if`. Flattened to one `on run` handler with a 2-level window walk and no record returns. |
+| ubuntu-latest | `ATSPI_LAUNCHER=/usr/libexec/at-spi-bus-launcher`, `ATSPI_REGISTRY_READY desktop_children=0`, then still empty `ATSPI_APPS` after the app was up. Registry warmup is not sufficient; AccessKit unix did not publish. Retries + session-bus name dump added. |
+
 GAP-05.3 and GAP-05.4 stay open. Not VoiceOver. Not Orca.
 
 Ledger row statuses are unchanged.
