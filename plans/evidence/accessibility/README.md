@@ -3,6 +3,7 @@
 ## Status
 
 - OS accessibility-tree inspection, **Windows**: captured 2026-08-16 and repeatable via `scripts/a11y-uia-walk.ps1`. 138 UIA descendants under the product window, with `Button` / `TabItem` / `StatusBar` / `Text` control types carrying product labels. Raw output: `plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt`.
+- Screen-reader session, **Windows Narrator**: captured 2026-09-02 against a live `Legion IDE Smoke` window. Transcript: `plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt`. Probe: `scripts/a11y-narrator-transcript.ps1`. A UIA tree dump is not this session.
 - OS accessibility-tree inspection, **macOS**: recorded once by an external probe that is **not** in this repository and therefore **not re-runnable**.
 - OS accessibility-tree inspection, **Linux**: never performed, and no probe exists.
 - In-process AccessKit/egui projection coverage: passing (11/11 on Windows, 2026-08-16), and re-runnable on any host.
@@ -28,6 +29,7 @@ Linux as unobserved until committed platform probes exist.
 - OS accessibility-tree inspection for the product window, **macOS only, one-off, external probe with no committed source**: `plans/evidence/production/M5/WS18-T2-accesskit-product-pass.md`
 - Product shell labels from the desktop view surfaces in `crates/legion-desktop/src/view/*.rs`
 - Accessibility projection coverage from `crates/legion-desktop/tests/accessibility.rs` — in-process AccessKit node assertions; these never leave the process and are not OS-tree evidence
+- Windows Narrator live-window transcript: `scripts/a11y-narrator-transcript.ps1` → `plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt`
 
 ## What this evidence does not cover
 
@@ -35,8 +37,8 @@ Linux as unobserved until committed platform probes exist.
 - macOS reproducibility: the macOS observation cannot be repeated from this repository, because the probe source was never committed.
 - Harness reporting: `legion-desktop --smoke` reports `Windows UIA observed N descendants` from `accessibility_tree_status` when the committed probe `scripts/a11y-uia-walk.ps1` actually prints `UIA_WALK_OK` against the live process. macOS and Linux still have no committed probe, so those hosts keep `OS tree not observed`. A snapshot path with no successful Windows walk also keeps `OS tree not observed` rather than claiming a tree that was not walked. This does not close the 3-OS `PR-UI-001` bar.
 - CI: `.github/workflows/` contains no accessibility step in any of its five workflows, so none of this is protected against regression.
-- Depth of the Windows result: it shows control types and names reach the OS layer. It is not an audit of label quality, focus order, live regions, high contrast, or reduced motion, and no screen reader was run against it.
-- Screen-reader sessions: no NVDA, VoiceOver, or Orca run has been recorded. `plans/evidence/production/M5/WS18-T2-accesskit-product-pass.md` says so itself under "Residual risk".
+- Depth of the Windows UIA walk: it shows control types and names reach the OS layer. It is not an audit of label quality, live regions, high contrast, or reduced motion.
+- Screen-reader sessions: Windows Narrator was recorded on 2026-09-02 (GAP-05.2). No NVDA, VoiceOver, or Orca run has been recorded. `plans/evidence/production/M5/WS18-T2-accesskit-product-pass.md` still says so for those ATs under "Residual risk".
 
 ## Walkthrough documents
 

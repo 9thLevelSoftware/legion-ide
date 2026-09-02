@@ -1366,3 +1366,44 @@ fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
     assert!(!evidence_text.contains("not a renderer-backed keyboard path"));
     assert!(!evidence_text.contains("remains pending"));
 }
+
+#[test]
+fn gap05_2_windows_narrator_transcript_names_at_and_live_window() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let probe = fs::read_to_string(root.join("scripts/a11y-narrator-transcript.ps1"))
+        .expect("Narrator transcript probe");
+    assert!(probe.contains("Speech Recap"));
+    assert!(probe.contains("GAP-05.2"));
+    assert!(!probe.contains("UIA_WALK_OK"));
+
+    let transcript = fs::read_to_string(
+        root.join("plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt"),
+    )
+    .expect("committed Narrator transcript");
+    assert!(transcript.contains("AT=Windows Narrator"));
+    assert!(transcript.contains("GIT_SHA="));
+    assert!(transcript.contains("OS=Microsoft Windows"));
+    assert!(transcript.contains("WINDOW_TITLE=Legion IDE Smoke"));
+    assert!(transcript.contains("Manual, button"));
+    assert!(transcript.contains("Assist, button"));
+    assert!(transcript.contains("PROBLEMS (0), button"));
+    assert!(
+        !transcript.contains("UIA_WALK_OK"),
+        "a UIA tree dump is not a screen-reader session"
+    );
+    assert!(
+        !transcript.contains("ControlType.Button"),
+        "UIA control-type dumps are not Narrator speech"
+    );
+
+    let evidence = fs::read_to_string(
+        root.join("plans/evidence/production/WS-P0/gap-05-2-windows-narrator.md"),
+    )
+    .expect("GAP-05.2 evidence");
+    assert!(evidence.contains("Windows Narrator"));
+    assert!(evidence.contains("2bbbfb392757a87a8400bec498ae703629db0b1a"));
+    assert!(evidence.contains("Not a UIA tree dump"));
+}

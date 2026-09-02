@@ -1,0 +1,22 @@
+AT=Windows Narrator
+AT_VERSION=10.0.26100.8972 (WinBuild.160101.0800)
+OS=Microsoft Windows 11 Pro 10.0.26200
+ARCH=Win32NT AMD64
+GIT_SHA=2bbbfb392757a87a8400bec498ae703629db0b1a
+CAPTURED_AT_UTC=2026-09-02T01:11:09Z
+WINDOW_TITLE=Legion IDE Smoke
+PROCESS=legion-desktop
+SPEECH_RECAP_WINDOW=True
+PROBE=scripts/a11y-narrator-transcript.ps1
+TRANSCRIPT_BEGIN
+Legion IDE Smoke region, Manual, button, current,
+Assist, button,
+Delegate, button,
+Legion Workflows, button,
+Command, button,
+Explorer drawer, button,
+Bottom panel drawer, button,
+TERMINAL, button,
+PROBLEMS (0), button,
+Copied last phrase to clipboard
+TRANSCRIPT_END
