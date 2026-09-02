@@ -50,15 +50,15 @@ const SCROLL_P95_BUDGET_MILLIS: u64 = 32;
 
 /// Open-to-ready ceiling for the Legion repository.
 ///
-/// A regression guard, not a target. The measured value on the reference
-/// machine is ~3.6 s, and ~3.3 s of that is `AppComposition::open_file` running
-/// the lexical retrieval indexer synchronously on a 1.5 MB source file. The
-/// ceiling is above today's number on purpose: pretending the product already
-/// meets a 1 s target would make this workload red on arrival and teach
-/// everyone to ignore the row. The defect is recorded in
-/// `plans/evidence/production/P8.F4/perf-harness-product-workloads.md`; when it
-/// is fixed, this constant comes down with it.
-const STARTUP_BUDGET_MILLIS: u64 = 30_000;
+/// A regression guard, not a target. GAP-09.3 took `LexicalIndexer` off
+/// `AppComposition::bind_opened_file`; the previous ~3.3 s of that 3.6 s
+/// open-to-ready was the indexer, not the editor. Remaining cost is
+/// `open_workspace` (hundreds of ms warm, a few seconds cold behind antivirus).
+/// 10 s still absorbs a cold page cache without pretending the product meets a
+/// 1 s target. Re-adding the indexer to open is caught by
+/// `open_save_and_first_projection_do_not_wait_on_lexical_indexer`, not by this
+/// ceiling.
+const STARTUP_BUDGET_MILLIS: u64 = 10_000;
 
 /// Memory ceiling for one open 1.5 MB source file after a typing burst.
 ///

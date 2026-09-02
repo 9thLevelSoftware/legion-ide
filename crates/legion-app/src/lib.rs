@@ -6811,6 +6811,12 @@ impl LanguageToolingWorkflow {
         self.semantic_index.upsert(file_index);
     }
 
+    fn has_indexed_file(&self, workspace_id: WorkspaceId, file_id: FileId) -> bool {
+        self.semantic_index.files().iter().any(|file| {
+            file.identity.workspace_id == workspace_id && file.identity.file_id == file_id
+        })
+    }
+
     fn search_retrieval(&self, query: &RetrievalQuery) -> Vec<RetrievalSearchResult> {
         self.semantic_index.search_hybrid_retrieval(query).results
     }
@@ -16132,6 +16138,15 @@ impl AppComposition {
         self.lsp_session.is_idle()
     }
 
+    /// Test-only: number of files currently held in the lexical retrieval index.
+    ///
+    /// Used to prove file-open, save, and first projection do not wait on
+    /// `LexicalIndexer` (GAP-09.3). Production code must never call this.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn retrieval_indexed_file_count_for_test(&self) -> usize {
+        self.language_tooling.semantic_index.files().len()
+    }
+
     /// Test-only: returns `true` if the LSP session handle is in the
     /// `Starting` state.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -16415,24 +16430,9 @@ impl AppComposition {
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
-
-        // Skip full-text language-tooling indexing for streaming (large) files to avoid an
-        // additional 100MB+ String clone. Large files are already in degraded mode where
-        // semantic overlays, completions, and retrieval are deferred.
-        if !use_streaming {
-            let document = SourceDocument::with_versions(
-                identity.workspace_id,
-                identity.file_id,
-                identity.canonical_path.clone(),
-                language_id_for_path(&identity.canonical_path),
-                opened.file_content_version,
-                opened.workspace_generation,
-                None,
-                SemanticPrivacyScope::Workspace,
-                opened.text.clone(),
-            );
-            self.language_tooling.refresh_retrieval_document(&document);
-        }
+        // Lexical retrieval indexing is not on the open path (GAP-09.3). Language
+        // reads, Delegate retrieval, and the symbol palette index on demand. Save
+        // and first paint must not wait on LexicalIndexer.
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
 
@@ -17007,8 +17007,50 @@ impl AppComposition {
         self.settings_projection()
     }
 
+    fn ensure_open_files_indexed_for_retrieval(&mut self) {
+        let threshold = self.editor.thresholds().large_file_threshold_bytes;
+        let buffer_ids = self.active_documents.open_tabs.clone();
+        for buffer_id in buffer_ids {
+            let Some(metadata) = self
+                .active_documents
+                .metadata_for_buffer(buffer_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if self
+                .language_tooling
+                .has_indexed_file(metadata.identity.workspace_id, metadata.identity.file_id)
+            {
+                continue;
+            }
+            let file_byte_len = metadata.file_length.unwrap_or(0) as usize;
+            if file_byte_len > threshold {
+                continue;
+            }
+            let Ok(text) = self.editor.text(buffer_id) else {
+                continue;
+            };
+            let document = SourceDocument::with_versions(
+                metadata.identity.workspace_id,
+                metadata.identity.file_id,
+                metadata.identity.canonical_path.clone(),
+                language_id_for_path(&metadata.identity.canonical_path),
+                metadata.file_content_version,
+                metadata.workspace_generation,
+                None,
+                SemanticPrivacyScope::Workspace,
+                text.to_string(),
+            );
+            self.language_tooling.refresh_retrieval_document(&document);
+        }
+    }
+
     fn refresh_palette_results(&mut self) -> Result<(), AppCompositionError> {
         let mode = palette_mode_for_query(&self.palette.query).unwrap_or(self.palette.mode);
+        if mode == PaletteMode::Symbol {
+            self.ensure_open_files_indexed_for_retrieval();
+        }
         let query = palette_query_body(mode, &self.palette.query);
         let results = match mode {
             PaletteMode::File => self.palette_file_results(query)?,
