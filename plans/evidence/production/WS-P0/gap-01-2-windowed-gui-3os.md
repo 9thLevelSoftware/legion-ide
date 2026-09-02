@@ -45,6 +45,18 @@ First dispatch after merge: [run 33553239633](https://github.com/9thLevelSoftwar
 | windows-latest | `windowed-gui-report-windows-latest` | false | blocked: `WGPU error: Failed to create surface for any enabled backend` |
 | macos-latest | `windowed-gui-report-macos-latest` | false | blocked: `WGPU error: Failed to create surface for any enabled backend` |
 
-Follow-up in this change: install `libxkbcommon-x11-0` + Mesa dri on Linux, write a blocked report on panic (so Ubuntu still uploads `report.toml`), and prefer WARP (`Microsoft Basic Render Driver`) on Windows. A later dispatch must still show `window_created = true` on each OS before GAP-01.2 is closed.
+Follow-up in #199: install `libxkbcommon-x11-0` + Mesa dri on Linux, write a blocked report on panic (so Ubuntu still uploads `report.toml`), and prefer WARP (`Microsoft Basic Render Driver`) on Windows.
+
+Second dispatch after #199: [run 33570231649](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33570231649) on `b94a0dc0`.
+
+| OS | Result |
+| --- | --- |
+| ubuntu-latest | passed (`xvfb` + xkb) |
+| windows-latest | failed — `WGPU error: Failed to create surface for any enabled backend: {}` |
+| macos-latest | failed — same empty-backend surface error |
+
+Cause of the empty `{}`: the GUI step exported `WGPU_BACKEND=` (empty string) on Windows and macOS. `wgpu::Backends::from_env` treats a set variable as the whole mask, so the instance had **zero** backends. Linux was fine because it set `gl`.
+
+This change exports `WGPU_BACKEND` only with a real backend (`gl` / `dx12` / `metal`) and drops `WGPU_ADAPTER_NAME`. A later dispatch must still show `window_created = true` on each OS before GAP-01.2 is closed.
 
 Ledger row statuses are unchanged.

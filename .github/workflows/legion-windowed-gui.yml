@@ -71,18 +71,22 @@ jobs:
 
       - name: Run windowed GUI E2E
         shell: bash
-        env:
-          LIBGL_ALWAYS_SOFTWARE: ${{ runner.os == 'Linux' && '1' || '' }}
-          WGPU_BACKEND: ${{ runner.os == 'Linux' && 'gl' || '' }}
         run: |
           set -euo pipefail
+          # wgpu::Backends::from_env treats a *set* WGPU_BACKEND as the whole
+          # backend mask. An empty string is zero backends, then
+          # "Failed to create surface for any enabled backend: {}". Do not
+          # export WGPU_BACKEND= on Windows/macOS.
           if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export WGPU_BACKEND=gl
             xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
               cargo run -p xtask -- windowed-gui-e2e
+          elif [[ "${{ runner.os }}" == "Windows" ]]; then
+            export WGPU_BACKEND=dx12
+            cargo run -p xtask -- windowed-gui-e2e
           else
-            if [[ "${{ runner.os }}" == "Windows" ]]; then
-              export WGPU_ADAPTER_NAME="Microsoft Basic Render Driver"
-            fi
+            export WGPU_BACKEND=metal
             cargo run -p xtask -- windowed-gui-e2e
           fi
 
