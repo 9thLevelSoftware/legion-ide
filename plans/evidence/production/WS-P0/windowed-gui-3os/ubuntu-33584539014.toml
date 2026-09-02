@@ -1,0 +1,17 @@
+schema_version = 1
+task = "GAP-01.1"
+harness = "windowed-gui-e2e"
+not_golden_path_5 = true
+not_beta_smoke = true
+binary_path = "/home/runner/work/legion-ide/legion-ide/target/windowed-gui/package/legion-desktop"
+package_dir = "/home/runner/work/legion-ide/legion-ide/target/windowed-gui/package"
+os = "linux"
+arch = "x86_64"
+git_sha = "982f678958bee2b38c74b60f68dc877cf4e5a397"
+window_created = true
+window_backend = "eframe::run_native"
+open = "passed"
+edit = "passed"
+save = "passed"
+status = "passed"
+errors = []

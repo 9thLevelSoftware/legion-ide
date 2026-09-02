@@ -30,7 +30,7 @@ path. It is not headless `--beta-smoke` and not AppComposition `golden-path-5`.
 - Not folded into `legion-gates.yml`
 - Not a 22nd local standing gate
 - Not GAP-01.1 local proof (that landed on #196)
-- Not a green 3-OS clock start — first dispatch hard-failed (see below)
+- Not a required check and not a completed T0-D four-green clock (see hosted evidence)
 
 Promote to merge-blocking only after four consecutive green 3-OS runs and
 owner sign-off (`docs/OPERATOR_RUNBOOK.md`, `T0-D-smoke-promotion-criteria.md`).
@@ -57,6 +57,18 @@ Second dispatch after #199: [run 33570231649](https://github.com/9thLevelSoftwar
 
 Cause of the empty `{}`: the GUI step exported `WGPU_BACKEND=` (empty string) on Windows and macOS. `wgpu::Backends::from_env` treats a set variable as the whole mask, so the instance had **zero** backends. Linux was fine because it set `gl`.
 
-This change exports `WGPU_BACKEND` only with a real backend (`gl` / `dx12` / `metal`) and drops `WGPU_ADAPTER_NAME`. A later dispatch must still show `window_created = true` on each OS before GAP-01.2 is closed.
+#204 stopped exporting empty `WGPU_BACKEND` and set `gl` / `dx12` / `metal` per OS.
+
+Third dispatch after that fix: [run 33584539014](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33584539014) on `982f6789` (merge #204). All three jobs passed. GUI step hard-fail (`continue-on-error` absent).
+
+| OS | Artifact | `window_created` | open / edit / save | Result |
+| --- | --- | --- | --- | --- |
+| ubuntu-latest | [`ubuntu-33584539014.toml`](windowed-gui-3os/ubuntu-33584539014.toml) | true | passed | passed (`xvfb` + `WGPU_BACKEND=gl`) |
+| windows-latest | [`windows-33584539014.toml`](windowed-gui-3os/windows-33584539014.toml) | true | passed | passed (`WGPU_BACKEND=dx12`) |
+| macos-latest | [`macos-33584539014.toml`](windowed-gui-3os/macos-33584539014.toml) | true | passed | passed (`WGPU_BACKEND=metal`) |
+
+This is **clock run 1 of 4**. It is not owner sign-off and not a required check.
+
+Second clock dispatch on `main` after #204: [run 33587226828](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33587226828).
 
 Ledger row statuses are unchanged.
