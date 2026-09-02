@@ -142,7 +142,10 @@ file, and for non-Rust workspaces that happen to be trusted.
   Dismiss with `Esc`. The tooltip stays closed after explicit dismiss until a new response
   arrives with a different hover id.
 - **Go to definition** — available with the default `F12` shortcut and through the typed
-  shell/dispatch-intent path. Use `NavigateToDefinition { index }` to open a specific result.
+  shell/dispatch-intent path (`:definition <byte-offset>`). Use `NavigateToDefinition { index }`
+  to open a specific result.
+- **Workspace search** — `Ctrl+Shift+F` opens the search palette scoped to the workspace.
+  `:search-workspace <query>` remains the typed-intent contract.
 - **Language health status** — the language status panel projects `Starting`, `Live`,
   `BackingOff` (with countdown), `Unavailable`, or `Failed` states from
   `lsp_session_status` in the `LanguageToolingProjection`.
@@ -178,7 +181,8 @@ When a diff is open, the typed shell commands below emit projection-only navigat
 | `:git-nav-prev-hunk` | Move focus to the previous changed hunk in the current file. |
 | `:git-nav-next-file` | Move focus to the next changed file in the diff. |
 | `:git-nav-prev-file` | Move focus to the previous changed file in the diff. |
-| `:git-stage-hunk <hunk-id>` | Stage the focused unstaged hunk through the existing policy path. |
+| `:git-stage-hunk <hunk-id>` | Stage a named unstaged hunk through the existing policy path. |
+| `Ctrl+Shift+G` / `Git: Stage Focused Hunk` | Stage the currently focused unstaged hunk. Focus still comes from `:git-nav-next-hunk` / `:git-nav-prev-hunk`. |
 
 Focus state is tracked in the application layer; the desktop projection reflects the current `focused_hunk_id` from `GitProjection`.
 

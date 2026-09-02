@@ -529,6 +529,7 @@ fn product_loop_commands_match_live_registry_shell_and_keymap_surfaces() {
         (("ArrowDown", false, false, true), "DebugStackNext"),
         (("F2", false, false, false), "RenameSymbol"),
         (("F", false, true, true), "FormatDocument"),
+        (("F", true, true, false), "SearchWorkspace"),
         (("O", true, true, false), "OrganizeImports"),
     ] {
         assert!(
