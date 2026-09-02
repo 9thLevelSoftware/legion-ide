@@ -1337,6 +1337,16 @@ fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
     assert!(evidence_text.contains("| Linux | `scripts/a11y-atspi-walk.sh` |"));
     assert!(evidence_text.contains("Not VoiceOver."));
     assert!(evidence_text.contains("Not Orca."));
+    let ax_dump =
+        fs::read_to_string(root.join("plans/evidence/production/WS-P0/gap-05-3-macos-ax-dump.txt"))
+            .expect("hosted macOS AX dump");
+    assert!(ax_dump.contains("AX_WALK_OK"));
+    assert!(ax_dump.contains("Legion IDE Smoke"));
+    let atspi_miss = fs::read_to_string(
+        root.join("plans/evidence/production/WS-P0/gap-05-4-linux-atspi-miss.txt"),
+    )
+    .expect("hosted Linux AT-SPI miss");
+    assert!(atspi_miss.contains("PROCESS_NOT_FOUND"));
     assert!(!evidence_text.contains("| macOS | No committed OS-tree probe | Unobserved. |"));
     assert!(!evidence_text.contains("| Linux | No committed OS-tree probe | Unobserved. |"));
     assert!(evidence_text.contains("Manual keyboard-only path"));

@@ -18,7 +18,6 @@ OS-tree half). Hosted capture is `.github/workflows/legion-a11y-os-tree.yml`
 
 - Not VoiceOver notes (still required to close GAP-05.3)
 - Not Orca notes (still required to close GAP-05.4)
-- Not a live AX dump in this change (needs Darwin + a window)
 - Not a ledger promotion of PR-UI-001
 
 ## First hosted dispatch
@@ -48,6 +47,13 @@ Third hosted dispatch: [run 33637474631](https://github.com/9thLevelSoftware/leg
 | macos-latest | Still `AX_WALK_FAILED` exit 5. osascript `1228:1236` — `return dumpState` remains a compile error even in a multi-line `if`. Flattened to one `on run` handler with a 2-level window walk and no record returns. |
 | ubuntu-latest | `ATSPI_LAUNCHER=/usr/libexec/at-spi-bus-launcher`, `ATSPI_REGISTRY_READY desktop_children=0`, then still empty `ATSPI_APPS` after the app was up. Registry warmup is not sufficient; AccessKit unix did not publish. Retries + session-bus name dump added. |
 
-GAP-05.3 and GAP-05.4 stay open. Not VoiceOver. Not Orca.
+Fourth hosted dispatch: [run 33638436515](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33638436515) on `c72f5d34` (#209).
+
+| OS | Result |
+| --- | --- |
+| macos-latest | **passed.** [`gap-05-3-macos-ax-dump.txt`](gap-05-3-macos-ax-dump.txt): `WINDOW_COUNT=1`, window `Legion IDE Smoke`, 5 descendants, `AX_WALK_OK`. |
+| ubuntu-latest | failed. [`gap-05-4-linux-atspi-miss.txt`](gap-05-4-linux-atspi-miss.txt): empty `ATSPI_APPS` after retries. Session bus had `org.a11y.Bus` but AccessKit unix did not publish. Hosted xvfb ceiling, not a missing probe script. |
+
+GAP-05.3 stays open (VoiceOver notes still required). GAP-05.4 stays open (no live AT-SPI dump, no Orca).
 
 Ledger row statuses are unchanged.
