@@ -1331,20 +1331,38 @@ fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
         )));
     }
     assert!(evidence_text.contains("Manual keyboard-only path"));
+    assert!(evidence_text.contains("### Certified (renderer keymap or command palette)"));
+    assert!(evidence_text.contains("### Residual (explicitly cut from default keymap)"));
+    for route in [
+        "Ctrl/Cmd+Shift+F",
+        "F12",
+        "Ctrl/Cmd+Shift+G",
+        "Git: Stage Focused Hunk",
+        "Git: Commit Staged Changes",
+        "f12_on_the_open_editor_requests_go_to_definition",
+        "ctrl_shift_f_opens_workspace_search_palette",
+        "ctrl_shift_g_stages_the_focused_hunk",
+        "command_palette_keyboard_commits_staged_changes",
+    ] {
+        assert!(
+            evidence_text.contains(route),
+            "evidence should name the certified route `{route}`"
+        );
+    }
     for route in [
         ":search-workspace <query>",
         ":definition <byte-offset>",
         ":git-stage-hunk <hunk-id>",
         ":term-launch <command>",
-        "Git: Commit Staged Changes",
+        ":git-nav-next-hunk",
     ] {
         assert!(
             evidence_text.contains(route),
-            "evidence should name the available route `{route}`"
+            "evidence should name the residual route `{route}`"
         );
     }
-    assert!(evidence_text.contains("not a renderer-backed keyboard path"));
-    assert!(evidence_text.contains("remains pending"));
-    assert!(!evidence_text.contains("Use the published palette/keymap to"));
-    assert!(!evidence_text.contains("`Git: Stage Focused Hunk` from its published"));
+    assert!(evidence_text.contains("Use the published palette/keymap to"));
+    assert!(evidence_text.contains("`Git: Stage Focused Hunk` from its published"));
+    assert!(!evidence_text.contains("not a renderer-backed keyboard path"));
+    assert!(!evidence_text.contains("remains pending"));
 }

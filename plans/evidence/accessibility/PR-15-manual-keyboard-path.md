@@ -15,21 +15,43 @@ than implying an observation that was not made.
 
 ## Manual keyboard-only path
 
-This is a repeatable shell-command and projection checklist for a real desktop
-window. It is not a renderer-backed keyboard path or a claimed human transcript;
-no screen-reader session is claimed by this packet.
+Renderer-backed certification lives in `crates/legion-desktop/tests/keyboard_nav.rs`
+and `crates/legion-desktop/tests/accessibility.rs`. Those tests drive
+`DesktopEframeApp` with egui key events (not AccessKit roles alone). They are
+not a human OS-level walk and not an NVDA/VoiceOver/Orca transcript.
 
-1. Open a trusted Manual workspace and focus the editor without using a mouse.
-2. Use the available shell command `:search-workspace <query>` and inspect the resulting search projection. A published palette/keymap route for workspace search is pending.
-3. Use the available shell command `:definition <byte-offset>` from the focused editor symbol. A published palette/keymap route for go-to-definition is pending.
-4. Use `:git-nav-next-hunk` or `:git-nav-prev-hunk` to select a hunk, then the available shell command `:git-stage-hunk <hunk-id>`. `Git: Stage Focused Hunk` is not a published palette/keymap route in this commit and remains pending.
-5. `Git: Commit Staged Changes` is registered as a palette command. Its complete keyboard-only invocation and proposal confirmation are pending a renderer reachability regression.
-6. Use the available shell command `:term-launch <command>` to launch the trusted terminal. A published keyboard action and renderer-backed focus check are pending.
+### Certified (renderer keymap or command palette)
 
-The desktop accessibility tests cover only in-process projection and target
-geometry. They do not verify shell-command dispatch, renderer palette/keymap
-reachability, a human OS-level keyboard walk, or an NVDA/VoiceOver/Orca
-transcript.
+| Route | Gesture | Test |
+| --- | --- | --- |
+| Product mode switch | Tab/arrows/Enter, Confirm/Escape | `product_mode_switch_*`, `product_mode_escalation_*` |
+| Command palette | Ctrl/Cmd+Shift+P | `command_palette_keyboard_commits_staged_changes`; `keyboard_only_operation_opens_the_command_palette` (Ctrl/Cmd+P file palette) |
+| Workspace search | Ctrl/Cmd+Shift+F | `ctrl_shift_f_opens_workspace_search_palette` |
+| Active-file search | Ctrl/Cmd+F | published `ToggleFindBar` keymap; palette Search mode |
+| Go to definition | F12 | `f12_on_the_open_editor_requests_go_to_definition` |
+| Git: Stage Focused Hunk | Ctrl/Cmd+Shift+G and palette `Git: Stage Focused Hunk` | `ctrl_shift_g_stages_the_focused_hunk` |
+| Git: Commit Staged Changes | command palette `git commit <message>` then Enter | `command_palette_keyboard_commits_staged_changes` |
+| Problems next/prev | F8 / Shift+F8 | `t4_problem_*` |
+
+Use the published palette/keymap to reach those routes. `Git: Stage Focused Hunk` from its published Ctrl/Cmd+Shift+G binding stages the focused unstaged hunk.
+
+### Residual (explicitly cut from default keymap)
+
+These stay typed-shell or operand-only. They are named so they are not mistaken
+for certified keyboard routes:
+
+| Route | Why it remains residual |
+| --- | --- |
+| `:search-workspace <query>` | Superseded for daily use by Ctrl/Cmd+Shift+F. The colon command remains as a typed-intent contract. |
+| `:definition <byte-offset>` | Superseded for daily use by F12. The colon command remains as a typed-intent contract. |
+| `:git-nav-next-hunk` / `:git-nav-prev-hunk` / `:git-nav-next-file` / `:git-nav-prev-file` | No default keymap chord. Focusing a hunk still uses the typed shell (or GitNav intents). Staging after focus is certified. |
+| `:git-stage-hunk <hunk-id>` | Operand requires an explicit hunk id. The focused-hunk keymap is the pointer-free product path. |
+| `:term-launch <command>` | Operand requires a program string. Not a default keymap. No renderer-backed focus check is claimed. |
+| `:test-refresh` / `:test-run` / `:test-run-group` | Typed shell; not palette entries. |
+| `:format` / `:rename` / `:organize-imports` / `:code-action` | Proposal-mediated typed shell. Format/rename/organize also have keymap/palette entries (`Shift+Alt+F`, `F2`, `Ctrl+Shift+O`). |
+
+The desktop accessibility tests still do not verify a human OS-level keyboard
+walk or an NVDA/VoiceOver/Orca transcript. Those are GAP-05.2–05.4.
 
 ## Acceptance boundary
 

@@ -27,7 +27,8 @@ Treat the labels as the product source of truth for the current profile and plat
 | Completion popup | Accept selected item | `Tab` / `Enter` | Insert the selected label through editor authority. |
 | Completion popup | Dismiss | `Esc` | Close the popup without inserting. |
 | Hover tooltip | Dismiss | `Esc` | Close the hover tooltip (re-opens only when new hover data arrives). |
-| Editor | Go to definition | Command palette → `GoToDefinition` | Navigate to the definition site for the symbol under the cursor. |
+| Editor | Go to definition | `F12` | Navigate to the definition site for the symbol under the cursor. |
+| App command palette | Workspace search | `Ctrl+Shift+F` | Opens the search palette scoped to the workspace. |
 | Editor | Rename symbol | `F2` | Opens the language rename command; enter the replacement name and review the proposal before applying. |
 | Editor | Format document | `Shift+Alt+F` | Opens the formatting proposal preview for the active buffer. |
 | Editor | Organize imports | `Ctrl+Shift+O` | Opens the organize-imports proposal preview for the active buffer. |
@@ -51,20 +52,20 @@ Navigation state (`focused_hunk_id`) is owned by the application layer and refle
 
 The command palette registry currently exposes the core file, settings, Git lifecycle/remote,
 and language-server commands exercised by the app projection, including `Git: Push`, `Git: Fetch`,
-`Git: Pull`, `Language Server: Start`, and `Language Server: Restart`. Git hunk navigation/staging,
-test discovery/run, and language write requests are not palette entries or default key bindings.
-They are available through the typed shell command surface and dispatch intents:
+`Git: Pull`, `Git: Stage Focused Hunk`, `Git: Commit Staged Changes`, `Language Server: Start`,
+and `Language Server: Restart`. Git hunk *navigation*, test discovery/run, and terminal launch
+remain typed shell commands rather than default key bindings:
 
 - `:git-nav-next-hunk`, `:git-nav-prev-hunk`, `:git-nav-next-file`, and `:git-nav-prev-file`
-  emit projection-only Git navigation intents.
-- `:git-stage-hunk <hunk-id>` emits the existing policy-mediated staging intent.
+  emit projection-only Git navigation intents. Staging the focused hunk is `Ctrl+Shift+G`.
+- `:git-stage-hunk <hunk-id>` remains the operand form when the hunk id is typed explicitly.
 - `:test-refresh`, `:test-run <item-id>`, and `:test-run-group <label>` emit worker-backed test intents.
+- `:term-launch <command>` launches a trusted terminal; it is not a default keymap.
 - `:format`, `:rename <position>,<name>`, `:organize-imports`, and `:code-action <id>` emit
-  proposal-mediated language intents.
+  proposal-mediated language intents. Format/rename/organize also have default keymap entries.
 
-Problems navigation currently uses plain `ArrowUp`/`ArrowDown` in the desktop workflow. Debug
-stack-frame navigation and the F8/Shift+F8, Alt+ArrowUp/Down, F2, Shift+Alt+F, Ctrl+Shift+O,
-and Ctrl+Shift+G bindings are not part of the default keymap.
+Problems navigation uses `F8` / `Shift+F8` in the default keymap. Debug stack-frame navigation
+uses Alt+ArrowUp/Down. Those chords are part of the default map.
 
 ## Mode controls
 

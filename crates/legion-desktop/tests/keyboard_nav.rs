@@ -6,6 +6,7 @@
 use std::{
     fs,
     path::Path,
+    process::Command,
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -15,8 +16,14 @@ use legion_desktop::{
     view::DesktopProjectionViewModel,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
-use legion_protocol::{ProtocolTextRange, SessionPanelState, TextCoordinate, ViewportScroll};
-use legion_ui::{DockLayout, DockMode, PanelId, Shell};
+use legion_protocol::{
+    LanguageToolingOperationKind, ProtocolTextRange, SessionPanelState, TextCoordinate,
+    ViewportScroll,
+};
+use legion_ui::{
+    CommandDispatchIntent, DockLayout, DockMode, GitHunkStageProjection, PaletteMode, PanelId,
+    SearchScopeProjection, Shell,
+};
 
 /// Build a five-target batch proposal suitable for seeding proposal_reviews in
 /// the desktop runtime's delegated-task projection.
@@ -154,6 +161,40 @@ impl Drop for TempWorkspace {
 fn open_runtime(root: &Path) -> DesktopRuntime {
     DesktopRuntime::open(DesktopLaunchConfig::new(root.to_path_buf(), None))
         .expect("desktop runtime should open workspace")
+}
+
+fn run_git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap_or_else(|error| panic!("git {args:?} could not be run: {error}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn init_git_repo(root: &Path) {
+    run_git(root, &["init"]);
+    run_git(root, &["config", "user.email", "keyboard@example.invalid"]);
+    run_git(root, &["config", "user.name", "Keyboard Path"]);
+    run_git(root, &["config", "commit.gpgsign", "false"]);
+    run_git(root, &["branch", "-M", "trunk"]);
+}
+
+fn command_shift_key(key: egui::Key) -> egui::RawInput {
+    full_frame_key_input_at(
+        egui::vec2(1_440.0, 900.0),
+        key,
+        egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        },
+    )
 }
 
 fn full_frame_pointer_input(events: Vec<egui::Event>) -> egui::RawInput {
@@ -1326,5 +1367,171 @@ fn review_accept_all_and_dismiss_lifecycle() {
         runtime.review_hunk_selected_index_for_test(),
         0,
         "ReviewDismiss must reset the navigation index to 0"
+    );
+}
+
+#[test]
+fn f12_on_the_open_editor_requests_go_to_definition() {
+    let workspace = TempWorkspace::new();
+    fs::write(workspace.path().join("lib.rs"), "pub fn alpha() {}\n").expect("write source file");
+    let mut runtime = open_runtime(workspace.path());
+    runtime
+        .handle_action(DesktopAction::OpenPathText("lib.rs".to_string()))
+        .expect("source file should open");
+    let mut app = DesktopEframeApp::new(runtime);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(
+        app.runtime_snapshot()
+            .language_tooling_projection
+            .operations
+            .iter()
+            .all(|operation| operation.kind != LanguageToolingOperationKind::Definition),
+        "opening a file must not request definition"
+    );
+
+    let _ = app.run_headless_full_frame(full_frame_key_input(egui::Key::F12));
+    assert!(
+        app.runtime_snapshot()
+            .language_tooling_projection
+            .operations
+            .iter()
+            .any(|operation| operation.kind == LanguageToolingOperationKind::Definition),
+        "F12 on the open editor must request go-to-definition"
+    );
+}
+
+#[test]
+fn ctrl_shift_f_opens_workspace_search_palette() {
+    let workspace = TempWorkspace::new();
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    assert!(!app.runtime_snapshot().palette_projection.open);
+
+    let _ = app.run_headless_full_frame(command_shift_key(egui::Key::F));
+    let palette = app.runtime_snapshot().palette_projection;
+    assert!(
+        palette.open,
+        "Ctrl/Cmd+Shift+F must open the search palette"
+    );
+    assert_eq!(palette.mode, PaletteMode::Search);
+    assert_eq!(palette.scope, SearchScopeProjection::Workspace);
+}
+
+#[test]
+fn ctrl_shift_g_stages_the_focused_hunk() {
+    let workspace = TempWorkspace::new();
+    init_git_repo(workspace.path());
+    fs::write(workspace.path().join("lib.rs"), "fn main() {}\n").expect("write tracked file");
+    run_git(workspace.path(), &["add", "lib.rs"]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    fs::write(
+        workspace.path().join("lib.rs"),
+        "fn main() { changed(); }\n",
+    )
+    .expect("write unstaged change");
+
+    let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        workspace.path().to_path_buf(),
+        Some(workspace.path().join("lib.rs").to_string_lossy().into_owned()),
+    ))
+    .expect("desktop runtime should open git workspace");
+    runtime
+        .handle_action(DesktopAction::RefreshGit)
+        .expect("git refresh should route");
+    runtime.drain_git_until_idle();
+    assert!(
+        runtime
+            .projection_snapshot()
+            .git_projection
+            .hunks
+            .iter()
+            .any(|hunk| hunk.stage == GitHunkStageProjection::Unstaged),
+        "fixture must project an unstaged hunk before focusing it"
+    );
+    runtime
+        .app_mut_for_test()
+        .dispatch_ui_intent(CommandDispatchIntent::GitNavNextHunk)
+        .expect("focus the first hunk through the residual typed-shell intent");
+    runtime.drain_git_until_idle();
+    let focused = runtime
+        .projection_snapshot()
+        .git_projection
+        .focused_hunk_id
+        .clone()
+        .expect("GitNavNextHunk should focus a hunk");
+    assert!(
+        runtime
+            .projection_snapshot()
+            .git_projection
+            .hunks
+            .iter()
+            .any(|hunk| hunk.hunk_id == focused && hunk.stage == GitHunkStageProjection::Unstaged),
+        "the focused hunk must still be unstaged before the keymap"
+    );
+
+    let mut app = DesktopEframeApp::new(runtime);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let _ = app.run_headless_full_frame(command_shift_key(egui::Key::G));
+    app.runtime_mut_for_test().drain_git_until_idle();
+
+    let cached = run_git(workspace.path(), &["diff", "--cached", "--", "lib.rs"]);
+    assert!(
+        cached.contains("changed"),
+        "Ctrl/Cmd+Shift+G must stage the focused hunk; cached diff: {cached}"
+    );
+}
+
+#[test]
+fn command_palette_keyboard_commits_staged_changes() {
+    let workspace = TempWorkspace::new();
+    init_git_repo(workspace.path());
+    fs::write(
+        workspace.path().join("tracked.rs"),
+        "fn main() { let n = 1; }\n",
+    )
+    .expect("write tracked file");
+    run_git(workspace.path(), &["add", "tracked.rs"]);
+    run_git(workspace.path(), &["commit", "-m", "initial"]);
+    fs::write(
+        workspace.path().join("tracked.rs"),
+        "fn main() { let n = 2; }\n",
+    )
+    .expect("write staged change");
+    run_git(workspace.path(), &["add", "tracked.rs"]);
+
+    let runtime = open_runtime(workspace.path());
+    let mut app = DesktopEframeApp::new(runtime);
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(Vec::new()));
+    let _ = app.run_headless_full_frame(command_shift_key(egui::Key::P));
+    assert!(
+        app.runtime_snapshot().palette_projection.open,
+        "Ctrl/Cmd+Shift+P must open the command palette"
+    );
+    assert_eq!(
+        app.runtime_snapshot().palette_projection.mode,
+        PaletteMode::Command
+    );
+
+    let message = "keyboard-only commit";
+    let _ = app.run_headless_full_frame(full_frame_pointer_input(vec![egui::Event::Text(
+        format!("git commit {message}"),
+    )]));
+    assert!(
+        app.runtime_snapshot()
+            .palette_projection
+            .query
+            .to_ascii_lowercase()
+            .contains("git commit"),
+        "typed commit command must reach the palette query, got {}",
+        app.runtime_snapshot().palette_projection.query
+    );
+    let _ = app.run_headless_full_frame(full_frame_key_input(egui::Key::Enter));
+    app.runtime_mut_for_test().drain_git_until_idle();
+
+    assert_eq!(
+        run_git(workspace.path(), &["log", "-1", "--pretty=%s"]).trim(),
+        message,
+        "keyboard-only Git: Commit Staged Changes must create the commit"
     );
 }

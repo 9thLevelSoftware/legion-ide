@@ -1442,6 +1442,10 @@ pub fn default_keymap() -> Vec<KeybindingEntry> {
             action_label: "ToggleFindBar".into(),
         },
         KeybindingEntry {
+            combo: KeyCombo::new("F", true, true, false),
+            action_label: "SearchWorkspace".into(),
+        },
+        KeybindingEntry {
             combo: KeyCombo::new("H", true, false, false),
             action_label: "ToggleFindReplace".into(),
         },

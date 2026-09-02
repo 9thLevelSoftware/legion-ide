@@ -27,6 +27,11 @@ pub(crate) fn action_label_to_desktop_action(
             query: "/".to_string(),
             scope: SearchScopeProjection::ActiveFile,
         }),
+        "SearchWorkspace" => Some(DesktopAction::OpenPalette {
+            mode: PaletteMode::Search,
+            query: "/".to_string(),
+            scope: SearchScopeProjection::Workspace,
+        }),
         "ToggleFindReplace" => Some(DesktopAction::ToggleFindReplace),
         "FindNext" => Some(DesktopAction::FindNext),
         "FindPrevious" => Some(DesktopAction::FindPrevious),
@@ -258,12 +263,69 @@ fn debug_stack_navigation_index(
 
 #[cfg(test)]
 mod tests {
-    use super::debug_stack_navigation_index;
+    use super::{action_label_to_desktop_action, debug_stack_navigation_index};
+    use crate::bridge::DesktopAction;
+    use legion_ui::{
+        GitHunkProjection, GitHunkStageProjection, PaletteMode, SearchScopeProjection, Shell,
+    };
 
     #[test]
     fn debug_stack_navigation_stays_within_rendered_frame_limit() {
         assert_eq!(debug_stack_navigation_index(31, 40, 1), Some(31));
         assert_eq!(debug_stack_navigation_index(40, 40, -1), Some(30));
         assert_eq!(debug_stack_navigation_index(0, 0, 1), None);
+    }
+
+    #[test]
+    fn search_workspace_keybinding_opens_workspace_search_palette() {
+        let snapshot = Shell::empty("workspace search").projection_snapshot();
+        assert!(matches!(
+            action_label_to_desktop_action("SearchWorkspace", &snapshot),
+            Some(DesktopAction::OpenPalette {
+                mode: PaletteMode::Search,
+                query,
+                scope: SearchScopeProjection::Workspace,
+            }) if query == "/"
+        ));
+    }
+
+    #[test]
+    fn go_to_definition_keybinding_uses_the_projected_cursor() {
+        let snapshot = Shell::empty("definition").projection_snapshot();
+        assert!(matches!(
+            action_label_to_desktop_action("GoToDefinition", &snapshot),
+            Some(DesktopAction::GoToDefinition { .. })
+        ));
+    }
+
+    #[test]
+    fn stage_focused_hunk_keybinding_requires_an_unstaged_focus() {
+        let mut snapshot = Shell::empty("stage hunk").projection_snapshot();
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            None,
+            "no focused hunk must not invent a stage action"
+        );
+        snapshot.git_projection.focused_hunk_id = Some("h1".to_string());
+        snapshot.git_projection.hunks.push(GitHunkProjection {
+            hunk_id: "h1".to_string(),
+            path: "src/lib.rs".to_string(),
+            stage: GitHunkStageProjection::Unstaged,
+            header: "@@ -1,1 +1,1 @@".to_string(),
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            added_lines: 1,
+            deleted_lines: 1,
+            submodule_dirty_only: false,
+            context: None,
+        });
+        assert_eq!(
+            action_label_to_desktop_action("StageFocusedGitHunk", &snapshot),
+            Some(DesktopAction::StageGitHunk {
+                hunk_id: "h1".to_string(),
+            })
+        );
     }
 }

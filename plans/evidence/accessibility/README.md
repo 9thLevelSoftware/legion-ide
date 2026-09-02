@@ -18,6 +18,7 @@ Part of this evidence is product-facing rather than projection-only. One of the 
 
 PR-15 adds `scripts/a11y-platform-probe.sh` as a deterministic status
 contract and `PR-15-manual-keyboard-path.md` as the honest keyboard-only path.
+GAP-05.1 records which routes are renderer-certified versus residual typed-shell.
 The contract delegates Windows to the committed UIA walk and reports macOS and
 Linux as unobserved until committed platform probes exist.
 
