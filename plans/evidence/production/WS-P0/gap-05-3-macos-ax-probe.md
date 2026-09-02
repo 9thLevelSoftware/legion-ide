@@ -30,7 +30,16 @@ OS-tree half). Hosted capture is `.github/workflows/legion-a11y-os-tree.yml`
 | macos-latest | `macos-ax.txt` | `PROCESS_FOUND: legion-desktop`, then osascript syntax error on Unicode `≥` (`974:982`, exit 1). `set -e` skipped the documented exit 5. |
 | ubuntu-latest | `linux-atspi.txt` | `PROCESS_NOT_FOUND: legion-desktop` (exit 4). The smoke process was running; AT-SPI published no matching app. Likely missing session bus / `at-spi-bus-launcher` under xvfb. |
 
-Follow-up in this change: ASCII `>=` in the AX script, capture osascript status without `errexit`, start dbus + AT-SPI bus on Linux, dump registered AT-SPI app names on a miss.
+Follow-up in #208: ASCII `>=` in the AX script, capture osascript status without `errexit`, start dbus + AT-SPI bus on Linux, dump registered AT-SPI app names on a miss.
+
+Second hosted dispatch: [run 33636397701](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33636397701) on `019acb9b` (`main` after #208).
+
+| OS | Artifact | Result |
+| --- | --- | --- |
+| macos-latest | `macos-ax.txt` | `PROCESS_FOUND`, then `AX_WALK_FAILED` exit 5. osascript `975:983` was `dumpState` after a single-line `if ... then return dumpState` (AppleScript treats `return` as a bare exit). |
+| ubuntu-latest | `linux-atspi.txt` | Registry activated from the Python walk (`SpiRegistry daemon is running`), then `ATSPI_APPS:` empty / `PROCESS_NOT_FOUND`. AccessKit registers at process start; the bus was not up yet. |
+
+This change: multi-line `if` before `return dumpState`; warm `Atspi.init()` before launching `legion-desktop`.
 
 GAP-05.3 and GAP-05.4 stay open. Not VoiceOver. Not Orca.
 

@@ -68,7 +68,15 @@ end run
 on dumpUI(elem, depth, dumpState)
   set countSoFar to countSoFar of dumpState
   set outText to outText of dumpState
-  if depth > 5 or countSoFar >= 400 then return dumpState
+  -- Single-line `if ... then return dumpState` is a compile error:
+  -- osascript parses `return` as a bare handler exit, then `dumpState`
+  -- is an unexpected identifier (hosted 33636397701: 975:983).
+  if depth > 5 then
+    return dumpState
+  end if
+  if countSoFar > 399 then
+    return dumpState
+  end if
   try
     set kids to UI elements of elem
   on error
@@ -95,7 +103,9 @@ on dumpUI(elem, depth, dumpState)
     end if
     set outText to outText & pad & "[" & depth & "] " & roleName & " name='" & titleName & "'" & linefeed
     set dumpState to {countSoFar:countSoFar, outText:outText}
-    if countSoFar >= 400 then return dumpState
+    if countSoFar > 399 then
+      return dumpState
+    end if
     set dumpState to my dumpUI(kid, depth + 1, dumpState)
     set countSoFar to countSoFar of dumpState
     set outText to outText of dumpState

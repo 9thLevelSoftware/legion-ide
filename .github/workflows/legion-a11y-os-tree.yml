@@ -53,16 +53,21 @@ jobs:
             xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
               bash -lc '
                 set -euo pipefail
+                export GTK_A11Y=atspi
+                export ACCESSIBILITY_ENABLED=1
                 if command -v dbus-launch >/dev/null; then
                   eval "$(dbus-launch --sh-syntax)"
                 fi
+                launcher=""
                 for candidate in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
                   if [[ -x "$candidate" ]]; then
+                    launcher="$candidate"
                     "$candidate" --launch-immediately &
                     break
                   fi
                 done
-                sleep 2
+                echo "ATSPI_LAUNCHER=${launcher:-none}"
+                ./scripts/a11y-atspi-warmup.sh
                 ./target/debug/legion-desktop --smoke --workspace . --file Cargo.toml --duration-ms 45000 --evidence target/a11y-os-tree/smoke.md &
                 smoke_pid=$!
                 for i in $(seq 1 40); do
