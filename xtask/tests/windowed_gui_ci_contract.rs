@@ -47,8 +47,8 @@ fn windowed_gui_3os_green_reports_set_window_created() {
         );
     }
     assert!(
-        found >= 9,
-        "expected clock-run reports for at least three 3-OS dispatches, found {found}"
+        found >= 12,
+        "expected clock-run reports for at least four 3-OS dispatches, found {found}"
     );
 }
 

@@ -89,6 +89,14 @@ Clock run 3: [run 33621158550](https://github.com/9thLevelSoftware/legion-ide/ac
 
 This is **clock run 3 of 4**. Consecutive with runs 1 and 2. Not owner sign-off. Not a required check.
 
-Clock run 4 dispatched on `main`: [run 33627790410](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33627790410).
+Clock run 4: [run 33627790410](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33627790410) on `4e0708a4` (`main` after #206). All three jobs passed.
+
+| OS | Artifact | `window_created` | Result |
+| --- | --- | --- | --- |
+| ubuntu-latest | [`ubuntu-33627790410.toml`](windowed-gui-3os/ubuntu-33627790410.toml) | true | passed |
+| windows-latest | [`windows-33627790410.toml`](windowed-gui-3os/windows-33627790410.toml) | true | passed |
+| macos-latest | [`macos-33627790410.toml`](windowed-gui-3os/macos-33627790410.toml) | true | passed |
+
+This is **clock run 4 of 4**. Consecutive with runs 1–3. **Not owner sign-off.** Not a required check. Do not fold into `protect-main` or `legion-gates.yml` until a named owner signs off.
 
 Ledger row statuses are unchanged.

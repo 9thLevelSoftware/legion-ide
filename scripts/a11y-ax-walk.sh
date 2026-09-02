@@ -38,6 +38,8 @@ printf '%s\n' "PROCESS_FOUND: $process_name"
 
 # System Events is the committed, repeatable AX walk. It is not VoiceOver.
 # osascript `log` is not stdout; return one text blob instead.
+# `set -e` would skip the status handler if osascript fails, so capture it.
+set +e
 osascript - "$process_name" <<'APPLESCRIPT'
 on run argv
   set procName to item 1 of argv
@@ -66,7 +68,7 @@ end run
 on dumpUI(elem, depth, dumpState)
   set countSoFar to countSoFar of dumpState
   set outText to outText of dumpState
-  if depth > 5 or countSoFar ≥ 400 then return dumpState
+  if depth > 5 or countSoFar >= 400 then return dumpState
   try
     set kids to UI elements of elem
   on error
@@ -93,7 +95,7 @@ on dumpUI(elem, depth, dumpState)
     end if
     set outText to outText & pad & "[" & depth & "] " & roleName & " name='" & titleName & "'" & linefeed
     set dumpState to {countSoFar:countSoFar, outText:outText}
-    if countSoFar ≥ 400 then return dumpState
+    if countSoFar >= 400 then return dumpState
     set dumpState to my dumpUI(kid, depth + 1, dumpState)
     set countSoFar to countSoFar of dumpState
     set outText to outText of dumpState
@@ -102,6 +104,7 @@ on dumpUI(elem, depth, dumpState)
 end dumpUI
 APPLESCRIPT
 status=$?
+set -e
 if [ "$status" -ne 0 ]; then
   printf '%s\n' "AX_WALK_FAILED: osascript exit $status (often TCC / Accessibility permission)"
   exit 5
