@@ -38,70 +38,57 @@ printf '%s\n' "PROCESS_FOUND: $process_name"
 
 # System Events is the committed, repeatable AX walk. It is not VoiceOver.
 # osascript `log` is not stdout; return one text blob instead.
+# Hosted osascript rejected `return dumpState` (33636397701 975:983,
+# 33637474631 1228:1236). Keep this script to one `on run` handler and
+# never `return` a record.
 # `set -e` would skip the status handler if osascript fails, so capture it.
 set +e
 osascript - "$process_name" <<'APPLESCRIPT'
 on run argv
   set procName to item 1 of argv
   set outText to ""
+  set total to 0
   tell application "System Events"
     if not (exists process procName) then
       error "PROCESS_NOT_FOUND: " & procName
     end if
     tell process procName
       set winCount to count of windows
-      set outText to outText & "WINDOW_COUNT=" & winCount & linefeed
+      set outText to outText & "WINDOW_COUNT=" & (winCount as text) & linefeed
       if winCount is 0 then
         error "WINDOW_NOT_FOUND"
       end if
-      set dumpState to {countSoFar:0, outText:outText}
       repeat with w in windows
-        set dumpState to my dumpUI(w, 1, dumpState)
+        set total to total + 1
+        set wtitle to ""
+        try
+          set wtitle to name of w as text
+        end try
+        set outText to outText & "[1] window name='" & wtitle & "'" & linefeed
+        try
+          set kids to UI elements of w
+          repeat with kid in kids
+            if total > 399 then
+              exit repeat
+            end if
+            set total to total + 1
+            set roleName to ""
+            set titleName to ""
+            try
+              set roleName to role of kid as text
+            end try
+            try
+              set titleName to name of kid as text
+            end try
+            set outText to outText & "  [2] " & roleName & " name='" & titleName & "'" & linefeed
+          end repeat
+        end try
       end repeat
-      set outText to outText of dumpState
-      set outText to outText & "DESCENDANTS_ENUMERATED: " & (countSoFar of dumpState) & linefeed
+      set outText to outText & "DESCENDANTS_ENUMERATED: " & (total as text) & linefeed
     end tell
   end tell
   return outText & "AX_WALK_OK" & linefeed
 end run
-
-on dumpUI(elem, depth, dumpState)
-  set countSoFar to countSoFar of dumpState
-  set outText to outText of dumpState
-  if depth > 5 or countSoFar >= 400 then return dumpState
-  try
-    set kids to UI elements of elem
-  on error
-    return dumpState
-  end try
-  repeat with kid in kids
-    set countSoFar to countSoFar + 1
-    set pad to ""
-    repeat depth times
-      set pad to pad & "  "
-    end repeat
-    set roleName to ""
-    set titleName to ""
-    try
-      set roleName to role of kid as text
-    end try
-    try
-      set titleName to title of kid as text
-    end try
-    if titleName is "" then
-      try
-        set titleName to name of kid as text
-      end try
-    end if
-    set outText to outText & pad & "[" & depth & "] " & roleName & " name='" & titleName & "'" & linefeed
-    set dumpState to {countSoFar:countSoFar, outText:outText}
-    if countSoFar >= 400 then return dumpState
-    set dumpState to my dumpUI(kid, depth + 1, dumpState)
-    set countSoFar to countSoFar of dumpState
-    set outText to outText of dumpState
-  end repeat
-  return {countSoFar:countSoFar, outText:outText}
-end dumpUI
 APPLESCRIPT
 status=$?
 set -e

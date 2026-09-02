@@ -5,8 +5,8 @@
 | Platform | Repeatable probe | Observation |
 | --- | --- | --- |
 | Windows | `scripts/a11y-uia-walk.ps1` | Observed when run against a live desktop window; the committed script is the source of truth. |
-| macOS | `scripts/a11y-ax-walk.sh` | Probe committed. Live dump when run on Darwin against a window. Not VoiceOver. |
-| Linux | `scripts/a11y-atspi-walk.sh` | Probe committed. Live dump when run on Linux against a window. Not Orca. |
+| macOS | `scripts/a11y-ax-walk.sh` | Hosted dump [`gap-05-3-macos-ax-dump.txt`](../production/WS-P0/gap-05-3-macos-ax-dump.txt) from run 33638436515 (`AX_WALK_OK`, window `Legion IDE Smoke`). Not VoiceOver. |
+| Linux | `scripts/a11y-atspi-walk.sh` | Probe committed. Hosted xvfb miss: AccessKit unix did not publish on `org.a11y.Bus` ([`gap-05-4-linux-atspi-miss.txt`](../production/WS-P0/gap-05-4-linux-atspi-miss.txt)). Not Orca. |
 
 Run `scripts/a11y-platform-probe.sh` to produce a machine-readable status. It
 executes the committed Windows UIA walk, the macOS AX walk, or the Linux

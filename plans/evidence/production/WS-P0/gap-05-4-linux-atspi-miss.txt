@@ -1,0 +1,2 @@
+ATSPI_APPS:
+PROCESS_NOT_FOUND: legion-desktop
