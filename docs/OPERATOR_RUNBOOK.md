@@ -42,6 +42,14 @@ This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **indep
 
 File gaps that forbid a named release claim with `.github/ISSUE_TEMPLATE/release-blocker.yml` (labels `qual-11` and `release-blocker`). Do not use Bug report for that queue. Taxonomy: `plans/qual-11-release-blocker-taxonomy.md`.
 
+GAP-02.1 (`EXT-CERT-*`) issues, none closed (credentials are not in the org secret store):
+
+| Id | Issue |
+| --- | --- |
+| `EXT-CERT-MAC` | [#211](https://github.com/9thLevelSoftware/legion-ide/issues/211) |
+| `EXT-CERT-LIN` | [#212](https://github.com/9thLevelSoftware/legion-ide/issues/212) |
+| `EXT-CERT-WIN` | [#213](https://github.com/9thLevelSoftware/legion-ide/issues/213) |
+
 ## Protected `main` (GAP-07.3)
 
 Ruleset `protect-main` (id `21950476`) is active on `refs/heads/main`: pull requests only, no force-push, no deletion, and required checks `Standing gates` (ubuntu/windows/macos), `cargo-deny`, and `Legion bench recorded`. Evidence: `plans/evidence/production/WS-P0/gap-07-3-main-ruleset.md`. Direct pushes to `origin/main` fail. Independent review is **not** required yet (single owner).

@@ -157,7 +157,7 @@ Depends on: Wave 2 for the thing being signed; `GAP-02.1` already in flight.
 
 | Task | Outcome | Primary files | Verification | Acceptance | Stop condition |
 | --- | --- | --- | --- | --- | --- |
-| GAP-02.1 | Issue `EXT-CERT-WIN/MAC/LIN` | `plans/release/procurement-and-key-escrow.md` | escrow checklist complete | Certs exist in the org secret store, not the repo | Do not commit private keys |
+| GAP-02.1 | Issue `EXT-CERT-WIN/MAC/LIN` | `plans/release/procurement-and-key-escrow.md` | escrow checklist complete | Certs exist in the org secret store, not the repo | Do not commit private keys. QUAL.11 issues filed 2026-09-02: [#213](https://github.com/9thLevelSoftware/legion-ide/issues/213) WIN, [#211](https://github.com/9thLevelSoftware/legion-ide/issues/211) MAC, [#212](https://github.com/9thLevelSoftware/legion-ide/issues/212) LIN. **Not closed** — certs are not in the org secret store. |
 | GAP-02.2 | `legion-release.yml` signs with signtool / codesign+notarytool / Linux package signature; `signer_status` is no longer forced `unsigned-beta` | `.github/workflows/legion-release.yml`, `xtask/src/signing.rs`, `scripts/package-native.*` | dry-run then a dispatch publish | Descriptor `signer_status` reflects a real OS signer | Ed25519 manifest-only signing is not Authenticode |
 | GAP-02.3 | Fresh-VM Gatekeeper / SmartScreen / Linux trust evidence | `plans/evidence/release/` | three OS journals | Replaces the descriptor-only `P8-F1-T3` checkpoint | Operator "click through SmartScreen" is a fail |
 
@@ -204,7 +204,7 @@ Do not pull these into a P0 wave. They are the full-pass P1–P3 rows:
 1. GAP-08.1 (widen claim-audit) and GAP-07.1 (`CODEOWNERS`) in one PR. **Landed 2026-08-31** with GAP-08.2 in the same change so the new gate stays green: `.github/CODEOWNERS`; `xtask` cross-doc claim-audit + Appendix A consistency; AGENTS.md / ledger / Appendix A / USER_GUIDE wording corrected.
 2. ~~GAP-08.2 (rewrite stale sentences) immediately after, forced by the new reds.~~ Done with item 1.
 3. GAP-07.2 / GAP-07.3. **Landed 2026-08-31:** QUAL.11 taxonomy + release-blocker issue form; GitHub labels `qual-11` / `release-blocker` / `severity-p0`…`p3`; ruleset `protect-main` id `21950476` (see `plans/evidence/production/WS-P0/gap-07-3-main-ruleset.md`). Independent review is still off (single owner). Direct pushes to `origin/main` now fail.
-4. Open GAP-02.1 procurement in parallel (human, not a code PR).
+4. Open GAP-02.1 procurement in parallel (human, not a code PR). QUAL.11 issues [#211](https://github.com/9thLevelSoftware/legion-ide/issues/211)/[#212](https://github.com/9thLevelSoftware/legion-ide/issues/212)/[#213](https://github.com/9thLevelSoftware/legion-ide/issues/213) filed 2026-09-02; certs still not in the org secret store.
 5. GAP-04.1 crash-safe dirty restore. **Landed 2026-08-31** on this PR: sidecar `.legion/unsaved/` (not session JSON); killed dirty session restores buffer text; disk is unchanged until a proposal-mediated save.
 6. GAP-04.2 local-history metadata reload. **Landed** on #192: `.legion/local-history/manifest.json` round-trips identity/hash/timestamp; blobs without metadata rows are not offered after restart. Typing is unchanged — persist runs on the save path.
 7. GAP-04.3 desktop-integration proof of GAP-04.1. **This change:** `session_restore_killed_dirty_session_restores_sidecar_without_writing_disk` plus `plans/evidence/production/WS-P0/gap-04-3-desktop-hot-exit.md`. Not a windowed GAP-01 GUI run.
