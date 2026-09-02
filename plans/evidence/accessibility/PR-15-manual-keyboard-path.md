@@ -5,13 +5,13 @@
 | Platform | Repeatable probe | Observation |
 | --- | --- | --- |
 | Windows | `scripts/a11y-uia-walk.ps1` | Observed when run against a live desktop window; the committed script is the source of truth. |
-| macOS | No committed OS-tree probe | Unobserved. |
-| Linux | No committed OS-tree probe | Unobserved. |
+| macOS | `scripts/a11y-ax-walk.sh` | Probe committed. Live dump when run on Darwin against a window. Not VoiceOver. |
+| Linux | `scripts/a11y-atspi-walk.sh` | Probe committed. Live dump when run on Linux against a window. Not Orca. |
 
 Run `scripts/a11y-platform-probe.sh` to produce a machine-readable status. It
-executes the committed Windows UIA walk (using `LEGION_A11Y_PROCESS` or the
-default `legion-desktop`) and deliberately exits non-zero for macOS/Linux rather
-than implying an observation that was not made.
+executes the committed Windows UIA walk, the macOS AX walk, or the Linux
+AT-SPI walk (using `LEGION_A11Y_PROCESS` or the default `legion-desktop`).
+VoiceOver and Orca sessions are still GAP-05.3 / GAP-05.4.
 
 ## Manual keyboard-only path
 

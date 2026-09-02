@@ -1,0 +1,85 @@
+name: Legion OS-tree a11y probes
+
+# GAP-05.3 / GAP-05.4: committed macOS AX and Linux AT-SPI walks against a
+# live eframe::run_native window. Not VoiceOver, not Orca, not --beta-smoke.
+#
+# INDEPENDENT: workflow_dispatch. Failures do NOT block PR merges.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: legion-a11y-os-tree-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  os-tree:
+    name: OS-tree probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CARGO_TERM_COLOR: always
+      LEGION_A11Y_PROCESS: legion-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux GUI and AT-SPI bindings
+        if: runner.os == 'Linux'
+        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1 at-spi2-core gir1.2-atspi-2.0 python3-gi python3-gi-cairo
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and target
+        uses: swatinem/rust-cache@v2
+
+      - name: Build legion-desktop
+        run: cargo build -p legion-desktop
+
+      - name: Walk the live window OS tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/a11y-os-tree
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export WGPU_BACKEND=gl
+            xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
+              bash -lc '
+                set -euo pipefail
+                ./target/debug/legion-desktop --smoke --workspace . --file Cargo.toml --duration-ms 45000 --evidence target/a11y-os-tree/smoke.md &
+                smoke_pid=$!
+                for i in $(seq 1 40); do
+                  if pgrep -x legion-desktop >/dev/null; then break; fi
+                  sleep 1
+                done
+                sleep 8
+                ./scripts/a11y-atspi-walk.sh | tee target/a11y-os-tree/linux-atspi.txt
+                wait "$smoke_pid" || true
+              '
+          else
+            export WGPU_BACKEND=metal
+            ./target/debug/legion-desktop --smoke --workspace . --file Cargo.toml --duration-ms 45000 --evidence target/a11y-os-tree/smoke.md &
+            smoke_pid=$!
+            for i in $(seq 1 40); do
+              if pgrep -x legion-desktop >/dev/null; then break; fi
+              sleep 1
+            done
+            sleep 8
+            ./scripts/a11y-ax-walk.sh | tee target/a11y-os-tree/macos-ax.txt
+            wait "$smoke_pid" || true
+          fi
+
+      - name: Upload OS-tree dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a11y-os-tree-${{ matrix.os }}
+          path: target/a11y-os-tree/
+          if-no-files-found: warn
