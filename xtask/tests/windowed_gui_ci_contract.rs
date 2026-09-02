@@ -14,6 +14,36 @@ fn workflow_text() -> String {
 }
 
 #[test]
+fn windowed_gui_3os_green_reports_set_window_created() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../plans/evidence/production/WS-P0/windowed-gui-3os");
+    for name in [
+        "ubuntu-33584539014.toml",
+        "windows-33584539014.toml",
+        "macos-33584539014.toml",
+    ] {
+        let text = fs::read_to_string(dir.join(name))
+            .unwrap_or_else(|err| panic!("read {name}: {err}"));
+        assert!(
+            text.contains("window_created = true"),
+            "{name} must record a native window"
+        );
+        assert!(
+            text.contains("status = \"passed\""),
+            "{name} must be a passed open/edit/save"
+        );
+        assert!(
+            text.contains("not_beta_smoke = true"),
+            "{name} must not be --beta-smoke"
+        );
+        assert!(
+            text.contains("not_golden_path_5 = true"),
+            "{name} must not be golden-path-5"
+        );
+    }
+}
+
+#[test]
 fn windowed_gui_workflow_does_not_export_empty_wgpu_backend() {
     let text = workflow_text();
     assert!(
