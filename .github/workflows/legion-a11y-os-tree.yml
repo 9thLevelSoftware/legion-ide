@@ -31,7 +31,7 @@ jobs:
 
       - name: Install Linux GUI and AT-SPI bindings
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1 at-spi2-core gir1.2-atspi-2.0 python3-gi python3-gi-cairo
+        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1 at-spi2-core dbus-x11 gir1.2-atspi-2.0 python3-gi python3-gi-cairo
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -53,6 +53,16 @@ jobs:
             xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" \
               bash -lc '
                 set -euo pipefail
+                if command -v dbus-launch >/dev/null; then
+                  eval "$(dbus-launch --sh-syntax)"
+                fi
+                for candidate in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
+                  if [[ -x "$candidate" ]]; then
+                    "$candidate" --launch-immediately &
+                    break
+                  fi
+                done
+                sleep 2
                 ./target/debug/legion-desktop --smoke --workspace . --file Cargo.toml --duration-ms 45000 --evidence target/a11y-os-tree/smoke.md &
                 smoke_pid=$!
                 for i in $(seq 1 40); do

@@ -45,7 +45,6 @@ from gi.repository import Atspi
 name = os.environ.get("PROCESS_NAME", "legion-desktop")
 Atspi.init()
 desktop = Atspi.get_desktop(0)
-found = 0
 total = 0
 limit = 400
 
@@ -81,19 +80,23 @@ def walk(acc, depth):
         walk(child, depth + 1)
 
 matched = False
+seen = []
 for i in range(desktop.get_child_count()):
     app = desktop.get_child_at_index(i)
     if app is None:
         continue
     app_name = app.get_name() or ""
+    seen.append(app_name)
     if name.lower() not in app_name.lower() and "legion" not in app_name.lower():
         continue
     matched = True
-    found += 1
     print(f"APP name='{app_name}'")
     walk(app, 1)
 
 if not matched:
+    print("ATSPI_APPS:")
+    for app_name in seen:
+        print(f"  name='{app_name}'")
     print(f"PROCESS_NOT_FOUND: {name}")
     sys.exit(4)
 if total == 0:
