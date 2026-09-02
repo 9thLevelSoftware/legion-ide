@@ -26,8 +26,8 @@ fn windowed_gui_3os_green_reports_set_window_created() {
             continue;
         }
         found += 1;
-        let text = fs::read_to_string(entry.path())
-            .unwrap_or_else(|err| panic!("read {name}: {err}"));
+        let text =
+            fs::read_to_string(entry.path()).unwrap_or_else(|err| panic!("read {name}: {err}"));
         let name = name.as_ref();
         assert!(
             text.contains("window_created = true"),
