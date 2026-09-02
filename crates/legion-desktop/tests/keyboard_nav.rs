@@ -1433,7 +1433,13 @@ fn ctrl_shift_g_stages_the_focused_hunk() {
 
     let mut runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
         workspace.path().to_path_buf(),
-        Some(workspace.path().join("lib.rs").to_string_lossy().into_owned()),
+        Some(
+            workspace
+                .path()
+                .join("lib.rs")
+                .to_string_lossy()
+                .into_owned(),
+        ),
     ))
     .expect("desktop runtime should open git workspace");
     runtime
