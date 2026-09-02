@@ -36,7 +36,7 @@ Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly s
 
 `.github/workflows/legion-windowed-gui.yml` runs `cargo run -p xtask -- windowed-gui-e2e` on ubuntu, windows, and macos (`workflow_dispatch` and weekly Mondays 08:00 UTC). Linux wraps the step in `xvfb-run` so `eframe::run_native` still creates a window. The GUI step is hard-fail: no `continue-on-error`, no `|| true`.
 
-This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **independent**: failures do **not** block PR merges. Use the same four-green-run + owner sign-off clock as the golden-path smoke before adding it as a required check. Evidence stub: `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-3os.md` (hosted URLs filled after the first dispatch against `main`).
+This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **independent**: failures do **not** block PR merges. The four-green-run clock plus owner sign-off is recorded in `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-clock-signoff.md`. Completing that clock is not the same as adding a required check; windowed-gui is not on `protect-main` and is not folded into `legion-gates.yml`.
 
 ## Release-blocker queue (QUAL.11)
 

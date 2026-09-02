@@ -30,10 +30,7 @@ path. It is not headless `--beta-smoke` and not AppComposition `golden-path-5`.
 - Not folded into `legion-gates.yml`
 - Not a 22nd local standing gate
 - Not GAP-01.1 local proof (that landed on #196)
-- Not a required check and not a completed T0-D four-green clock (see hosted evidence)
-
-Promote to merge-blocking only after four consecutive green 3-OS runs and
-owner sign-off (`docs/OPERATOR_RUNBOOK.md`, `T0-D-smoke-promotion-criteria.md`).
+- Not a required check. The T0-D four-green clock is complete (see [`gap-01-2-windowed-gui-clock-signoff.md`](gap-01-2-windowed-gui-clock-signoff.md)); completing the clock is not merge-blocking.
 
 ## Hosted evidence
 
@@ -97,6 +94,8 @@ Clock run 4: [run 33627790410](https://github.com/9thLevelSoftware/legion-ide/ac
 | windows-latest | [`windows-33627790410.toml`](windowed-gui-3os/windows-33627790410.toml) | true | passed |
 | macos-latest | [`macos-33627790410.toml`](windowed-gui-3os/macos-33627790410.toml) | true | passed |
 
-This is **clock run 4 of 4**. Consecutive with runs 1–3. **Not owner sign-off.** Not a required check. Do not fold into `protect-main` or `legion-gates.yml` until a named owner signs off.
+This is **clock run 4 of 4**. Consecutive with runs 1–3.
+
+Owner sign-off 2026-09-02: [`gap-01-2-windowed-gui-clock-signoff.md`](gap-01-2-windowed-gui-clock-signoff.md). The clock is complete. **Not a required check.** Completing the clock is not the same as adding windowed-gui to `protect-main` or `legion-gates.yml`, and this file does not do that.
 
 Ledger row statuses are unchanged.
