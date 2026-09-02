@@ -1320,16 +1320,25 @@ fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
     let evidence = root.join("plans/evidence/accessibility/PR-15-manual-keyboard-path.md");
 
     let probe_text = fs::read_to_string(probe).expect("PR-15 probe contract");
-    assert!(probe_text.contains("observation=unobserved"));
     assert!(probe_text.contains("a11y-uia-walk.ps1"));
+    assert!(probe_text.contains("a11y-ax-walk.sh"));
+    assert!(probe_text.contains("a11y-atspi-walk.sh"));
+    let ax = fs::read_to_string(root.join("scripts/a11y-ax-walk.sh")).expect("AX probe");
+    let atspi = fs::read_to_string(root.join("scripts/a11y-atspi-walk.sh")).expect("AT-SPI probe");
+    assert!(ax.contains("observation=unobserved"));
+    assert!(atspi.contains("observation=unobserved"));
+    assert!(ax.contains("AX_WALK_OK"));
+    assert!(atspi.contains("ATSPI_WALK_OK"));
+    assert!(ax.contains("not a VoiceOver"));
+    assert!(atspi.contains("not an Orca"));
 
     let evidence_text = fs::read_to_string(evidence).expect("PR-15 evidence packet");
-    for platform in ["macOS", "Linux"] {
-        assert!(evidence_text.contains(&format!("| {platform} |")));
-        assert!(evidence_text.contains(&format!(
-            "| {platform} | No committed OS-tree probe | Unobserved. |"
-        )));
-    }
+    assert!(evidence_text.contains("| macOS | `scripts/a11y-ax-walk.sh` |"));
+    assert!(evidence_text.contains("| Linux | `scripts/a11y-atspi-walk.sh` |"));
+    assert!(evidence_text.contains("Not VoiceOver."));
+    assert!(evidence_text.contains("Not Orca."));
+    assert!(!evidence_text.contains("| macOS | No committed OS-tree probe | Unobserved. |"));
+    assert!(!evidence_text.contains("| Linux | No committed OS-tree probe | Unobserved. |"));
     assert!(evidence_text.contains("Manual keyboard-only path"));
     assert!(evidence_text.contains("### Certified (renderer keymap or command palette)"));
     assert!(evidence_text.contains("### Residual (explicitly cut from default keymap)"));

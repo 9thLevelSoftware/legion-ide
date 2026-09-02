@@ -43,10 +43,19 @@ case "$platform" in
       exit "$probe_status"
     fi
     ;;
-  macos|linux)
-    printf '%s\n' "platform=$platform" 'observation=unobserved' 'probe=not-implemented'
-    printf '%s\n' 'reason=No committed OS-tree probe or observation exists for this platform.'
-    exit 2
+  macos)
+    process_name=${LEGION_A11Y_PROCESS:-legion-desktop}
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    printf '%s\n' 'platform=macos' 'observation=live-probe' \
+      'probe=scripts/a11y-ax-walk.sh' "process=$process_name"
+    LEGION_A11Y_PROCESS=$process_name "$script_dir/a11y-ax-walk.sh"
+    ;;
+  linux)
+    process_name=${LEGION_A11Y_PROCESS:-legion-desktop}
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    printf '%s\n' 'platform=linux' 'observation=live-probe' \
+      'probe=scripts/a11y-atspi-walk.sh' "process=$process_name"
+    LEGION_A11Y_PROCESS=$process_name "$script_dir/a11y-atspi-walk.sh"
     ;;
   *)
     printf '%s\n' "platform=$platform" 'observation=unsupported' 'reason=Unknown host platform.'

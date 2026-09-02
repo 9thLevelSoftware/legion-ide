@@ -69,6 +69,16 @@ Third dispatch after that fix: [run 33584539014](https://github.com/9thLevelSoft
 
 This is **clock run 1 of 4**. It is not owner sign-off and not a required check.
 
-Second clock dispatch on `main` after #204: [run 33587226828](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33587226828).
+Clock run 2: [run 33587226828](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33587226828) on `3d92bf35` (`main` after #204). All three jobs passed.
+
+| OS | Artifact | `window_created` | Result |
+| --- | --- | --- | --- |
+| ubuntu-latest | [`ubuntu-33587226828.toml`](windowed-gui-3os/ubuntu-33587226828.toml) | true | passed |
+| windows-latest | [`windows-33587226828.toml`](windowed-gui-3os/windows-33587226828.toml) | true | passed |
+| macos-latest | [`macos-33587226828.toml`](windowed-gui-3os/macos-33587226828.toml) | true | passed |
+
+This is **clock run 2 of 4**. Consecutive with run 1. Not owner sign-off. Not a required check.
+
+Clock run 3 dispatched on `main`: [run 33621158550](https://github.com/9thLevelSoftware/legion-ide/actions/runs/33621158550).
 
 Ledger row statuses are unchanged.

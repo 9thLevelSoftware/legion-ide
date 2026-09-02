@@ -17,13 +17,18 @@ fn workflow_text() -> String {
 fn windowed_gui_3os_green_reports_set_window_created() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../plans/evidence/production/WS-P0/windowed-gui-3os");
-    for name in [
-        "ubuntu-33584539014.toml",
-        "windows-33584539014.toml",
-        "macos-33584539014.toml",
-    ] {
-        let text =
-            fs::read_to_string(dir.join(name)).unwrap_or_else(|err| panic!("read {name}: {err}"));
+    let mut found = 0;
+    for entry in fs::read_dir(&dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display())) {
+        let entry = entry.expect("dir entry");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".toml") {
+            continue;
+        }
+        found += 1;
+        let text = fs::read_to_string(entry.path())
+            .unwrap_or_else(|err| panic!("read {name}: {err}"));
+        let name = name.as_ref();
         assert!(
             text.contains("window_created = true"),
             "{name} must record a native window"
@@ -41,6 +46,10 @@ fn windowed_gui_3os_green_reports_set_window_created() {
             "{name} must not be golden-path-5"
         );
     }
+    assert!(
+        found >= 6,
+        "expected clock-run reports for at least two 3-OS dispatches, found {found}"
+    );
 }
 
 #[test]
