@@ -22,8 +22,8 @@ fn windowed_gui_3os_green_reports_set_window_created() {
         "windows-33584539014.toml",
         "macos-33584539014.toml",
     ] {
-        let text = fs::read_to_string(dir.join(name))
-            .unwrap_or_else(|err| panic!("read {name}: {err}"));
+        let text =
+            fs::read_to_string(dir.join(name)).unwrap_or_else(|err| panic!("read {name}: {err}"));
         assert!(
             text.contains("window_created = true"),
             "{name} must record a native window"
