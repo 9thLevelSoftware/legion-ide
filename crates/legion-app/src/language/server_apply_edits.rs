@@ -30,14 +30,16 @@ impl ServerApplyEditAuthority {
         if self.replies.len() >= 8 || self.replies.contains_key(&proposal_id) {
             return false;
         }
-        self.replies.insert(
-            proposal_id,
-            (
-                reply,
-                decision,
-                deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(120)),
-            ),
-        );
+        // Honor an already-expired request deadline so an inline claim cannot
+        // revive it. Live or missing deadlines get the 120s review budget
+        // rather than the short LSP request timeout.
+        let now = Instant::now();
+        let deadline = match deadline {
+            Some(deadline) if deadline <= now => deadline,
+            _ => now + Duration::from_secs(120),
+        };
+        self.replies
+            .insert(proposal_id, (reply, decision, deadline));
         true
     }
 

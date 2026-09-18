@@ -359,7 +359,7 @@ impl AppComposition {
             proposal_id,
             reply.clone(),
             decision,
-            Some(std::time::Instant::now() + std::time::Duration::from_secs(120)),
+            request.deadline,
         ) {
             let _ = reply.try_send(legion_lsp::LspApplyWorkspaceEditResponse {
                 applied: false,
