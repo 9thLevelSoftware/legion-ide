@@ -5247,7 +5247,7 @@ impl Shell {
     pub(crate) fn active_code_action_range(&self) -> Result<ProtocolTextRange, ShellCommandError> {
         if let Some(viewport) = &self.active_buffer_projection.viewport {
             if let Some(range) = viewport.selections.first() {
-                return Ok(range.clone());
+                return Ok(*range);
             }
             return Ok(ProtocolTextRange {
                 start: viewport.cursor,

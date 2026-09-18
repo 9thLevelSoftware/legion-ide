@@ -1,7 +1,7 @@
 use super::*;
 use egui::{Context, FontDefinitions, FontFamily, RawInput};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use uuid::Uuid;
 
 struct FakeSource {
@@ -326,12 +326,10 @@ fn huge_line_completes_across_bounded_frames_without_oversized_reads() {
         });
         assert!(source.returned_bytes.get() - bytes_before <= MAX_FRAME_SOURCE_BYTES);
         assert!(cache.scan.rows.len() <= MAX_FRAME_ROWS);
-        assert!(
-            cache
-                .replay
-                .values()
-                .all(|state| state.glyphs.len() <= MAX_FRAME_GLYPHS)
-        );
+        assert!(cache
+            .replay
+            .values()
+            .all(|state| state.glyphs.len() <= MAX_FRAME_GLYPHS));
         complete = result.expect("frame result").complete;
         if complete {
             break;
@@ -431,10 +429,9 @@ fn wrapped_rows_report_distinct_vertical_positions() {
             .rows;
     });
     assert!(rows.len() > 1);
-    assert!(
-        rows.windows(2)
-            .all(|pair| pair[0].rect.min.y < pair[1].rect.min.y)
-    );
+    assert!(rows
+        .windows(2)
+        .all(|pair| pair[0].rect.min.y < pair[1].rect.min.y));
 }
 
 #[test]
@@ -841,7 +838,8 @@ fn terminal_owned_worker_error_settles_without_repaint_or_reread() {
     let identity = source.identity;
     let mut pool = StreamedLayoutCachePool::default();
     let mut settled = false;
-    for _ in 0..200 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
         pool.begin_frame(&[identity]);
         let mut result: Option<Result<StreamedPaintResult, StreamedLayoutError>> = None;
         with_ui(&context, |ui| {
@@ -873,7 +871,7 @@ fn terminal_owned_worker_error_settles_without_repaint_or_reread() {
             settled = true;
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(settled, "terminal worker error did not settle");
     let reads = source.reads.load(Ordering::Relaxed);
@@ -995,11 +993,10 @@ fn streamed_byte_navigation_retains_middle_target_after_long_tail() {
     let rows = pool
         .navigation_rows(identity)
         .expect("middle byte navigation should complete");
-    assert!(
-        rows.rows.iter().any(|row| {
-            row.start.byte_column <= 256 * 1024 && 256 * 1024 <= row.end.byte_column
-        })
-    );
+    assert!(rows
+        .rows
+        .iter()
+        .any(|row| { row.start.byte_column <= 256 * 1024 && 256 * 1024 <= row.end.byte_column }));
 }
 
 #[test]
@@ -1180,11 +1177,10 @@ fn streamed_first_index_and_last_navigation_complete_across_frames() {
             StreamedRequestedRow::First => {
                 assert!(rows.rows.iter().any(|row| row.row_index == Some(0)))
             }
-            StreamedRequestedRow::Index(index) => assert!(
-                rows.rows
-                    .iter()
-                    .any(|row| row.row_index == Some(index as u32))
-            ),
+            StreamedRequestedRow::Index(index) => assert!(rows
+                .rows
+                .iter()
+                .any(|row| row.row_index == Some(index as u32))),
             StreamedRequestedRow::Last => {
                 let last = rows.rows.iter().filter_map(|row| row.row_index).max();
                 assert_eq!(
