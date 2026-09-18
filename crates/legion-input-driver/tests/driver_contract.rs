@@ -338,7 +338,7 @@ fn ime_oracle_requires_new_cjk_against_the_baseline() {
 
 #[test]
 fn absolute_pointer_uses_the_virtual_screen_origin() {
-    let (dx, dy) = observe::absolute_pointer_from_virtual_screen(-1920, 100, -1920, 0, 3840, 1080)
+    let (dx, _dy) = observe::absolute_pointer_from_virtual_screen(-1920, 100, -1920, 0, 3840, 1080)
         .expect("secondary-monitor origin is a valid virtual screen");
     assert_eq!(dx, 0);
     let (primary_x, _) = observe::absolute_pointer_from_virtual_screen(0, 0, -1920, 0, 3840, 1080)
