@@ -1,7 +1,7 @@
 use super::*;
 use egui::{Context, FontDefinitions, FontFamily, RawInput};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use uuid::Uuid;
 
 struct FakeSource {
@@ -326,10 +326,12 @@ fn huge_line_completes_across_bounded_frames_without_oversized_reads() {
         });
         assert!(source.returned_bytes.get() - bytes_before <= MAX_FRAME_SOURCE_BYTES);
         assert!(cache.scan.rows.len() <= MAX_FRAME_ROWS);
-        assert!(cache
-            .replay
-            .values()
-            .all(|state| state.glyphs.len() <= MAX_FRAME_GLYPHS));
+        assert!(
+            cache
+                .replay
+                .values()
+                .all(|state| state.glyphs.len() <= MAX_FRAME_GLYPHS)
+        );
         complete = result.expect("frame result").complete;
         if complete {
             break;
@@ -429,9 +431,10 @@ fn wrapped_rows_report_distinct_vertical_positions() {
             .rows;
     });
     assert!(rows.len() > 1);
-    assert!(rows
-        .windows(2)
-        .all(|pair| pair[0].rect.min.y < pair[1].rect.min.y));
+    assert!(
+        rows.windows(2)
+            .all(|pair| pair[0].rect.min.y < pair[1].rect.min.y)
+    );
 }
 
 #[test]
@@ -993,10 +996,11 @@ fn streamed_byte_navigation_retains_middle_target_after_long_tail() {
     let rows = pool
         .navigation_rows(identity)
         .expect("middle byte navigation should complete");
-    assert!(rows
-        .rows
-        .iter()
-        .any(|row| { row.start.byte_column <= 256 * 1024 && 256 * 1024 <= row.end.byte_column }));
+    assert!(
+        rows.rows.iter().any(|row| {
+            row.start.byte_column <= 256 * 1024 && 256 * 1024 <= row.end.byte_column
+        })
+    );
 }
 
 #[test]
@@ -1177,10 +1181,11 @@ fn streamed_first_index_and_last_navigation_complete_across_frames() {
             StreamedRequestedRow::First => {
                 assert!(rows.rows.iter().any(|row| row.row_index == Some(0)))
             }
-            StreamedRequestedRow::Index(index) => assert!(rows
-                .rows
-                .iter()
-                .any(|row| row.row_index == Some(index as u32))),
+            StreamedRequestedRow::Index(index) => assert!(
+                rows.rows
+                    .iter()
+                    .any(|row| row.row_index == Some(index as u32))
+            ),
             StreamedRequestedRow::Last => {
                 let last = rows.rows.iter().filter_map(|row| row.row_index).max();
                 assert_eq!(
