@@ -382,7 +382,10 @@ impl AppComposition {
         self.request_code_actions_scoped(buffer_id, range, false)
     }
 
-    pub(crate) fn active_code_action_range(&self, buffer_id: BufferId) -> Option<ProtocolTextRange> {
+    pub(crate) fn active_code_action_range(
+        &self,
+        buffer_id: BufferId,
+    ) -> Option<ProtocolTextRange> {
         let cursor = self.editor.primary_cursor(buffer_id).ok()?;
         let text = self.editor.text(buffer_id).ok()?.to_string();
         let line_start = text
