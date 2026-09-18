@@ -21,6 +21,11 @@
 #     copied somewhere else first would still pass it. What actually ties the
 #     staged payload to a specific artifact is the MSI hash check above and the
 #     hashes recorded in `STAGING-EVIDENCE.toml`;
+#   * the SHA-256 of the extracted `legion-desktop.exe` does not match the
+#     `legion-desktop.exe.sha256` sidecar beside the MSI, so a payload that
+#     did not come from that installer cannot be staged beside its hash;
+#   * `-DestinationDir` is the same as, contains, or is nested inside
+#     `-PackageDir`, `-StagingSource`, or the payload directory;
 #   * the extraction tree does not contain exactly one `legion-desktop.exe`.
 #
 # `target/release-smoke/...` is deliberately not a development build directory:
@@ -213,12 +218,33 @@ $payloadDir = (Split-Path -Parent $sourceExecutable)
 
 Assert-NotDevelopmentBuild "payload directory" $payloadDir
 
+$payloadSidecar = Join-Path $PackageDir "$ExecutableName.sha256"
+if (-not (Test-Path -LiteralPath $payloadSidecar -PathType Leaf)) {
+    Fail "Missing payload checksum sidecar: $payloadSidecar"
+}
+$payloadChecksumLine = (Get-Content -LiteralPath $payloadSidecar -Raw).Replace("`r", "").Trim()
+if ($payloadChecksumLine -notmatch '^([0-9a-f]{64}) \*(.+)$') {
+    Fail "Malformed payload checksum file: $payloadSidecar"
+}
+$expectedPayloadHash = $Matches[1]
+$payloadChecksumName = $Matches[2]
+if ($payloadChecksumName -ne $ExecutableName) {
+    Fail "Payload checksum names unexpected executable: expected $ExecutableName, found $payloadChecksumName"
+}
+$sourceExecutableHash = Get-Sha256 $sourceExecutable
+if ($sourceExecutableHash -ne $expectedPayloadHash) {
+    Fail "Staged payload is not the verified MSI content: expected $expectedPayloadHash, computed $sourceExecutableHash for $sourceExecutable"
+}
+
 if ($null -eq (Split-Path -Parent $DestinationDir) -or (Split-Path -Parent $DestinationDir) -eq "") {
     Fail "Refusing to stage into a filesystem root: $DestinationDir"
 }
-foreach ($guarded in @($PackageDir, $StagingSource)) {
+foreach ($guarded in @($PackageDir, $StagingSource, $payloadDir)) {
     if (Test-PathIsAtOrAbove $DestinationDir $guarded) {
         Fail "Refusing to stage into $DestinationDir because it contains the source path $guarded"
+    }
+    if (Test-PathIsAtOrAbove $guarded $DestinationDir) {
+        Fail "Refusing to stage into $DestinationDir because it is nested inside the source path $guarded"
     }
 }
 

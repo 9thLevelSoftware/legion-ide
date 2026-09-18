@@ -12,14 +12,18 @@ use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSE_EVENT_FLAGS,
-    MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT,
-    SendInput, VIRTUAL_KEY,
+use windows::Win32::System::Memory::{
+    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+};
 
 /// `CF_UNICODETEXT`. Spelled as the raw clipboard format number the Win32 API
 /// takes so this crate does not have to enable the `Win32_System_Ole` feature
@@ -136,17 +140,18 @@ pub fn unicode_text(text: &str) -> Result<(), String> {
 /// product geometry API.
 pub fn click_at(x: i32, y: i32) -> Result<(), String> {
     // SAFETY: `GetSystemMetrics` takes a plain index and returns a plain int.
-    let (width, height) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-    if width <= 1 || height <= 1 {
-        return Err(format!(
-            "the primary screen reports {width}x{height}; there is no coordinate space to \
-             click in"
-        ));
-    }
-    let absolute_x = (i64::from(x) * 65535) / i64::from(width - 1);
-    let absolute_y = (i64::from(y) * 65535) / i64::from(height - 1);
-    let dx = i32::try_from(absolute_x.clamp(0, 65535)).unwrap_or(0);
-    let dy = i32::try_from(absolute_y.clamp(0, 65535)).unwrap_or(0);
+    let (origin_x, origin_y, width, height) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    let (dx, dy) = crate::observe::absolute_pointer_from_virtual_screen(
+        x, y, origin_x, origin_y, width, height,
+    )?;
+    let absolute_flags = MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0;
 
     let mouse = |flags: u32| INPUT {
         r#type: INPUT_MOUSE,
@@ -162,9 +167,13 @@ pub fn click_at(x: i32, y: i32) -> Result<(), String> {
         },
     };
 
-    send(&[mouse(MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0)])?;
-    send(&[mouse(MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0)])?;
-    send(&[mouse(MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0)])
+    send(&[mouse(absolute_flags)])?;
+    send(&[mouse(
+        MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
+    )])?;
+    send(&[mouse(
+        MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
+    )])
 }
 
 /// Put `text` on the **system** clipboard as `CF_UNICODETEXT`.
@@ -236,9 +245,26 @@ pub fn read_clipboard_text() -> Result<String, String> {
             return Err("GlobalLock returned no pointer for the clipboard buffer".to_string());
         }
 
+        let size = GlobalSize(global);
+        if size < size_of::<u16>() {
+            let _ = GlobalUnlock(global);
+            let _ = CloseClipboard();
+            return Err(
+                "clipboard CF_UNICODETEXT block is smaller than one UTF-16 unit".to_string(),
+            );
+        }
+        let max_units = (size / size_of::<u16>()).min(MAX_UNITS);
+
         let mut length = 0usize;
-        while length < MAX_UNITS && *source.add(length) != 0 {
+        while length < max_units && *source.add(length) != 0 {
             length += 1;
+        }
+        if length == max_units {
+            let _ = GlobalUnlock(global);
+            let _ = CloseClipboard();
+            return Err(
+                "clipboard CF_UNICODETEXT has no terminator inside the allocated block".to_string(),
+            );
         }
         let text = String::from_utf16_lossy(std::slice::from_raw_parts(source, length));
 

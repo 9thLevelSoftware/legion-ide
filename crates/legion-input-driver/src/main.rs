@@ -188,20 +188,42 @@ fn observe_conformance(product: &Path, scratch_root: &Path) -> report::Conforman
         }
     };
 
-    let window = observe::wait_for_window(child.id(), Duration::from_secs(90));
-    let Some(window) = window else {
-        let _ = child.kill();
-        let _ = child.wait();
-        observed.prerequisite = Some(
-            "A packaged native Legion product that opens a visible top-level window within 90 \
-             seconds of launch on this host, so the out-of-process oracles have a window to \
-             read. Without one the driver observed nothing and the product is not implicated."
-                .to_string(),
-        );
-        observed
-            .notes
-            .push("no visible top-level window owned by the product process appeared".to_string());
-        return observed;
+    let window = observe::wait_for_window(child.id(), Duration::from_secs(90), || {
+        child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.code().unwrap_or(1))
+    });
+    let window = match window {
+        observe::WindowWait::Found(window) => window,
+        observe::WindowWait::ProcessExited { exit_code } => {
+            observed.prerequisite = Some(format!(
+                "The packaged native Legion product process stayed alive long enough to open a \
+                 visible top-level window. It exited with code {exit_code} before any such \
+                 window appeared, so the out-of-process oracles had nothing to read and the \
+                 90-second host window-wait was not reached."
+            ));
+            observed.notes.push(format!(
+                "product process exited with code {exit_code} before a visible top-level window \
+                 appeared"
+            ));
+            return observed;
+        }
+        observe::WindowWait::TimedOut => {
+            let _ = child.kill();
+            let _ = child.wait();
+            observed.prerequisite = Some(
+                "A packaged native Legion product that opens a visible top-level window within 90 \
+                 seconds of launch on this host, so the out-of-process oracles have a window to \
+                 read. Without one the driver observed nothing and the product is not implicated."
+                    .to_string(),
+            );
+            observed.notes.push(
+                "no visible top-level window owned by the product process appeared".to_string(),
+            );
+            return observed;
+        }
     };
     observed.window_created = true;
 
@@ -246,15 +268,30 @@ fn drive_classes(
 ) -> Result<Vec<report::ClassObservation>, String> {
     use std::{thread, time::Duration};
 
-    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
     let oracle = observe::UiaOracle::open()?;
     let root = oracle.element_from_window(window)?;
     let (editor, text_pattern) = oracle.text_element(&root)?;
 
     // SAFETY: `window` was produced by the desktop enumeration.
-    unsafe {
-        let _ = SetForegroundWindow(window);
+    let mut foregrounded = false;
+    for _ in 0..10 {
+        unsafe {
+            let _ = SetForegroundWindow(window);
+            if GetForegroundWindow() == window {
+                foregrounded = true;
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    if !foregrounded {
+        return Err(
+            "Windows refused to foreground the product window; injected input would not be \
+             guaranteed to reach it"
+                .to_string(),
+        );
     }
     thread::sleep(Duration::from_millis(500));
 
@@ -538,24 +575,29 @@ fn observe_ime_cjk(context: &ClassContext<'_>) -> report::ClassObservation {
     }
 
     let observation = (|| -> Result<(bool, bool), String> {
+        let baseline_ui = context.oracle.document_text(context.text_pattern)?;
+        let baseline_file =
+            String::from_utf8_lossy(&observe::file_digest(context.target)?.bytes).into_owned();
         inject::chord(&[VK_CONTROL], VK_END)?;
         inject::key_press(VK_RETURN)?;
         inject::unicode_text("nihongo")?;
         inject::key_press(VK_CONVERT)?;
         settle();
         // First oracle: a composition region visible through UI Automation
-        // before anything is committed.
-        let composing = context
-            .oracle
-            .document_text(context.text_pattern)?
-            .chars()
-            .any(|ch| ch as u32 >= 0x3000);
+        // before anything is committed, compared against the pre-IME snapshot
+        // so earlier text/clipboard CJK markers cannot count as this class.
+        let composing = observe::has_new_cjk(
+            &baseline_ui,
+            &context.oracle.document_text(context.text_pattern)?,
+        );
         inject::key_press(VK_RETURN)?;
         save_chord()?;
-        // Second oracle: the committed code points in the saved bytes.
-        let committed = String::from_utf8_lossy(&observe::file_digest(context.target)?.bytes)
-            .chars()
-            .any(|ch| ch as u32 >= 0x3000);
+        // Second oracle: newly committed CJK in the saved bytes versus the
+        // same pre-IME snapshot of the file.
+        let committed = observe::has_new_cjk(
+            &baseline_file,
+            &String::from_utf8_lossy(&observe::file_digest(context.target)?.bytes),
+        );
         Ok((composing, committed))
     })();
 

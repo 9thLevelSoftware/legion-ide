@@ -5243,6 +5243,23 @@ impl Shell {
             Err(ShellCommandError::InvalidPosition)
         }
     }
+
+    pub(crate) fn active_code_action_range(&self) -> Result<ProtocolTextRange, ShellCommandError> {
+        if let Some(viewport) = &self.active_buffer_projection.viewport {
+            if let Some(range) = viewport.selections.first() {
+                return Ok(range.clone());
+            }
+            return Ok(ProtocolTextRange {
+                start: viewport.cursor,
+                end: viewport.cursor,
+            });
+        }
+        let position = self.parse_pos(0)?;
+        Ok(ProtocolTextRange {
+            start: position,
+            end: position,
+        })
+    }
 }
 
 pub(crate) fn protocol_text_coordinate(
@@ -5283,7 +5300,7 @@ pub(crate) fn parse_debug_step_kind(input: &str) -> DebugStepKindProjection {
 }
 
 fn terminal_command_help() -> &'static str {
-    "Commands: :mode Manual|Assist|Delegate|Legion Workflows | :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :tab | :assist-predict offset | :assist-dismiss | :assist-cancel | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action id | :debug-configs | :debug-launch id | :debug-step over | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
+    "Commands: :mode Manual|Assist|Delegate|Legion Workflows | :i text | :d start,end | :r start,end,text | :w | :wa | :tab id | :tab | :assist-predict offset | :assist-dismiss | :assist-cancel | :close id | :hover | :completion | :definition | :references | :outline | :format | :rename name | :code-action | :debug-configs | :debug-launch id | :debug-step over | :term-launch label | :term-input text | :term-close | :plugin id command | :ai-start label | :ai-explain label | :ai-propose label | :u | :redo | :q"
 }
 
 pub(crate) fn parse_dock_mode(input: &str) -> DockMode {

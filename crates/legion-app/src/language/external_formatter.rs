@@ -44,13 +44,13 @@
 //! extract the enum from the chokepoint first.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use legion_platform::{
-    BoundedProcessRequest, MAX_BOUNDED_STDIN_BYTES, NativeProcessService, PlatformError,
-    ProcessRequest, ProcessService,
+    BoundedProcessRequest, NativeProcessService, PlatformError, ProcessRequest, ProcessService,
+    MAX_BOUNDED_STDIN_BYTES,
 };
 use thiserror::Error;
 
@@ -58,8 +58,8 @@ use crate::*;
 
 use super::lsp_reads::LspWriteSideSpec;
 use super::{
-    FormatterApprovalError, FormatterApprovalRequest, FormatterProbe, PendingLspWriteOperation,
-    approve_formatter_executable, is_stale_response,
+    approve_formatter_executable, is_stale_response, FormatterApprovalError,
+    FormatterApprovalRequest, FormatterProbe, PendingLspWriteOperation,
 };
 
 /// Argument vector handed to a configured Python formatter.
@@ -137,12 +137,11 @@ pub const EXTERNAL_FORMATTER_UNPROBEABLE_REASON: &str =
 /// Exact prerequisite recorded when the app cannot hand this route a language
 /// capability broker.
 ///
-/// The broker that knows about the operator's exact-binary allowance is owned
-/// by `LanguageStartupAuthority` and has no accessor, so
-/// `AppComposition::external_formatter_capability_broker` currently answers
-/// `None` and a configured formatter records this string instead of running.
-/// It is recorded as a blocked prerequisite, never as a success or a skip.
-pub const EXTERNAL_FORMATTER_BROKER_PREREQUISITE: &str = "external formatter launch is blocked: AppComposition cannot obtain the language capability \
+/// Retained for the defensive `None` arm and for tests that still name the
+/// blocked-prerequisite string. Production `AppComposition` now obtains the
+/// broker from `LanguageStartupAuthority::capability_broker`.
+pub const EXTERNAL_FORMATTER_BROKER_PREREQUISITE: &str =
+    "external formatter launch is blocked: AppComposition cannot obtain the language capability \
      broker because crates/legion-app/src/language/startup_authority.rs exposes no accessor for \
      LanguageStartupAuthority's broker";
 
@@ -429,17 +428,13 @@ impl AppComposition {
     /// authority, or `None` when the app cannot supply one.
     ///
     /// The broker that carries the operator's exact-binary allowance for a
-    /// configured formatter is owned by `LanguageStartupAuthority`, which
-    /// exposes no accessor for it. Building a second broker here from the
-    /// recorded configuration would be self-issued authority — the app deciding
-    /// its own launch is allowed because it configured it — which is exactly the
-    /// hole the approval boundary exists to close. So this answers `None` and
-    /// the route records [`EXTERNAL_FORMATTER_BROKER_PREREQUISITE`] as a blocked
-    /// prerequisite until that accessor exists.
+    /// configured formatter is owned by `LanguageStartupAuthority`. This
+    /// accessor returns that same broker so an external formatting run uses
+    /// the recorded allowance instead of minting a second one.
     fn external_formatter_capability_broker(
         &self,
     ) -> Option<Arc<dyn CapabilityBrokerPort + Send + Sync>> {
-        None
+        Some(self.language_startup_authority.capability_broker())
     }
 
     /// Runs the configured external Python formatter for `buffer_id`, if one

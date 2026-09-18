@@ -5,13 +5,13 @@
 //!
 //! # The wire protocol is not this crate's to change
 //!
-//! `xtask/src/native_product_acceptance.rs` reads these files as text and looks
-//! for three literal substrings: `interactive_session = true`,
-//! `window_created = true`, and `input_class_<class> = "conforms"` for each of
-//! the six classes. Those literals are the contract. This module writes them,
-//! and `tests/driver_contract.rs` asserts them as literals written out in the
-//! test rather than as constants imported from here — if both sides read one
-//! constant, a rename breaks nothing and the guard is worthless.
+//! `xtask/src/native_product_acceptance.rs` reads these files as parsed TOML
+//! and looks up `interactive_session`, `window_created`, and
+//! `input_class_<class>` for each of the six classes. Those field names are
+//! the contract. This module writes them, and `tests/driver_contract.rs`
+//! asserts them as literals written out in the test rather than as constants
+//! imported from here — if both sides read one constant, a rename breaks
+//! nothing and the guard is worthless.
 //!
 //! # Why free-form text is scrubbed
 //!

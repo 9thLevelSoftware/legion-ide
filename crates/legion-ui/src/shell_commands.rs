@@ -236,13 +236,22 @@ impl Shell {
                 CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id },
             )));
         }
-        if let Some(action_id) = trimmed.strip_prefix(":code-action ") {
+        if trimmed == ":code-action" || trimmed.starts_with(":code-action ") {
             let buffer_id = self.active_buffer_id()?;
+            if let Some(action_id) = trimmed.strip_prefix(":code-action ") {
+                let action_id = action_id.trim();
+                if !action_id.is_empty() {
+                    return Ok(Some(self.push_intent(
+                        CommandDispatchIntent::SelectCodeAction {
+                            response_id: String::new(),
+                            action_id: action_id.to_string(),
+                        },
+                    )));
+                }
+            }
+            let range = self.active_code_action_range()?;
             return Ok(Some(self.push_intent(
-                CommandDispatchIntent::RequestCodeActionProposal {
-                    buffer_id,
-                    action_id: action_id.trim().to_string(),
-                },
+                CommandDispatchIntent::RequestCodeActions { buffer_id, range },
             )));
         }
         if let Some(operation_id) = trimmed.strip_prefix(":language-cancel ") {

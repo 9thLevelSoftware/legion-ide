@@ -7,6 +7,29 @@ use serde_json::Value;
 
 use super::TranslationError;
 
+/// Compatibility pins for Pyright artifacts whose implicit `default`
+/// annotation must be given an explicit review description.
+///
+/// Each row is `(server_id, release, sha256)`. Bumping Pyright is a new row
+/// in this table, not an edit of a buried literal inside the matcher.
+pub(crate) const PYRIGHT_PINNED_DEFAULT_ANNOTATION: &[(u64, &str, &str)] = &[(
+    104,
+    "1.1.400",
+    "2ccba7af9c8b14bb81c8fa9bb558d8b5181b586ec4dfc448b78eb4209e7a429a",
+)];
+
+fn pinned_pyright_artifact(health: &legion_protocol::LspServerHealthRecord) -> bool {
+    PYRIGHT_PINNED_DEFAULT_ANNOTATION
+        .iter()
+        .any(|(server_id, _, hash)| {
+            health.server_id == legion_protocol::LanguageServerId(*server_id)
+                && health.language_id.0 == "python"
+                && health.artifact_hash.as_ref().is_some_and(|fingerprint| {
+                    fingerprint.algorithm == "sha256" && fingerprint.value == *hash
+                })
+        })
+}
+
 /// Pyright 1.1.400 emits an implicit `default` reference without a definition.
 /// Scope this compatibility rule to the verified artifact, retain the reference,
 /// and require review of an explicitly client-generated explanation. Other
@@ -15,15 +38,7 @@ pub(crate) fn normalize_pyright_annotations<'a>(
     raw: &'a Value,
     health: Option<&legion_protocol::LspServerHealthRecord>,
 ) -> std::borrow::Cow<'a, Value> {
-    let pinned_pyright = health.is_some_and(|health| {
-        health.server_id == legion_protocol::LanguageServerId(104)
-            && health.language_id.0 == "python"
-            && health.artifact_hash.as_ref().is_some_and(|hash| {
-                hash.algorithm == "sha256"
-                    && hash.value
-                        == "2ccba7af9c8b14bb81c8fa9bb558d8b5181b586ec4dfc448b78eb4209e7a429a"
-            })
-    });
+    let pinned_pyright = health.is_some_and(pinned_pyright_artifact);
     if !pinned_pyright || raw.get("changeAnnotations").is_some() {
         return std::borrow::Cow::Borrowed(raw);
     }
@@ -186,6 +201,22 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn pyright_compatibility_table_names_at_least_one_release() {
+        assert!(
+            !PYRIGHT_PINNED_DEFAULT_ANNOTATION.is_empty(),
+            "the Pyright annotation pin table must name at least one release"
+        );
+        assert!(
+            PYRIGHT_PINNED_DEFAULT_ANNOTATION
+                .iter()
+                .any(|(server_id, version, hash)| {
+                    *server_id == 104 && !version.is_empty() && hash.len() == 64
+                }),
+            "the table must keep a named Pyright release with a 64-character SHA-256"
+        );
+    }
+
+    #[test]
     fn only_pinned_pyright_implicit_default_gets_explicit_review_metadata() {
         let mut health = legion_protocol::LspServerHealthRecord {
             server_id: legion_protocol::LanguageServerId(104),
@@ -194,7 +225,7 @@ mod tests {
             binary_path_hash: None,
             artifact_hash: Some(legion_protocol::FileFingerprint {
                 algorithm: "sha256".into(),
-                value: "2ccba7af9c8b14bb81c8fa9bb558d8b5181b586ec4dfc448b78eb4209e7a429a".into(),
+                value: PYRIGHT_PINNED_DEFAULT_ANNOTATION[0].2.into(),
             }),
             version: None,
             init_status: legion_protocol::LspResultStatus::Fresh,
@@ -210,13 +241,11 @@ mod tests {
         let normalized = normalize_pyright_annotations(&raw, Some(&health));
         let annotations = translate_annotations(&normalized).unwrap();
         assert!(annotations[0].needs_confirmation);
-        assert!(
-            annotations[0]
-                .description
-                .as_ref()
-                .unwrap()
-                .contains("omitted")
-        );
+        assert!(annotations[0]
+            .description
+            .as_ref()
+            .unwrap()
+            .contains("omitted"));
         assert_eq!(normalized["documentChanges"], raw["documentChanges"]);
         let mut explicit = raw.clone();
         explicit["changeAnnotations"] =

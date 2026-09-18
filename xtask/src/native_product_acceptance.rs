@@ -41,6 +41,8 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 /// Every input class was observed to conform from outside the product process.
@@ -311,19 +313,42 @@ pub trait SubprocessLauncher {
     fn launch(&self, program: &Path, args: &[String], working_dir: &Path) -> io::Result<i32>;
 }
 
+/// Upper bound on either driver phase. A hung or owner-installed driver must
+/// not strand the invoking terminal; both the session probe and the
+/// conformance run share this budget because the launcher trait is a single
+/// `launch` seam.
+pub const DRIVER_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Real child-process launching.
 #[derive(Debug, Clone, Default)]
 pub struct HostSubprocessLauncher;
 
 impl SubprocessLauncher for HostSubprocessLauncher {
     fn launch(&self, program: &Path, args: &[String], working_dir: &Path) -> io::Result<i32> {
-        let status = Command::new(program)
+        let mut child = Command::new(program)
             .args(args)
             .current_dir(working_dir)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .status()?;
-        Ok(status.code().unwrap_or(1))
+            .spawn()?;
+        let deadline = Instant::now() + DRIVER_SUBPROCESS_TIMEOUT;
+        loop {
+            match child.try_wait()? {
+                Some(status) => return Ok(status.code().unwrap_or(1)),
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "driver subprocess exceeded {}s and was terminated",
+                            DRIVER_SUBPROCESS_TIMEOUT.as_secs()
+                        ),
+                    ));
+                }
+                None => thread::sleep(Duration::from_millis(50)),
+            }
+        }
     }
 }
 
@@ -489,19 +514,18 @@ pub fn render_report(report: &AcceptanceReport) -> String {
     text
 }
 
-/// The driver result's own top-level fields, read strictly.
+/// The driver result's own fields, read strictly as TOML.
 ///
 /// Every field is optional and `None` means **not stated**. A key that is
 /// absent, duplicated, or not of the expected type is not a value: `toml`
 /// rejects a duplicated key for the whole document, which is exactly the
 /// reading wanted here, and a document that does not parse states nothing.
 ///
-/// These three are read as parsed TOML on purpose. The six class markers and
-/// `window_created` stay literal substring matches — they are the wire protocol
-/// the driver's `driver_report_markers_match_the_harness_wire_protocol_verbatim`
-/// pins with literals — but a free-form note or a class `detail` must not be
-/// able to forge a *field*, and a parsed top-level key cannot be forged from
-/// inside a string value.
+/// Class outcomes and `window_created` are read from the same parsed table so
+/// a comment, a `trueish` value, or a string that happens to contain
+/// `input_class_keyboard = "conforms"` cannot manufacture a pass. The driver's
+/// `driver_report_markers_match_the_harness_wire_protocol_verbatim` still pins
+/// the literal field names this parser looks up.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriverResultFields {
     /// The driver's own `status` string, if stated.
@@ -510,9 +534,13 @@ pub struct DriverResultFields {
     pub exit_code: Option<i64>,
     /// The driver's own `prerequisite`, if stated. Propagated verbatim.
     pub prerequisite: Option<String>,
+    /// Parsed `window_created`, if stated as a boolean.
+    pub window_created: Option<bool>,
+    /// Parsed `interactive_session`, if stated as a boolean.
+    pub interactive_session: Option<bool>,
 }
 
-/// Read the driver result's own top-level fields.
+/// Read the driver result's own fields from parsed TOML.
 pub fn parse_driver_result_fields(result_text: &str) -> DriverResultFields {
     let Ok(value) = result_text.parse::<toml::Value>() else {
         return DriverResultFields::default();
@@ -530,24 +558,60 @@ pub fn parse_driver_result_fields(result_text: &str) -> DriverResultFields {
             .get("prerequisite")
             .and_then(toml::Value::as_str)
             .map(str::to_string),
+        window_created: table.get("window_created").and_then(toml::Value::as_bool),
+        interactive_session: table
+            .get("interactive_session")
+            .and_then(toml::Value::as_bool),
     }
 }
 
-/// The classes whose per-class line in `result_text` reads `= "<outcome>"`.
-///
-/// Read the same literal way for every outcome, so `blocked` and `deviates` are
-/// recognised exactly as `conforms` always was.
+/// The classes whose parsed `input_class_<name>` field equals `outcome`.
 fn classes_with_outcome(result_text: &str, outcome: &str) -> Vec<String> {
+    let Ok(value) = result_text.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(table) = value.as_table() else {
+        return Vec::new();
+    };
     INPUT_CLASSES
         .iter()
         .copied()
-        .filter(|class| result_text.contains(&format!("input_class_{class} = \"{outcome}\"")))
+        .filter(|class| {
+            table
+                .get(&format!("input_class_{class}"))
+                .and_then(toml::Value::as_str)
+                == Some(outcome)
+        })
         .map(|class| class.to_string())
         .collect()
 }
 
+/// Remove a prior driver artifact. `NotFound` is the only tolerated error: a
+/// locked or otherwise unremovable file would leave stale evidence in place.
+fn clear_prior_evidence(
+    path: &Path,
+    report: &mut AcceptanceReport,
+    label: &str,
+) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            report.status = STATUS_OPERATIONAL_ERROR.to_string();
+            report.exit_code = EXIT_OPERATIONAL_ERROR;
+            let message = format!("cannot clear prior {label} at {}: {err}", path.display());
+            report.notes.push(message.clone());
+            Err(message)
+        }
+    }
+}
+
 fn bool_literal(value: bool) -> &'static str {
-    if value { "true" } else { "false" }
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 fn host_os_label() -> &'static str {
@@ -606,11 +670,12 @@ pub fn run_native_product_acceptance_command(opts: &NativeProductAcceptanceOptio
 /// | What the driver did | `status` | exit |
 /// | --- | --- | --- |
 /// | exit `0`, and its result records a created window and all six [`INPUT_CLASSES`] conforming | `passed` | `0` |
-/// | exit `1` — it ran to completion and reported a deviation itself | `conformance-failed` | `1` |
+/// | exit `1`, and its result records `status = "conformance-failed"` plus at least one class that `deviates` | `conformance-failed` | `1` |
 /// | exit `3` — it could not establish an oracle, or a class was blocked | `blocked` | `3`, carrying the driver's own exact prerequisite |
 /// | exit `2` | `operational-error` | `2` |
 /// | any other exit code | `operational-error` | `2` |
 /// | exit `0` contradicted by its own result | `operational-error` | `2` |
+/// | exit `1` contradicted by its own result | `operational-error` | `2` |
 /// | a stated `exit_code` field that disagrees with the process exit code | `operational-error` | `2` |
 ///
 /// [`STATUS_CONFORMANCE_FAILED`] is reachable from exactly one of those rows: a
@@ -676,16 +741,20 @@ pub fn run_native_product_acceptance(
     // the host probe's resolved path.
     let driver_program = workspace_root.join(&report.driver_path);
     let session_path = out_dir.join(SESSION_HANDSHAKE_FILE_NAME);
-    let _ = fs::remove_file(&session_path);
+    if clear_prior_evidence(&session_path, &mut report, "session handshake").is_err() {
+        return finish(&report_path, &report);
+    }
     let session_args = vec![
         "--probe-session".to_string(),
         "--report".to_string(),
         session_path.display().to_string(),
     ];
-    report.subprocess_launched = true;
     match launcher.launch(&driver_program, &session_args, workspace_root) {
-        Ok(0) => {}
+        Ok(0) => {
+            report.subprocess_launched = true;
+        }
         Ok(code) => {
+            report.subprocess_launched = true;
             report.blocked(PREREQUISITE_SESSION_MISSING);
             report.notes.push(format!(
                 "driver session handshake exited {code}; the host did not present an \
@@ -694,7 +763,8 @@ pub fn run_native_product_acceptance(
             return finish(&report_path, &report);
         }
         Err(err) => {
-            report.blocked(PREREQUISITE_SESSION_MISSING);
+            report.status = STATUS_OPERATIONAL_ERROR.to_string();
+            report.exit_code = EXIT_OPERATIONAL_ERROR;
             report
                 .notes
                 .push(format!("driver session handshake could not start: {err}"));
@@ -702,7 +772,8 @@ pub fn run_native_product_acceptance(
         }
     }
     let session_text = fs::read_to_string(&session_path).unwrap_or_default();
-    if !session_text.contains("interactive_session = true") {
+    let session_fields = parse_driver_result_fields(&session_text);
+    if session_fields.interactive_session != Some(true) {
         report.blocked(PREREQUISITE_SESSION_MISSING);
         report.notes.push(
             "driver session handshake did not record `interactive_session = true`".to_string(),
@@ -712,7 +783,9 @@ pub fn run_native_product_acceptance(
     report.interactive_session = true;
 
     let result_path = out_dir.join(DRIVER_RESULT_FILE_NAME);
-    let _ = fs::remove_file(&result_path);
+    if clear_prior_evidence(&result_path, &mut report, "driver result").is_err() {
+        return finish(&report_path, &report);
+    }
     let run_args = vec![
         "--conformance-run".to_string(),
         "--product".to_string(),
@@ -745,12 +818,11 @@ pub fn run_native_product_acceptance(
         }
     };
 
-    report.window_created = result_text.contains("window_created = true");
+    let fields = parse_driver_result_fields(&result_text);
+    report.window_created = fields.window_created == Some(true);
     report.input_classes_observed = classes_with_outcome(&result_text, "conforms");
     report.input_classes_blocked = classes_with_outcome(&result_text, "blocked");
     report.input_classes_deviating = classes_with_outcome(&result_text, "deviates");
-
-    let fields = parse_driver_result_fields(&result_text);
 
     // The driver's `exit_code` field is corroboration, not authority: the
     // process exit code is what this harness dispatches on. The two disagreeing
@@ -804,17 +876,33 @@ pub fn run_native_product_acceptance(
             }
         }
         // The only route to `conformance-failed`. It is reached from a driver
-        // that ran to completion and reported a deviation itself, never by
-        // inference from a missing marker, a short class list or an unreadable
-        // field.
+        // that ran to completion and reported a deviation itself: a parsed
+        // `conformance-failed` status and at least one class whose parsed
+        // field is `deviates`. A missing marker, an empty class list, or a
+        // contradictory status is a broken instrument, never a product defect.
         EXIT_CONFORMANCE_FAILED => {
-            report.status = STATUS_CONFORMANCE_FAILED.to_string();
-            report.exit_code = EXIT_CONFORMANCE_FAILED;
-            report.notes.push(format!(
-                "the driver ran to completion and reported a deviation itself (exit \
-                 {EXIT_CONFORMANCE_FAILED}); classes observed to deviate: [{}]",
-                report.input_classes_deviating.join(", ")
-            ));
+            let stated_status_is_conformance_failed =
+                fields.status.as_deref() == Some(STATUS_CONFORMANCE_FAILED);
+            if stated_status_is_conformance_failed && !report.input_classes_deviating.is_empty() {
+                report.status = STATUS_CONFORMANCE_FAILED.to_string();
+                report.exit_code = EXIT_CONFORMANCE_FAILED;
+                report.notes.push(format!(
+                    "the driver ran to completion and reported a deviation itself (exit \
+                     {EXIT_CONFORMANCE_FAILED}); classes observed to deviate: [{}]",
+                    report.input_classes_deviating.join(", ")
+                ));
+            } else {
+                report.status = STATUS_OPERATIONAL_ERROR.to_string();
+                report.exit_code = EXIT_OPERATIONAL_ERROR;
+                report.notes.push(format!(
+                    "the driver exited {EXIT_CONFORMANCE_FAILED} but its own result does not \
+                     corroborate a product deviation: result status {:?}, classes observed to \
+                     deviate: [{}]. A driver that exits 1 while its result says otherwise is a \
+                     broken instrument, not a broken product",
+                    fields.status.as_deref().unwrap_or("<unstated>"),
+                    report.input_classes_deviating.join(", ")
+                ));
+            }
         }
         // A blocked driver is a blocked run. A class the driver could not
         // observe — `ime-cjk` on a host with no CJK input layout is the worked

@@ -111,6 +111,45 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
+/// Code points at or above U+3000, used as the IME/CJK presence signal.
+pub fn cjk_chars(text: &str) -> impl Iterator<Item = char> + '_ {
+    text.chars().filter(|ch| *ch as u32 >= 0x3000)
+}
+
+/// True when `observed` contains more CJK-range characters than `baseline`.
+///
+/// The IME class runs after text and clipboard checks that already insert
+/// characters at or above U+3000. Comparing against a snapshot taken immediately
+/// before the IME sequence is what stops those earlier markers from counting as
+/// a successful composition.
+pub fn has_new_cjk(baseline: &str, observed: &str) -> bool {
+    cjk_chars(observed).count() > cjk_chars(baseline).count()
+}
+
+/// Map a virtual-screen pixel coordinate into the 0..=65535 range `SendInput`
+/// uses with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`.
+pub fn absolute_pointer_from_virtual_screen(
+    x: i32,
+    y: i32,
+    origin_x: i32,
+    origin_y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(i32, i32), String> {
+    if width <= 1 || height <= 1 {
+        return Err(format!(
+            "the virtual screen reports {width}x{height}; there is no coordinate space to \
+             click in"
+        ));
+    }
+    let absolute_x = (i64::from(x - origin_x) * 65535) / i64::from(width - 1);
+    let absolute_y = (i64::from(y - origin_y) * 65535) / i64::from(height - 1);
+    Ok((
+        i32::try_from(absolute_x.clamp(0, 65535)).unwrap_or(0),
+        i32::try_from(absolute_y.clamp(0, 65535)).unwrap_or(0),
+    ))
+}
+
 /// The on-disk oracle: the file's byte length and SHA-256, read by the driver
 /// from a host shell, never through the product.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,10 +175,12 @@ pub fn file_digest(path: &Path) -> Result<FileDigest, String> {
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
+use windows::core::BOOL;
+#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
@@ -150,8 +191,6 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
 };
-#[cfg(windows)]
-use windows::core::BOOL;
 
 /// Cap on how much UI Automation text one read returns.
 #[cfg(windows)]
@@ -184,13 +223,36 @@ unsafe extern "system" fn collect_window(window: HWND, param: LPARAM) -> BOOL {
 /// Wait for a **visible top-level window owned by `process_id`**, observed
 /// from outside that process by enumerating the desktop's windows.
 ///
-/// Returns `None` if no such window appears within `timeout`. That is not
-/// evidence that the product misbehaved; it is the absence of the oracle,
-/// and the caller reports it that way.
+/// `process_exited` is polled between enumerations. When it returns `Some`, the
+/// product process has already terminated and the wait stops immediately
+/// instead of burning the remaining timeout and reporting a missing-host
+/// window. `None` from this function still means "no window appeared while the
+/// process stayed alive".
 #[cfg(windows)]
-pub fn wait_for_window(process_id: u32, timeout: Duration) -> Option<HWND> {
+pub enum WindowWait {
+    /// A visible top-level window owned by the product process.
+    Found(HWND),
+    /// The product process exited before opening a window.
+    ProcessExited {
+        /// Process exit code, or 1 when the OS did not report one.
+        exit_code: i32,
+    },
+    /// The timeout elapsed while the process was still running.
+    TimedOut,
+}
+
+/// Wait for a visible top-level window owned by `process_id`.
+#[cfg(windows)]
+pub fn wait_for_window(
+    process_id: u32,
+    timeout: Duration,
+    mut process_exited: impl FnMut() -> Option<i32>,
+) -> WindowWait {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if let Some(exit_code) = process_exited() {
+            return WindowWait::ProcessExited { exit_code };
+        }
         let mut search = WindowSearch {
             process_id,
             found: HWND(std::ptr::null_mut()),
@@ -200,11 +262,15 @@ pub fn wait_for_window(process_id: u32, timeout: Duration) -> Option<HWND> {
         // `param` points at a live local for the duration of the call.
         let _ = unsafe { EnumWindows(Some(collect_window), param) };
         if !search.found.is_invalid() {
-            return Some(search.found);
+            return WindowWait::Found(search.found);
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    None
+    if let Some(exit_code) = process_exited() {
+        WindowWait::ProcessExited { exit_code }
+    } else {
+        WindowWait::TimedOut
+    }
 }
 
 /// The UI Automation client, held for the life of a conformance run.

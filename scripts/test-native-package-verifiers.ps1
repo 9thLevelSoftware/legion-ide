@@ -568,6 +568,16 @@ function New-StagePayloadTree([string]$Root, [int]$ExecutableCount) {
     return $payload
 }
 
+function Write-PayloadBinding([string]$PackageDir, [string]$ExecutablePath) {
+    $hash = (Get-FileHash -LiteralPath $ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $name = Split-Path -Leaf $ExecutablePath
+    [System.IO.File]::WriteAllText(
+        (Join-Path $PackageDir "$name.sha256"),
+        "$hash *$name",
+        [System.Text.Encoding]::ASCII
+    )
+}
+
 Invoke-Test "stage script rejects a source under target/debug" {
     $fixture = New-FixtureDir "stage-target-debug"
     $packageDir = Join-Path $fixture "package"
@@ -758,6 +768,7 @@ Invoke-Test "stage script stages the whole payload directory and writes STAGING-
     $msiPath = New-StagePackageFixture $packageDir ""
     $source = Join-Path $fixture "extract"
     $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
     $destination = Join-Path $fixture "destination"
     $run = Invoke-StageScript @(
         "-PackageDir", $packageDir,
@@ -793,7 +804,8 @@ Invoke-Test "stage evidence records signed = false and the exact signing prerequ
     $packageDir = Join-Path $fixture "package"
     New-StagePackageFixture $packageDir "" | Out-Null
     $source = Join-Path $fixture "extract"
-    New-StagePayloadTree $source 1 | Out-Null
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
     $destination = Join-Path $fixture "destination"
     $run = Invoke-StageScript @(
         "-PackageDir", $packageDir,
@@ -817,7 +829,8 @@ Invoke-Test "stage script is idempotent across two runs" {
     $packageDir = Join-Path $fixture "package"
     New-StagePackageFixture $packageDir "" | Out-Null
     $source = Join-Path $fixture "extract"
-    New-StagePayloadTree $source 1 | Out-Null
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
     $destination = Join-Path $fixture "destination"
     $arguments = @(
         "-PackageDir", $packageDir,
@@ -849,6 +862,47 @@ Invoke-Test "stage script is idempotent across two runs" {
 
     $staged = @(Get-ChildItem -LiteralPath $destination -Recurse -File | ForEach-Object { $_.FullName.Substring($destination.Length) } | Sort-Object)
     Assert-True ($staged.Count -eq 5) "expected four payload files plus STAGING-EVIDENCE.toml; found $($staged.Count): $($staged -join ', ')"
+}
+
+Invoke-Test "stage script rejects a payload whose hash does not match the MSI sidecar" {
+    $fixture = New-FixtureDir "stage-unbound-payload"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    $exe = Join-Path $payload "legion-desktop.exe"
+    Write-PayloadBinding $packageDir $exe
+    [System.IO.File]::WriteAllText($exe, "unrelated product bytes", [System.Text.Encoding]::ASCII)
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted an unbound payload: $($run.Output)"
+    Assert-True ($run.Output -match 'Staged payload is not the verified MSI content') `
+        "refusal does not name the MSI-to-payload bind: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+}
+
+Invoke-Test "stage script rejects a destination nested inside the staging source" {
+    $fixture = New-FixtureDir "stage-nested-destination"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
+    $destination = Join-Path $source "out/package"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted a nested destination: $($run.Output)"
+    Assert-True ($run.Output -match 'nested inside the source path') `
+        "refusal does not name the nested destination: $($run.Output)"
 }
 
 Write-Host ""

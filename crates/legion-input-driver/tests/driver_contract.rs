@@ -321,6 +321,33 @@ fn driver_report_markers_match_the_harness_wire_protocol_verbatim() {
 }
 
 #[test]
+fn ime_oracle_requires_new_cjk_against_the_baseline() {
+    assert!(
+        !observe::has_new_cjk(
+            "hello \u{1f1ef}\u{1f1f5} \u{4e2d}",
+            "hello \u{1f1ef}\u{1f1f5} \u{4e2d}"
+        ),
+        "prior text/clipboard CJK must not count as an IME composition"
+    );
+    assert!(observe::has_new_cjk(
+        "hello \u{1f1ef}\u{1f1f5} \u{4e2d}",
+        "hello \u{1f1ef}\u{1f1f5} \u{4e2d}\u{65e5}\u{672c}\u{8a9e}"
+    ));
+    assert!(!observe::has_new_cjk("", "nihongo"));
+}
+
+#[test]
+fn absolute_pointer_uses_the_virtual_screen_origin() {
+    let (dx, dy) = observe::absolute_pointer_from_virtual_screen(-1920, 100, -1920, 0, 3840, 1080)
+        .expect("secondary-monitor origin is a valid virtual screen");
+    assert_eq!(dx, 0);
+    let (primary_x, _) = observe::absolute_pointer_from_virtual_screen(0, 0, -1920, 0, 3840, 1080)
+        .expect("primary origin maps inside the virtual desktop");
+    assert!(primary_x > 0);
+    assert!(observe::absolute_pointer_from_virtual_screen(0, 0, 0, 0, 1, 1).is_err());
+}
+
+#[test]
 fn an_unobserved_input_class_is_never_rendered_as_conforms() {
     let partial = ConformanceReport {
         product: "package/legion-desktop.exe".to_string(),

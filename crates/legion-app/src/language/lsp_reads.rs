@@ -355,10 +355,12 @@ impl AppComposition {
             });
             return;
         };
-        if !self
-            .server_apply_edits
-            .retain(proposal_id, reply.clone(), decision, request.deadline)
-        {
+        if !self.server_apply_edits.retain(
+            proposal_id,
+            reply.clone(),
+            decision,
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(120)),
+        ) {
             let _ = reply.try_send(legion_lsp::LspApplyWorkspaceEditResponse {
                 applied: false,
                 failure_reason: Some("too many pending workspace/applyEdit proposals".to_string()),
@@ -458,7 +460,7 @@ impl AppComposition {
         tag: crate::language::LspRequestTag,
         pending_write: Option<crate::language::PendingLspWriteOperation>,
     ) {
-        use crate::language::{LspReadKind, is_stale_response};
+        use crate::language::{is_stale_response, LspReadKind};
         // Stale-response gate: discard if snapshot moved on since the request.
         if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
             && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)

@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::{AppComposition, language_id_for_path};
+use crate::{language_id_for_path, AppComposition};
 use legion_protocol::{
     BufferId, BufferVersion, FileContentVersion, FileFingerprint, LanguageCodeActionProjection,
-    LspCodeActionCandidate, LspCodeActionPayload, ProtocolTextRange, SnapshotId,
+    LspCodeActionCandidate, LspCodeActionPayload, ProtocolTextRange, SnapshotId, TextCoordinate,
     WorkspaceGeneration, WorkspaceId,
 };
 use uuid::Uuid;
@@ -176,6 +176,10 @@ impl CodeActionAuthority {
             return Err("code action is disabled");
         }
         Ok(candidate.clone())
+    }
+
+    pub(crate) fn current_response_id(&self) -> Option<&str> {
+        self.response_id.as_deref()
     }
 
     pub(crate) fn candidate_buffer_id(
@@ -376,6 +380,31 @@ impl AppComposition {
         range: ProtocolTextRange,
     ) -> bool {
         self.request_code_actions_scoped(buffer_id, range, false)
+    }
+
+    fn active_code_action_range(&self, buffer_id: BufferId) -> Option<ProtocolTextRange> {
+        let cursor = self.editor.primary_cursor(buffer_id).ok()?;
+        let text = self.editor.text(buffer_id).ok()?.to_string();
+        let line_start = text
+            .split_inclusive('\n')
+            .take(cursor.line)
+            .map(str::len)
+            .sum::<usize>();
+        let byte_offset = line_start.saturating_add(cursor.column);
+        let character = text
+            .get(line_start..byte_offset)
+            .map(|line| line.chars().count() as u32)
+            .unwrap_or(0);
+        let position = TextCoordinate {
+            line: cursor.line as u32,
+            character,
+            byte_offset: Some(byte_offset as u64),
+            utf16_offset: None,
+        };
+        Some(ProtocolTextRange {
+            start: position,
+            end: position,
+        })
     }
 
     pub(crate) fn request_code_actions_scoped(

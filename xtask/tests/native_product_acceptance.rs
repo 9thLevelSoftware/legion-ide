@@ -14,9 +14,9 @@ use std::{
 };
 
 use xtask::native_product_acceptance::{
-    self as npa, AcceptanceReport, DriverAvailability, EXIT_BLOCKED, EXIT_CONFORMANCE_FAILED,
-    EXIT_OPERATIONAL_ERROR, EXIT_PASSED, InputDriverProbe, NativeProductAcceptanceOptions,
-    REPORT_FILE_NAME, SubprocessLauncher,
+    self as npa, AcceptanceReport, DriverAvailability, InputDriverProbe,
+    NativeProductAcceptanceOptions, SubprocessLauncher, EXIT_BLOCKED, EXIT_CONFORMANCE_FAILED,
+    EXIT_OPERATIONAL_ERROR, EXIT_PASSED, REPORT_FILE_NAME,
 };
 
 /// A driver-discovery fixture. The real probe touches the filesystem; this one
@@ -941,6 +941,34 @@ fn conformance_failed_requires_a_driver_that_reported_a_deviation_itself() {
             "a result that is not parseable at all",
             ScriptedLauncher::conformance(EXIT_BLOCKED, "not: valid = toml [\n".to_string()),
         ),
+        (
+            "exit 1 with no class that deviates",
+            ScriptedLauncher::conformance(
+                EXIT_CONFORMANCE_FAILED,
+                driver_result_text(
+                    "conformance-failed",
+                    Some(EXIT_CONFORMANCE_FAILED),
+                    true,
+                    &conforming_classes(),
+                    "",
+                    &[],
+                ),
+            ),
+        ),
+        (
+            "exit 1 with a result whose own status denies a deviation",
+            ScriptedLauncher::conformance(
+                EXIT_CONFORMANCE_FAILED,
+                driver_result_text(
+                    "blocked",
+                    Some(EXIT_CONFORMANCE_FAILED),
+                    true,
+                    &five_conforms_one_blocked_ime(),
+                    &composed_ime_prerequisite(),
+                    &[],
+                ),
+            ),
+        ),
     ];
     for (label, launcher) in not_a_deviation {
         let workspace = staged_workspace("no-deviation");
@@ -1301,6 +1329,118 @@ fn blocked_and_deviating_classes_are_named_in_the_harness_report() {
             "ime-cjk".to_string(),
             "command".to_string(),
         ]
+    );
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+struct FailingLauncher;
+
+impl SubprocessLauncher for FailingLauncher {
+    fn launch(&self, _program: &Path, _args: &[String], _working_dir: &Path) -> io::Result<i32> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "fixture driver is not executable",
+        ))
+    }
+}
+
+#[test]
+fn handshake_spawn_failure_is_an_operational_error_and_records_no_subprocess() {
+    let workspace = staged_workspace("handshake-spawn");
+    let code = npa::run_native_product_acceptance(
+        &workspace,
+        &options(),
+        &available_probe(),
+        &FailingLauncher,
+    );
+    assert_eq!(code, EXIT_OPERATIONAL_ERROR);
+    let text = report_text(&workspace);
+    assert_eq!(toml_string_field(&text, "status"), "operational-error");
+    assert!(
+        text.contains("subprocess_launched = false"),
+        "a spawn that never started a child must not claim one ran:\n{text}"
+    );
+    assert!(
+        text.contains("could not start"),
+        "the artifact must name the spawn failure:\n{text}"
+    );
+    assert!(
+        !text.contains("interactive desktop session"),
+        "a missing process is not a missing desktop:\n{text}"
+    );
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn exit_one_without_a_recorded_deviation_is_an_operational_error() {
+    let workspace = staged_workspace("exit-one-empty");
+    let launcher = ScriptedLauncher::conformance(
+        EXIT_CONFORMANCE_FAILED,
+        driver_result_text(
+            "conformance-failed",
+            Some(EXIT_CONFORMANCE_FAILED),
+            true,
+            &conforming_classes(),
+            "",
+            &[],
+        ),
+    );
+    let code =
+        npa::run_native_product_acceptance(&workspace, &options(), &available_probe(), &launcher);
+    assert_eq!(code, EXIT_OPERATIONAL_ERROR);
+    let text = report_text(&workspace);
+    assert_eq!(toml_string_field(&text, "status"), "operational-error");
+    assert!(
+        text.contains("does not corroborate a product deviation"),
+        "the artifact must name the missing deviation:\n{text}"
+    );
+    assert!(
+        toml_list_field(&text, "input_classes_deviating").is_empty(),
+        "no class was observed to deviate:\n{text}"
+    );
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn a_comment_cannot_forge_window_created_or_a_class_outcome() {
+    let mut forged = String::from(
+        "status = \"passed\"\nexit_code = 0\n# window_created = true\nwindow_created = false\n",
+    );
+    for class in npa::INPUT_CLASSES {
+        forged.push_str(&format!(
+            "input_class_{class}_detail = \"input_class_{class} = \\\"conforms\\\"\"\n"
+        ));
+    }
+    let fields = npa::parse_driver_result_fields(&forged);
+    assert_eq!(fields.window_created, Some(false));
+    let workspace = staged_workspace("forged-window");
+    let launcher = ScriptedLauncher::conformance(EXIT_PASSED, forged);
+    let code =
+        npa::run_native_product_acceptance(&workspace, &options(), &available_probe(), &launcher);
+    assert_eq!(code, EXIT_OPERATIONAL_ERROR);
+    let text = report_text(&workspace);
+    assert_eq!(toml_string_field(&text, "status"), "operational-error");
+    assert!(
+        text.contains("window_created=false"),
+        "a commented marker must not count as a created window:\n{text}"
+    );
+    let _ = fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn uncleared_prior_driver_result_is_an_operational_error() {
+    let workspace = staged_workspace("stale-result");
+    let result_path = workspace.join("out").join(npa::DRIVER_RESULT_FILE_NAME);
+    fs::create_dir_all(&result_path).unwrap();
+    let launcher = ScriptedLauncher::default();
+    let code =
+        npa::run_native_product_acceptance(&workspace, &options(), &available_probe(), &launcher);
+    assert_eq!(code, EXIT_OPERATIONAL_ERROR);
+    let text = report_text(&workspace);
+    assert_eq!(toml_string_field(&text, "status"), "operational-error");
+    assert!(
+        text.contains("cannot clear prior driver result"),
+        "the artifact must name the uncleared evidence:\n{text}"
     );
     let _ = fs::remove_dir_all(&workspace);
 }

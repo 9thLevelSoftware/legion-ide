@@ -46,7 +46,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
 
@@ -58,10 +58,10 @@ use legion_protocol::{
 use thiserror::Error;
 
 use super::runtime::{
-    BoundedProbeError, EXECUTABLE_FINGERPRINT_MAX_BYTES, EXECUTABLE_PROBE_STREAM_LIMIT,
-    EXECUTABLE_PROBE_TIMEOUT, ExecutableIdentityError, canonical_path_to_string,
-    canonical_regular_file, check_budget, language_tool_capability_context,
-    recheck_executable_identity, request_granted_decision, run_bounded_probe,
+    canonical_path_to_string, canonical_regular_file, check_budget,
+    language_tool_capability_context, recheck_executable_identity, request_granted_decision,
+    run_bounded_probe, BoundedProbeError, ExecutableIdentityError,
+    EXECUTABLE_FINGERPRINT_MAX_BYTES, EXECUTABLE_PROBE_STREAM_LIMIT, EXECUTABLE_PROBE_TIMEOUT,
 };
 
 /// Capability requested before any formatter executable is probed.
@@ -347,6 +347,7 @@ pub fn approve_formatter_executable(
             )
             .map_err(|error| match error {
                 BoundedProbeError::DeadlineExceeded => FormatterApprovalError::DeadlineExceeded,
+                BoundedProbeError::Cancelled => FormatterApprovalError::Cancelled,
                 BoundedProbeError::Failed(message) => FormatterApprovalError::ProbeFailed(message),
             })?;
             // The process authority may return successfully just as cancellation

@@ -528,7 +528,6 @@ enum PaletteCommandOperands {
     CommitMessage(String),
     StashMessage(Option<String>),
     RenameName(String),
-    CodeActionId(String),
     AcpHost {
         program: String,
         args: Vec<String>,
@@ -564,9 +563,6 @@ impl PaletteCommandOperands {
             ("language-rename", Self::RenameName(name)) => {
                 format!("Rename symbol to `{name}'")
             }
-            ("language-code-action", Self::CodeActionId(action_id)) => {
-                format!("Preview code action `{action_id}'")
-            }
             ("acp-attach-host", Self::AcpHost { program, args }) => {
                 if args.is_empty() {
                     format!("Attach ACP host `{program}'")
@@ -592,7 +588,6 @@ impl PaletteCommandOperands {
             Self::CommitMessage(message) => vec![message.clone()],
             Self::StashMessage(message) => message.iter().cloned().collect(),
             Self::RenameName(name) => vec![name.clone()],
-            Self::CodeActionId(action_id) => vec![action_id.clone()],
             Self::AcpHost { program, args } => std::iter::once(program.clone())
                 .chain(args.iter().cloned())
                 .collect(),
@@ -614,7 +609,6 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-commit" => &["git commit", "git: commit staged changes"],
         "git-stash" => &["git stash", "git: stash changes"],
         "language-rename" => &["language rename", "rename symbol", "rename"],
-        "language-code-action" => &["language code action", "code action"],
         "acp-attach-host" => &["acp attach host", "acp: attach host"],
         _ => &[],
     }
@@ -653,7 +647,6 @@ fn parse_palette_command_operands(
         "git-commit" => "Enter a commit message",
         "git-stash" => "Enter a stash message",
         "language-rename" => "Enter the new symbol name",
-        "language-code-action" => "Enter a code-action id",
         "acp-attach-host" => "Enter an ACP host program, optionally followed by arguments",
         _ => return None,
     };
@@ -676,7 +669,6 @@ fn parse_palette_command_operands(
             operands.to_string(),
         ))),
         "language-rename" => Ok(PaletteCommandOperands::RenameName(operands.to_string())),
-        "language-code-action" => Ok(PaletteCommandOperands::CodeActionId(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -13869,7 +13861,7 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "language-code-action",
             title: "Language: Code Action",
-            detail: "Enter an action id and create a proposal preview",
+            detail: "Request code actions for the current selection",
             shortcut_label: None,
         },
     ]
@@ -17125,6 +17117,11 @@ impl AppComposition {
         let preparation_language_id = language_id.clone();
         let preparation_display_name = display_name.clone();
         let preparation_root_uri = root_uri.clone();
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
         let preparation = move |cancel: Arc<std::sync::atomic::AtomicBool>| {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::language::LanguageSessionError::InvalidConfiguration(
@@ -17143,7 +17140,7 @@ impl AppComposition {
                     preparation_display_name.clone(),
                     process.clone(),
                     preparation_root_uri.clone(),
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
@@ -17159,7 +17156,7 @@ impl AppComposition {
                     },
                     Arc::clone(&cancel),
                     preparation_root_uri.clone(),
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::DownloadedLocal(local) => authority
@@ -17171,6 +17168,7 @@ impl AppComposition {
                         &local.node_path,
                         Arc::clone(&cancel),
                         preparation_root_uri.clone(),
+                        initialization_options.clone(),
                     ),
                 LanguageStartupSelection::TypeScriptBundle(bundle) => authority
                     .prepare_typescript_bundle(
@@ -17296,6 +17294,11 @@ impl AppComposition {
         let mut context = context;
         context.correlation_id = correlation_id;
         context.causality_id = CausalityId(uuid::Uuid::now_v7());
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
         let metadata = match &selection {
             LanguageStartupSelection::Configured(_) => crate::language::LspSelectedServerMetadata {
                 server_id,
@@ -17358,7 +17361,7 @@ impl AppComposition {
                     display_name,
                     process,
                     root_uri,
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
@@ -17374,7 +17377,7 @@ impl AppComposition {
                     },
                     Arc::clone(&cancel),
                     root_uri,
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::DownloadedLocal(local) => authority
@@ -17386,6 +17389,7 @@ impl AppComposition {
                         &local.node_path,
                         Arc::clone(&cancel),
                         root_uri,
+                        initialization_options,
                     ),
                 LanguageStartupSelection::TypeScriptBundle(bundle) => authority
                     .prepare_typescript_bundle(
@@ -19076,18 +19080,8 @@ impl AppComposition {
                         }
                         "language-code-action" => {
                             let buffer_id = self.active_documents.active_buffer_id?;
-                            let Some(Ok(PaletteCommandOperands::CodeActionId(action_id))) =
-                                parse_palette_command_operands(
-                                    command_id,
-                                    palette_query_body(PaletteMode::Command, &self.palette.query),
-                                )
-                            else {
-                                return None;
-                            };
-                            Some(CommandDispatchIntent::RequestCodeActionProposal {
-                                buffer_id,
-                                action_id,
-                            })
+                            let range = self.active_code_action_range(buffer_id)?;
+                            Some(CommandDispatchIntent::RequestCodeActions { buffer_id, range })
                         }
                         _ => palette_command_intent(command_id),
                     })
@@ -20738,6 +20732,14 @@ impl AppComposition {
                 response_id,
                 action_id,
             } => {
+                let response_id = if response_id.is_empty() {
+                    self.code_action_authority
+                        .current_response_id()
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    response_id
+                };
                 let failure_buffer = self
                     .code_action_authority
                     .candidate_buffer_id(&response_id, &action_id);
@@ -34560,9 +34562,8 @@ mod lsp_explicit_start_tests {
         );
         assert_eq!(
             parse_palette_command_operands("language-code-action", "code action quick-fix"),
-            Some(Ok(PaletteCommandOperands::CodeActionId(
-                "quick-fix".to_string()
-            )))
+            None,
+            "code actions no longer take an action id; the palette requests the live list"
         );
     }
 

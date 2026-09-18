@@ -15,7 +15,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, atomic::AtomicBool},
+    sync::{atomic::AtomicBool, Arc},
     time::{Duration, Instant},
 };
 
@@ -242,6 +242,7 @@ pub fn approve_node_runtime(
     )
     .map_err(|error| match error {
         BoundedProbeError::DeadlineExceeded => NodeRuntimeApprovalError::DeadlineExceeded,
+        BoundedProbeError::Cancelled => NodeRuntimeApprovalError::Cancelled,
         BoundedProbeError::Failed(message) => NodeRuntimeApprovalError::ProbeFailed(message),
     })?;
     // The process authority may return successfully just as cancellation is
@@ -365,8 +366,11 @@ pub(crate) enum ExecutableIdentityError {
 /// text only; probe stdout/stderr never reaches this value.
 #[derive(Debug)]
 pub(crate) enum BoundedProbeError {
-    /// No budget remained for the child before it was started.
+    /// No budget remained for the child before it was started, or the platform
+    /// classified the running child as timed out.
     DeadlineExceeded,
+    /// The cancellation flag was raised while the child was running.
+    Cancelled,
     /// The bounded process authority refused or failed the child.
     Failed(String),
 }
@@ -591,7 +595,11 @@ pub(crate) fn run_bounded_probe(
             remaining,
             cancellation,
         ))
-        .map_err(|error| BoundedProbeError::Failed(platform_error_message(error)))
+        .map_err(|error| match error {
+            PlatformError::Cancelled { .. } => BoundedProbeError::Cancelled,
+            PlatformError::Timeout { .. } => BoundedProbeError::DeadlineExceeded,
+            other => BoundedProbeError::Failed(platform_error_message(other)),
+        })
 }
 
 fn platform_error_message(error: PlatformError) -> String {

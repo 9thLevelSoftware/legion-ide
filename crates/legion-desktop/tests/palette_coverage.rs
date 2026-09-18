@@ -18,7 +18,9 @@ use legion_desktop::{
     bridge::DesktopAction,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
 };
-use legion_protocol::{BufferId, PrincipalId, TextCoordinate, WorkspaceTrustState};
+use legion_protocol::{
+    BufferId, PrincipalId, ProtocolTextRange, TextCoordinate, WorkspaceTrustState,
+};
 use legion_ui::{
     CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection, Shell,
 };
@@ -582,10 +584,23 @@ fn product_loop_commands_match_live_registry_shell_and_keymap_surfaces() {
             },
         ),
         (
-            ":code-action fix",
-            CommandDispatchIntent::RequestCodeActionProposal {
+            ":code-action",
+            CommandDispatchIntent::RequestCodeActions {
                 buffer_id: BufferId(1),
-                action_id: "fix".into(),
+                range: ProtocolTextRange {
+                    start: TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: None,
+                    },
+                    end: TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: None,
+                    },
+                },
             },
         ),
     ];
