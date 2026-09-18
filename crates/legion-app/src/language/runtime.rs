@@ -15,7 +15,7 @@ use std::{
     fs::File,
     io::Read,
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 

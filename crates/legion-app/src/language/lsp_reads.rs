@@ -460,7 +460,7 @@ impl AppComposition {
         tag: crate::language::LspRequestTag,
         pending_write: Option<crate::language::PendingLspWriteOperation>,
     ) {
-        use crate::language::{is_stale_response, LspReadKind};
+        use crate::language::{LspReadKind, is_stale_response};
         // Stale-response gate: discard if snapshot moved on since the request.
         if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
             && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)

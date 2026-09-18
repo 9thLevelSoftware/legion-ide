@@ -44,13 +44,13 @@
 //! extract the enum from the chokepoint first.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use legion_platform::{
-    BoundedProcessRequest, NativeProcessService, PlatformError, ProcessRequest, ProcessService,
-    MAX_BOUNDED_STDIN_BYTES,
+    BoundedProcessRequest, MAX_BOUNDED_STDIN_BYTES, NativeProcessService, PlatformError,
+    ProcessRequest, ProcessService,
 };
 use thiserror::Error;
 
@@ -58,8 +58,8 @@ use crate::*;
 
 use super::lsp_reads::LspWriteSideSpec;
 use super::{
-    approve_formatter_executable, is_stale_response, FormatterApprovalError,
-    FormatterApprovalRequest, FormatterProbe, PendingLspWriteOperation,
+    FormatterApprovalError, FormatterApprovalRequest, FormatterProbe, PendingLspWriteOperation,
+    approve_formatter_executable, is_stale_response,
 };
 
 /// Argument vector handed to a configured Python formatter.
@@ -140,8 +140,7 @@ pub const EXTERNAL_FORMATTER_UNPROBEABLE_REASON: &str =
 /// Retained for the defensive `None` arm and for tests that still name the
 /// blocked-prerequisite string. Production `AppComposition` now obtains the
 /// broker from `LanguageStartupAuthority::capability_broker`.
-pub const EXTERNAL_FORMATTER_BROKER_PREREQUISITE: &str =
-    "external formatter launch is blocked: AppComposition cannot obtain the language capability \
+pub const EXTERNAL_FORMATTER_BROKER_PREREQUISITE: &str = "external formatter launch is blocked: AppComposition cannot obtain the language capability \
      broker because crates/legion-app/src/language/startup_authority.rs exposes no accessor for \
      LanguageStartupAuthority's broker";
 

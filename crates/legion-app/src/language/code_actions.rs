@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io;
 
-use crate::{language_id_for_path, AppComposition};
+use crate::{AppComposition, language_id_for_path};
 use legion_protocol::{
     BufferId, BufferVersion, FileContentVersion, FileFingerprint, LanguageCodeActionProjection,
     LspCodeActionCandidate, LspCodeActionPayload, ProtocolTextRange, SnapshotId, TextCoordinate,

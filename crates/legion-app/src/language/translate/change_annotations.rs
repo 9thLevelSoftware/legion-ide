@@ -241,11 +241,13 @@ mod tests {
         let normalized = normalize_pyright_annotations(&raw, Some(&health));
         let annotations = translate_annotations(&normalized).unwrap();
         assert!(annotations[0].needs_confirmation);
-        assert!(annotations[0]
-            .description
-            .as_ref()
-            .unwrap()
-            .contains("omitted"));
+        assert!(
+            annotations[0]
+                .description
+                .as_ref()
+                .unwrap()
+                .contains("omitted")
+        );
         assert_eq!(normalized["documentChanges"], raw["documentChanges"]);
         let mut explicit = raw.clone();
         explicit["changeAnnotations"] =

@@ -7,12 +7,12 @@
 
 use std::{
     path::Path,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicBool},
 };
 
 use legion_lsp::{
-    node_compatible_path, LanguageServerAdapterPlan, LspServerBinarySource, LspServerProcessConfig,
-    LspSupervisorConfig, TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE,
+    LanguageServerAdapterPlan, LspServerBinarySource, LspServerProcessConfig, LspSupervisorConfig,
+    TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE, node_compatible_path,
 };
 use legion_platform::NativeProcessService;
 use legion_protocol::{

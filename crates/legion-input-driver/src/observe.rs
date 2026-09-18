@@ -175,12 +175,10 @@ pub fn file_digest(path: &Path) -> Result<FileDigest, String> {
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use windows::core::BOOL;
-#[cfg(windows)]
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Accessibility::{
@@ -191,6 +189,8 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
 };
+#[cfg(windows)]
+use windows::core::BOOL;
 
 /// Cap on how much UI Automation text one read returns.
 #[cfg(windows)]

@@ -46,7 +46,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc},
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -58,10 +58,10 @@ use legion_protocol::{
 use thiserror::Error;
 
 use super::runtime::{
-    canonical_path_to_string, canonical_regular_file, check_budget,
-    language_tool_capability_context, recheck_executable_identity, request_granted_decision,
-    run_bounded_probe, BoundedProbeError, ExecutableIdentityError,
-    EXECUTABLE_FINGERPRINT_MAX_BYTES, EXECUTABLE_PROBE_STREAM_LIMIT, EXECUTABLE_PROBE_TIMEOUT,
+    BoundedProbeError, EXECUTABLE_FINGERPRINT_MAX_BYTES, EXECUTABLE_PROBE_STREAM_LIMIT,
+    EXECUTABLE_PROBE_TIMEOUT, ExecutableIdentityError, canonical_path_to_string,
+    canonical_regular_file, check_budget, language_tool_capability_context,
+    recheck_executable_identity, request_granted_decision, run_bounded_probe,
 };
 
 /// Capability requested before any formatter executable is probed.

@@ -14,9 +14,9 @@ use std::{
 };
 
 use xtask::native_product_acceptance::{
-    self as npa, AcceptanceReport, DriverAvailability, InputDriverProbe,
-    NativeProductAcceptanceOptions, SubprocessLauncher, EXIT_BLOCKED, EXIT_CONFORMANCE_FAILED,
-    EXIT_OPERATIONAL_ERROR, EXIT_PASSED, REPORT_FILE_NAME,
+    self as npa, AcceptanceReport, DriverAvailability, EXIT_BLOCKED, EXIT_CONFORMANCE_FAILED,
+    EXIT_OPERATIONAL_ERROR, EXIT_PASSED, InputDriverProbe, NativeProductAcceptanceOptions,
+    REPORT_FILE_NAME, SubprocessLauncher,
 };
 
 /// A driver-discovery fixture. The real probe touches the filesystem; this one

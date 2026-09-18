@@ -607,11 +607,7 @@ fn clear_prior_evidence(
 }
 
 fn bool_literal(value: bool) -> &'static str {
-    if value {
-        "true"
-    } else {
-        "false"
-    }
+    if value { "true" } else { "false" }
 }
 
 fn host_os_label() -> &'static str {
