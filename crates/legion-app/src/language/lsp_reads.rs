@@ -355,12 +355,10 @@ impl AppComposition {
             });
             return;
         };
-        if !self.server_apply_edits.retain(
-            proposal_id,
-            reply.clone(),
-            decision,
-            request.deadline,
-        ) {
+        if !self
+            .server_apply_edits
+            .retain(proposal_id, reply.clone(), decision, request.deadline)
+        {
             let _ = reply.try_send(legion_lsp::LspApplyWorkspaceEditResponse {
                 applied: false,
                 failure_reason: Some("too many pending workspace/applyEdit proposals".to_string()),
