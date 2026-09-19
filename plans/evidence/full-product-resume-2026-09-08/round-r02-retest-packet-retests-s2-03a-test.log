@@ -1,0 +1,28 @@
+CMD= cargo test -p legion-platform --test bounded_process -j 1 --no-fail-fast -- --nocapture
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running tests\bounded_process.rs (target\debug\deps\bounded_process-a35d0a5bc136eb9d.exe)
+
+running 18 tests
+test bounded_child_fixture ... ok
+test bounded_process_requires_finite_timeout ... ok
+test bounded_process_honors_prelaunch_cancellation ... ok
+test bounded_process_reports_write_failure_when_child_exits_early ... ok
+test bounded_process_delivers_empty_stdin_as_eof ... ok
+test bounded_process_enforces_timeout_and_kills_descendants_holding_pipes ... ok
+test bounded_process_honors_live_cancellation ... ok
+test bounded_process_enforces_actual_timeout ... ok
+test bounded_process_rejects_oversize_stdin_before_spawn ... ok
+test bounded_process_streams_large_stdin_without_deadlock ... ok
+test bounded_process_terminates_on_stdout_overflow ... ok
+test bounded_process_returns_normal_output ... ok
+test bounded_process_rejects_invalid_utf8 ... ok
+test bounded_process_terminates_on_stderr_overflow ... ok
+test bounded_process_none_stdin_behaves_as_before ... ok
+test bounded_process_caps_both_streams_in_one_child ... ok
+test bounded_process_times_out_while_blocked_writing_stdin ... ok
+test bounded_process_cancels_while_blocked_writing_stdin ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.90s
+
+EXIT=0

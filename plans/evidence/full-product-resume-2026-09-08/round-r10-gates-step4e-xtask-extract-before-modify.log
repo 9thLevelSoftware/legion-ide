@@ -1,0 +1,8 @@
+CMD: cargo run -p xtask -- extract-before-modify
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target\debug\xtask.exe extract-before-modify`
+extract-before-modify: no chokepoint file grew past its slack
+END
+EXIT=0

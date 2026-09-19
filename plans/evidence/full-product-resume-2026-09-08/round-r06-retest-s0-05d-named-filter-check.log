@@ -1,0 +1,13 @@
+CMD: cargo test -p xtask --test completion_command -j 1 --no-fail-fast -- verify_completion_register
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.53s
+     Running tests\completion_command.rs (target\debug\deps\completion_command-76b5f47d1fc0f815.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
+
+END
+EXIT=0

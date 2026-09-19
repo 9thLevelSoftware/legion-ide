@@ -6,6 +6,8 @@
 pub mod diagnostics;
 /// LSP feature request builders and projection module.
 pub mod features;
+/// Pinned npm archive descriptors approved for downloaded language servers.
+pub mod pinned_archives;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -33,6 +35,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
+
+use pinned_archives::is_sha256_digest;
+// Re-exported at the crate root so the extraction is transparent: every
+// existing `legion_lsp::NAME` path keeps resolving after the move.
+pub use pinned_archives::{
+    LspPinnedArchive, TYPESCRIPT_COMPILER_ARCHIVE, TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE,
+    TYPESCRIPT_LANGUAGE_SERVER_POLICY_GATE, is_exact_pinned_version,
+};
 
 /// Result type used by the LSP runtime crate.
 pub type LspRuntimeResult<T> = Result<T, LspRuntimeError>;
@@ -401,9 +411,29 @@ pub enum LspDownloadedArtifactResolveError {
     /// Catalog metadata omitted the package name.
     #[error("downloaded artifact package_name is empty")]
     EmptyPackageName,
+    /// Catalog metadata pads the package name with surrounding whitespace.
+    ///
+    /// The name is compared byte for byte against the artifact descriptor by
+    /// the app-owned startup authority, so a padded name that passed a
+    /// trimming check here would fail there instead, far from its cause.
+    #[error("downloaded artifact package_name {value:?} has surrounding whitespace")]
+    PaddedPackageName {
+        /// Package name text carrying leading or trailing whitespace.
+        value: String,
+    },
     /// Catalog metadata omitted the package version.
     #[error("downloaded artifact version is empty")]
     EmptyPackageVersion,
+    /// Catalog metadata records a range or dist-tag instead of an exact pin.
+    #[error("downloaded artifact version {value:?} is not an exact pinned release")]
+    UnpinnedPackageVersion {
+        /// Version text that is not an exact pinned release.
+        value: String,
+    },
+    /// The catalog checksum is not a SHA-256 digest, so no materializer
+    /// receipt can be verified against it.
+    #[error("downloaded artifact catalog checksum is not a SHA-256 digest")]
+    InvalidCatalogChecksum,
     /// The materializer receipt is not a SHA-256 digest.
     #[error("verified artifact checksum is not a SHA-256 digest")]
     InvalidChecksum,
@@ -568,8 +598,32 @@ impl LanguageServerAdapterPlan {
         if metadata.package_name.trim().is_empty() {
             return Err(LspDownloadedArtifactResolveError::EmptyPackageName);
         }
+        // Validate the bytes that are reported and compared, not a trimmed
+        // copy of them. `startup_authority` compares `metadata.package_name`
+        // and `metadata.version` byte for byte against the pinned descriptor,
+        // so a check that silently normalizes here only relocates the failure
+        // to a site that cannot explain it.
+        if metadata.package_name != metadata.package_name.trim() {
+            return Err(LspDownloadedArtifactResolveError::PaddedPackageName {
+                value: metadata.package_name.clone(),
+            });
+        }
         if metadata.version.trim().is_empty() {
             return Err(LspDownloadedArtifactResolveError::EmptyPackageVersion);
+        }
+        // A catalog entry that names a range or a dist-tag names no particular
+        // artifact: what it resolves to changes under the product's feet, so a
+        // digest recorded beside it cannot mean anything. Reject the unpinned
+        // catalog entry before comparing any materializer receipt against it.
+        // A padded version is rejected here too: ` 6.0.0 ` is not the byte
+        // string the descriptor literal contains.
+        if !is_exact_pinned_version(&metadata.version) {
+            return Err(LspDownloadedArtifactResolveError::UnpinnedPackageVersion {
+                value: metadata.version.clone(),
+            });
+        }
+        if !is_sha256_digest(checksum_sha256) {
+            return Err(LspDownloadedArtifactResolveError::InvalidCatalogChecksum);
         }
         if !is_sha256_digest(verified_artifact_sha256) {
             return Err(LspDownloadedArtifactResolveError::InvalidChecksum);
@@ -666,13 +720,6 @@ impl LanguageServerAdapterPlan {
             env: self.process.env.clone(),
         })
     }
-}
-
-fn is_sha256_digest(value: &str) -> bool {
-    value.len() == 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte) || (b'A'..=b'F').contains(&byte)
-        })
 }
 
 /// Serialize a canonical Windows path in the form accepted by Node's module
@@ -1030,15 +1077,36 @@ impl LanguageServerAdapterRegistry {
             Vec::new(),
             true,
         ));
-        registry.register(LanguageServerAdapterPlan::system_path(
-            legion_protocol::LanguageServerId(102),
-            workspace_id,
-            legion_protocol::LanguageId("typescript".to_string()),
+        // The approved TypeScript/JavaScript server is a pinned npm archive:
+        // exact release, exact SHA-256, exact package root and entrypoint, and
+        // the Node minimum that release declares. Its peer compiler archive is
+        // pinned separately as `TYPESCRIPT_COMPILER_ARCHIVE`, because a
+        // descriptor describes one archive and one entrypoint only.
+        let typescript_family_server = |server_id: u64, language_id: &str, display_name: &str| {
+            LanguageServerAdapterPlan::downloaded_package_artifact(
+                legion_protocol::LanguageServerId(server_id),
+                workspace_id,
+                legion_protocol::LanguageId(language_id.to_string()),
+                display_name,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.package_name,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.archive_url,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.checksum_sha256,
+                TYPESCRIPT_LANGUAGE_SERVER_POLICY_GATE,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.metadata(),
+                vec!["--stdio".to_string()],
+                true,
+            )
+        };
+        registry.register(typescript_family_server(
+            102,
+            "typescript",
             "typescript-language-server",
-            "typescript-language-server",
-            vec!["--stdio".to_string()],
-            true,
         ));
+        // `tailwindcss-language-server` has no retained artifact and no
+        // verified digest on this host, so it stays an unpinned PATH lookup
+        // until an approved archive exists. It is the one documented
+        // exception in the TypeScript family, and the registry contract test
+        // names it explicitly rather than allowing it by a loose predicate.
         registry.register(LanguageServerAdapterPlan::system_path(
             legion_protocol::LanguageServerId(103),
             workspace_id,
@@ -1048,35 +1116,23 @@ impl LanguageServerAdapterRegistry {
             vec!["--stdio".to_string()],
             false,
         ));
-        // The TypeScript language server also serves JavaScript/JSX. Keep a
-        // distinct language identity so initialize/text-document language IDs
-        // are advertised correctly while reusing the same explicit command.
-        registry.register(LanguageServerAdapterPlan::system_path(
-            legion_protocol::LanguageServerId(106),
-            workspace_id,
-            legion_protocol::LanguageId("javascript".to_string()),
+        // The TypeScript language server also serves JavaScript/JSX/TSX. Keep
+        // a distinct language identity so initialize/text-document language
+        // IDs are advertised correctly while reusing the same pinned archive.
+        registry.register(typescript_family_server(
+            106,
+            "javascript",
             "typescript-language-server (JavaScript)",
-            "typescript-language-server",
-            vec!["--stdio".to_string()],
-            true,
         ));
-        registry.register(LanguageServerAdapterPlan::system_path(
-            legion_protocol::LanguageServerId(107),
-            workspace_id,
-            legion_protocol::LanguageId("javascriptreact".to_string()),
+        registry.register(typescript_family_server(
+            107,
+            "javascriptreact",
             "typescript-language-server (JSX)",
-            "typescript-language-server",
-            vec!["--stdio".to_string()],
-            true,
         ));
-        registry.register(LanguageServerAdapterPlan::system_path(
-            legion_protocol::LanguageServerId(108),
-            workspace_id,
-            legion_protocol::LanguageId("typescriptreact".to_string()),
+        registry.register(typescript_family_server(
+            108,
+            "typescriptreact",
             "typescript-language-server (TSX)",
-            "typescript-language-server",
-            vec!["--stdio".to_string()],
-            true,
         ));
         registry.register(LanguageServerAdapterPlan::downloaded_package_artifact(
             legion_protocol::LanguageServerId(104),

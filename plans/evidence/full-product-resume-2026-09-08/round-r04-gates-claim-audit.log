@@ -1,0 +1,8 @@
+CMD: cargo run -p xtask -- claim-audit
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target\debug\xtask.exe claim-audit`
+claim audit passed
+END
+EXIT=0

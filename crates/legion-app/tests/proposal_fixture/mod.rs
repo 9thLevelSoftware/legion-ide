@@ -112,6 +112,7 @@ pub fn workspace_edit_payload(
             },
             preconditions: preconditions(),
         }],
+        change_annotations: Vec::new(),
         file_operations: vec![WorkspaceFileOperation::Rename {
             file: file_identity(),
             destination: CanonicalPath("C:/repo/src/main_renamed.rs".to_string()),

@@ -1,0 +1,4 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target\debug\xtask.exe docs-hygiene`
+documentation hygiene checks passed
+EXIT=0

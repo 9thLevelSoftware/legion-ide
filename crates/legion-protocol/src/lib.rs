@@ -41,6 +41,8 @@ pub mod tools;
 /// DTOs for app-routed shaped visual vertical navigation.
 pub mod visual_navigation;
 
+mod language_toolchain;
+pub use language_toolchain::*;
 pub use visual_navigation::*;
 
 pub use capability::AssistedAiCapabilityMatrix;
@@ -4148,6 +4150,41 @@ pub struct WorkspaceTextEdit {
     pub preconditions: ProposalVersionPreconditions,
 }
 
+/// Review metadata associated with one or more entries in a workspace edit.
+///
+/// The identifier and text are untrusted human-review metadata. They do not
+/// authorize mutation or carry executable instructions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEditChangeAnnotation {
+    /// LSP annotation identifier referenced by translated edit entries.
+    pub id: String,
+    /// Short reviewer-facing label.
+    pub label: String,
+    /// Optional reviewer-facing explanation.
+    pub description: Option<String>,
+    /// Whether the source requested explicit confirmation for this annotation.
+    pub needs_confirmation: bool,
+    /// Immutable indices into the containing payload's edit and operation arrays.
+    pub targets: Vec<WorkspaceEditAnnotationTarget>,
+}
+
+/// A workspace-edit entry associated with a change annotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceEditAnnotationTarget {
+    /// A text edit within a file edit, using payload-local indices.
+    TextEdit {
+        /// Index into [`WorkspaceEditProposalPayload::file_edits`].
+        file_edit_index: u32,
+        /// Index into the selected file edit's `EditBatch`.
+        edit_index: u32,
+    },
+    /// A file operation, using a payload-local index.
+    FileOperation {
+        /// Index into [`WorkspaceEditProposalPayload::file_operations`].
+        operation_index: u32,
+    },
+}
+
 /// File operation inside a proposal-ready workspace edit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileOperation {
@@ -4189,6 +4226,9 @@ pub struct WorkspaceEditProposalPayload {
     pub file_edits: Vec<WorkspaceTextEdit>,
     /// File create/delete/rename operations.
     pub file_operations: Vec<WorkspaceFileOperation>,
+    /// LSP change annotations retained for reviewer-facing semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_annotations: Vec<WorkspaceEditChangeAnnotation>,
     /// Capability required before any mutation may apply.
     pub required_capability: CapabilityId,
     /// Diagnostics explaining proposal translation decisions.
@@ -4623,6 +4663,8 @@ pub enum ProposalPreviewWarningKind {
     RawSourceRedacted,
     /// Runtime implementation is intentionally unsupported in this phase.
     UnsupportedRuntime,
+    /// LSP supplied change annotation requires reviewer attention.
+    ChangeAnnotation,
 }
 
 /// Bounded warning emitted during proposal preview.
@@ -16639,171 +16681,6 @@ pub enum CallHierarchyDirection {
     Outgoing,
 }
 
-/// Runtime configuration status for a language toolchain projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum LanguageToolchainConfigurationStatus {
-    /// No local toolchain configuration has been selected.
-    #[default]
-    Unconfigured,
-    /// Metadata has been selected but has not completed validation.
-    Draft,
-    /// The app has validated the selected metadata for use in this session.
-    Configured,
-}
-
-/// Runtime-only TypeScript toolchain projection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypeScriptToolchainProjection {
-    /// Selected metadata-only settings, when present.
-    #[serde(default)]
-    pub settings: Option<TypeScriptToolchainSettings>,
-    /// Current app-owned validation state.
-    #[serde(default)]
-    pub status: LanguageToolchainConfigurationStatus,
-}
-
-impl Default for TypeScriptToolchainProjection {
-    fn default() -> Self {
-        Self {
-            settings: None,
-            status: LanguageToolchainConfigurationStatus::Unconfigured,
-        }
-    }
-}
-
-/// Projection-only language tooling panel state for the active editor buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LanguageToolingProjection {
-    /// Runtime-only TypeScript toolchain configuration projection.
-    #[serde(default)]
-    pub typescript_toolchain: TypeScriptToolchainProjection,
-    /// Workspace represented by the projection, when one is open.
-    pub workspace_id: Option<WorkspaceId>,
-    /// Active editor buffer represented by the projection, when one is open.
-    pub buffer_id: Option<BufferId>,
-    /// Active file represented by the projection, when one is open.
-    pub file_id: Option<FileId>,
-    /// High-level projection status.
-    pub status: LanguageToolingStatusKind,
-    /// Bounded metadata-only status message.
-    pub status_message: String,
-    /// Diagnostic/problem rows.
-    pub problems: Vec<LanguageProblemProjection>,
-    /// Quick-fix rows derived from diagnostic/problem rows.
-    pub quick_fixes: Vec<LanguageQuickFixProjection>,
-    /// Bounded metadata-only live code-action candidates.
-    #[serde(default)]
-    pub code_action_candidates: Vec<LanguageCodeActionProjection>,
-    /// Breadcrumb rows for the active cursor position.
-    pub breadcrumbs: Vec<LanguageBreadcrumbProjection>,
-    /// Sticky scope rows for the active cursor position.
-    pub sticky_scopes: Vec<LanguageStickyScopeProjection>,
-    /// Inlay hint rows for the active buffer.
-    pub inlay_hints: Vec<LanguageInlayHintProjection>,
-    /// Code lens rows for the active buffer.
-    pub code_lenses: Vec<LanguageCodeLensProjection>,
-    /// Current hover result.
-    pub hover: Option<LanguageHoverProjection>,
-    /// Current completion rows.
-    pub completions: Vec<LanguageCompletionProjection>,
-    /// Current definition locations.
-    pub definitions: Vec<LanguageLocationProjection>,
-    /// Current reference locations.
-    pub references: Vec<LanguageLocationProjection>,
-    /// Current call-hierarchy rows, in the direction last asked for.
-    pub call_hierarchy: Vec<LanguageLocationProjection>,
-    /// Direction the call-hierarchy rows answer, when any have been requested.
-    pub call_hierarchy_direction: Option<CallHierarchyDirection>,
-    /// Whether a call-hierarchy question has been asked and not yet answered.
-    ///
-    /// Three states, not two. Empty rows with a direction means "the server
-    /// answered: nobody calls this", which is a real answer and must be shown
-    /// as one. Empty rows while waiting is a different thing entirely, and
-    /// rendering it as the first would state a conclusion the product does not
-    /// have — permanently, if the answer never arrives because the server
-    /// lacks the capability or the caret was on whitespace.
-    pub call_hierarchy_awaiting: bool,
-    /// Current outline rows.
-    pub outline: Vec<LanguageOutlineSymbolProjection>,
-    /// Recent operation status rows.
-    pub operations: Vec<LanguageToolingOperationProjection>,
-    /// Count of stale results discarded before projection.
-    pub stale_result_count: u32,
-    /// Count of cancellation acknowledgements projected.
-    pub cancellation_count: u32,
-    /// Projection generation timestamp.
-    pub generated_at: TimestampMillis,
-    /// Redaction hints for the whole projection.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Projection schema version.
-    pub schema_version: u16,
-    /// Live LSP server health records for the active workspace (D2).
-    ///
-    /// Populated by `AppComposition::shell_projection_snapshot()` from the
-    /// background `LspSessionHandle`.  Empty when no LSP session is active.
-    /// `lsp_health_rows()` in `legion-desktop` renders these into the
-    /// language tooling status section.
-    #[serde(default)]
-    pub lsp_health_records: Vec<LspServerHealthRecord>,
-    /// LSP session lifecycle status including backoff countdown (PKT-LSP-C T3).
-    ///
-    /// `Some` once a session has been attempted (Starting/Live/BackingOff/
-    /// Refused/Failed); `None` when the session is `Idle` (no startup yet).
-    #[serde(default)]
-    pub lsp_session_status: Option<LspSessionStatusProjection>,
-    /// Redacted ring-buffer projection of the LSP server stderr (PKT-LSP-C T4).
-    ///
-    /// `Some` only when the session is `Live` and the ring contains at least
-    /// one line.  `None` when the session is `Idle`, `Starting`, or failed,
-    /// or when no stderr output has been received yet.
-    #[serde(default)]
-    pub lsp_session_log: Option<LspSessionLogProjection>,
-}
-
-impl LanguageToolingProjection {
-    /// Construct an empty language tooling projection.
-    pub fn empty() -> Self {
-        Self {
-            typescript_toolchain: TypeScriptToolchainProjection::default(),
-            workspace_id: None,
-            buffer_id: None,
-            file_id: None,
-            status: LanguageToolingStatusKind::Idle,
-            status_message: "Language tooling idle".to_string(),
-            problems: Vec::new(),
-            quick_fixes: Vec::new(),
-            code_action_candidates: Vec::new(),
-            breadcrumbs: Vec::new(),
-            sticky_scopes: Vec::new(),
-            inlay_hints: Vec::new(),
-            code_lenses: Vec::new(),
-            hover: None,
-            completions: Vec::new(),
-            definitions: Vec::new(),
-            references: Vec::new(),
-            call_hierarchy: Vec::new(),
-            call_hierarchy_direction: None,
-            call_hierarchy_awaiting: false,
-            outline: Vec::new(),
-            operations: Vec::new(),
-            stale_result_count: 0,
-            cancellation_count: 0,
-            generated_at: TimestampMillis(0),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-            lsp_health_records: Vec::new(),
-            lsp_session_status: None,
-            lsp_session_log: None,
-        }
-    }
-}
-
-impl Default for LanguageToolingProjection {
-    fn default() -> Self {
-        Self::empty()
-    }
-}
-
 /// High-level terminal panel status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TerminalPanelStatusKind {
@@ -17584,6 +17461,8 @@ pub enum LspContractValidationError {
     MissingPrecondition,
     /// Workspace edit did not include complete target coverage.
     IncompleteTargetCoverage,
+    /// Change annotation metadata or target associations were invalid.
+    InvalidChangeAnnotations,
     /// Workspace edit source was not an LSP edit-producing source.
     UnsupportedEditSource,
 }
@@ -17655,6 +17534,51 @@ pub fn convert_lsp_edit_to_workspace_proposal(
 pub fn validate_lsp_edit_proposal_contract(
     input: &LspEditProposalConversionInput,
 ) -> Result<(), LspContractValidationError> {
+    let mut annotation_ids = std::collections::HashSet::new();
+    let mut annotated_targets = std::collections::HashSet::new();
+    let mut annotation_bytes = 0usize;
+    if input.workspace_edit.change_annotations.len() > 256 {
+        return Err(LspContractValidationError::InvalidChangeAnnotations);
+    }
+    for annotation in &input.workspace_edit.change_annotations {
+        annotation_bytes = annotation_bytes
+            .saturating_add(annotation.id.len())
+            .saturating_add(annotation.label.len())
+            .saturating_add(annotation.description.as_ref().map_or(0, String::len));
+        if !annotation_ids.insert(&annotation.id)
+            || annotation.id.len() > 256
+            || annotation.label.len() > 1024
+            || annotation
+                .description
+                .as_ref()
+                .is_some_and(|text| text.len() > 8192)
+            || annotation_bytes > 64 * 1024
+        {
+            return Err(LspContractValidationError::InvalidChangeAnnotations);
+        }
+        for target in &annotation.targets {
+            let (identity, valid) = match target {
+                WorkspaceEditAnnotationTarget::TextEdit {
+                    file_edit_index,
+                    edit_index,
+                } => (
+                    (0, *file_edit_index, *edit_index),
+                    input
+                        .workspace_edit
+                        .file_edits
+                        .get(*file_edit_index as usize)
+                        .is_some_and(|file| (*edit_index as usize) < file.edits.edits.len()),
+                ),
+                WorkspaceEditAnnotationTarget::FileOperation { operation_index } => (
+                    (1, *operation_index, 0),
+                    (*operation_index as usize) < input.workspace_edit.file_operations.len(),
+                ),
+            };
+            if !valid || !annotated_targets.insert(identity) || annotated_targets.len() > 4096 {
+                return Err(LspContractValidationError::InvalidChangeAnnotations);
+            }
+        }
+    }
     if input.request.correlation_id.0 == 0 {
         return Err(LspContractValidationError::ZeroCorrelationId);
     }
@@ -20780,39 +20704,6 @@ impl Default for WorkbenchSettingsRecord {
             schema_version: 1,
         }
     }
-}
-
-/// Persisted metadata-only settings for locally configured language toolchains.
-///
-/// This describes operator-selected paths for later app-owned validation. It
-/// is not an authorization, grant, receipt, or artifact integrity record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LanguageToolchainSettingsRecord {
-    /// DTO schema version.
-    pub schema_version: u16,
-    /// Optional TypeScript bundle settings.
-    #[serde(default)]
-    pub typescript: Option<TypeScriptToolchainSettings>,
-}
-
-impl Default for LanguageToolchainSettingsRecord {
-    fn default() -> Self {
-        Self {
-            schema_version: 1,
-            typescript: None,
-        }
-    }
-}
-
-/// Metadata-only paths for a TypeScript language-server/compiler bundle.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TypeScriptToolchainSettings {
-    /// Local language-server archive path.
-    pub server_archive: CanonicalPath,
-    /// Local compiler archive path.
-    pub compiler_archive: CanonicalPath,
-    /// Explicit Node runtime path.
-    pub node_executable: CanonicalPath,
 }
 
 /// Product-readiness track.

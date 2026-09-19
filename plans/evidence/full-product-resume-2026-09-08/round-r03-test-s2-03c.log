@@ -1,0 +1,36 @@
+CMD: cargo test -p legion-app -j 1 --no-fail-fast --test formatter_executable_approval
+CWD: /d/legion-ide-completion
+BEGIN
+warning: function `pyright_initialization_options` is never used
+   --> crates\legion-app\src\language\toolchain_settings.rs:534:8
+    |
+534 | pub fn pyright_initialization_options(python: &PythonToolchainSettings) -> serde_json::Value {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `legion-app` (lib) generated 1 warning
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.61s
+     Running tests\formatter_executable_approval.rs (target\debug\deps\formatter_executable_approval-53a555d3d9ac6dda.exe)
+
+running 14 tests
+test path_resolved_formatter_name_is_rejected_before_broker_or_process ... ok
+test cancellation_and_deadline_have_no_broker_or_process_effect ... ok
+test untrusted_formatter_denies_before_filesystem_or_process_effects ... ok
+test empty_probe_arguments_are_rejected_before_broker_or_process ... ok
+test cancellation_after_probe_completion_does_not_mint_receipt ... ok
+test unexpected_exit_status_never_mints_receipt ... ok
+test denied_formatter_never_spawns ... ok
+test successful_probe_forwards_exact_path_args_and_bounds ... ok
+test wrong_decision_response_is_rejected_before_spawn ... ok
+test receipt_revalidation_rejects_context_mismatch ... ok
+test unprobeable_formatter_is_recorded_without_spawning ... ok
+test replacement_after_probe_does_not_mint_receipt ... ok
+test broker_window_replacement_is_rejected_before_spawn ... ok
+test receipt_revalidation_rejects_same_size_replacement ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+END
+EXIT=0

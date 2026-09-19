@@ -14,7 +14,8 @@ use legion_protocol::{
     CausalityId, LanguageId, LanguageToolingOperationKind, LspResultStatus,
     LspSessionLifecycleKind, PrincipalId, ProposalLifecycleAction, ProposalLifecycleCommand,
     ProposalLifecycleCommandReason, ProposalPayload, ProposalRequest, ProposalResponse,
-    TextCoordinate, TimestampMillis, WorkspaceTrustState,
+    ProtocolDiagnosticSeverity, RedactionHint, TextCoordinate, TimestampMillis,
+    WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
 
@@ -127,28 +128,47 @@ fn cancel_native_proposal(app: &mut AppComposition, proposal: &legion_protocol::
     assert!(matches!(response, ProposalResponse::Cancelled { .. }));
 }
 
-fn wait_for_python_problem(app: &mut AppComposition, file_name: &str, needle: &str) {
+fn python_assignment_problem(problem: &legion_protocol::LanguageProblemProjection) -> bool {
+    problem
+        .path
+        .as_ref()
+        .is_some_and(|path| path.0.ends_with("main.py"))
+        && problem.code_label.as_deref() == Some("reportAssignmentType")
+        && problem.range.is_some_and(|range| {
+            range.start.line == 0
+                && range.start.character == 13
+                && range.end.line == 0
+                && range.end.character == 20
+        })
+        && problem.severity == ProtocolDiagnosticSeverity::Error
+        && problem.source_label.as_deref() == Some("Pyright")
+}
+
+fn python_assignment_error(problem: &legion_protocol::LanguageProblemProjection) -> bool {
+    problem
+        .path
+        .as_ref()
+        .is_some_and(|path| path.0.ends_with("main.py"))
+        && problem.code_label.as_deref() == Some("reportAssignmentType")
+        && problem.severity == ProtocolDiagnosticSeverity::Error
+        && problem.source_label.as_deref() == Some("Pyright")
+}
+
+fn wait_for_python_problem(app: &mut AppComposition) -> legion_protocol::LanguageProblemProjection {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         app.drain_lsp_session();
-        if app
+        if let Some(problem) = app
             .language_tooling_projection()
             .problems
             .iter()
-            .any(|problem| {
-                problem
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.0.ends_with(file_name))
-                    && (problem.message.contains(needle)
-                        || problem.code_label.as_deref() == Some(needle))
-            })
+            .find(|problem| python_assignment_problem(problem))
         {
-            return;
+            return problem.clone();
         }
         assert!(
             Instant::now() < deadline,
-            "Python diagnostic {needle:?} did not arrive for {file_name}: problems={:?}, health={:?}, session={:?}, stderr={:?}",
+            "Python assignment diagnostic did not arrive: problems={:?}, health={:?}, session={:?}, stderr={:?}",
             app.language_tooling_projection().problems,
             app.lsp_server_health_record(),
             app.lsp_session_status_projection(),
@@ -158,7 +178,7 @@ fn wait_for_python_problem(app: &mut AppComposition, file_name: &str, needle: &s
     }
 }
 
-fn wait_for_python_problem_clear(app: &mut AppComposition, file_name: &str, needle: &str) {
+fn wait_for_python_problem_clear(app: &mut AppComposition) {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         app.drain_lsp_session();
@@ -166,20 +186,13 @@ fn wait_for_python_problem_clear(app: &mut AppComposition, file_name: &str, need
             .language_tooling_projection()
             .problems
             .iter()
-            .any(|problem| {
-                problem
-                    .path
-                    .as_ref()
-                    .is_some_and(|path| path.0.ends_with(file_name))
-                    && (problem.message.contains(needle)
-                        || problem.code_label.as_deref() == Some(needle))
-            })
+            .any(python_assignment_error)
         {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "Python diagnostic {needle:?} did not clear for {file_name}: problems={:?}",
+            "Python assignment diagnostic did not clear: problems={:?}",
             app.language_tooling_projection().problems,
         );
         std::thread::sleep(Duration::from_millis(25));
@@ -362,6 +375,25 @@ fn native_python_rename_is_reviewable_cancelable_and_saves_cross_file_edit() {
         payload.file_edits.len() >= 2,
         "rename must cover definition and use"
     );
+    let annotation = payload
+        .change_annotations
+        .iter()
+        .find(|annotation| annotation.id == "default")
+        .expect("Pyright annotation remains attached to the proposal");
+    assert!(
+        annotation.needs_confirmation,
+        "implicit server metadata requires explicit review"
+    );
+    assert!(
+        annotation.targets.len() >= 2,
+        "annotation must cover the cross-file edits"
+    );
+    assert!(
+        annotation
+            .description
+            .as_deref()
+            .is_some_and(|text| text.contains("omitted"))
+    );
     assert_eq!(std::fs::read_to_string(&lib).unwrap(), LIB_BEFORE);
     assert_eq!(std::fs::read_to_string(&main).unwrap(), MAIN_BEFORE);
     cancel_native_proposal(&mut app, &proposal);
@@ -508,7 +540,14 @@ fn native_python_diagnostic_clears_after_editor_replace_and_save() {
     app.dispatch_ui_intent(CommandDispatchIntent::LspStartSession)
         .expect("start Python");
     wait_for_live(&mut app);
-    wait_for_python_problem(&mut app, "main.py", "cannot be assigned");
+    let problem = wait_for_python_problem(&mut app);
+    assert_eq!(problem.message, "LSP error diagnostic");
+    assert!(!problem.message.contains("cannot be assigned"));
+    assert!(
+        problem
+            .redaction_hints
+            .contains(&RedactionHint::MetadataOnly)
+    );
 
     app.dispatch_ui_intent(CommandDispatchIntent::SetDirectedSelection {
         buffer_id,
@@ -532,7 +571,7 @@ fn native_python_diagnostic_clears_after_editor_replace_and_save() {
     })
     .expect("replace invalid Python value through editor intent");
     assert_eq!(app.buffer_text_for_input(buffer_id).unwrap(), AFTER);
-    wait_for_python_problem_clear(&mut app, "main.py", "cannot be assigned");
+    wait_for_python_problem_clear(&mut app);
     let save = app.save_all().expect("save corrected Python source");
     assert_eq!(save.status, AppSaveAllStatus::Saved);
     assert_eq!(std::fs::read_to_string(&source).unwrap(), AFTER);

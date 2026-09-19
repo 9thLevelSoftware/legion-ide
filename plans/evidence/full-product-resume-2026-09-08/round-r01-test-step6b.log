@@ -1,0 +1,7 @@
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+   Compiling legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.52s
+     Running `target\debug\xtask.exe check-deps`
+dependency policy checks passed
+EXIT=0

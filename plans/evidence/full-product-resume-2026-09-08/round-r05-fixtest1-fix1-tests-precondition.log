@@ -1,0 +1,23 @@
+CMD: powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='cargo.exe' or Name='rustc.exe'\" | Select-Object ProcessId,Name,CreationDate,CommandLine | Format-List; Get-Date"
+CWD: D:/legion-ide-completion
+BEGIN
+
+
+ProcessId    : 45644
+Name         : cargo.exe
+CreationDate : 9/8/2026 5:24:58 PM
+CommandLine  : C:\Users\dasbl\.cargo\bin\cargo.exe test --workspace
+
+ProcessId    : 69012
+Name         : cargo.exe
+CreationDate : 9/8/2026 5:24:58 PM
+CommandLine  : "C:\Users\dasbl\.rustup\toolchains\1.97.1-x86_64-pc-windows-msvc\bin\cargo.exe" test --workspace
+
+
+
+
+Tuesday, September 8, 2026 5:26:43 PM
+
+
+END
+EXIT=0

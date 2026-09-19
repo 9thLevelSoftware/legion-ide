@@ -219,3 +219,263 @@ fn normal_configuration_is_atomic_and_populates_all_typescript_family_maps() {
     assert!(!broker_allows_command(&app, &legacy_b));
     assert!(!broker_allows_command(&app, &new_node));
 }
+
+fn python_fixture_files() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    let interpreter = dir.path().join("python-interpreter.exe");
+    let formatter = dir.path().join("python-formatter.exe");
+    for path in [&interpreter, &formatter] {
+        std::fs::write(path, b"fixture").expect("fixture file");
+    }
+    (dir, interpreter, formatter)
+}
+
+fn refusal(error: AppCompositionError) -> ProtocolError {
+    match error {
+        AppCompositionError::Protocol(protocol) => protocol,
+        other => panic!("expected a protocol refusal, got {other:?}"),
+    }
+}
+
+fn refusal_code(error: AppCompositionError) -> String {
+    refusal(error).code
+}
+
+#[test]
+fn python_toolchain_requires_trusted_workspace() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        dir.path(),
+        WorkspaceTrustState::Untrusted,
+        PrincipalId("python-toolchain-test".to_string()),
+    )
+    .expect("open untrusted workspace");
+
+    let error = app
+        .configure_python_toolchain(&interpreter, &formatter)
+        .expect_err("an untrusted workspace must refuse Python configuration");
+    assert_eq!(
+        refusal_code(error),
+        "language_toolchain_workspace_untrusted"
+    );
+    assert!(app.language_toolchain_settings().python.is_none());
+    assert!(
+        !broker_allows_command(&app, &interpreter),
+        "a refused configuration must not leave an exact-binary allowance"
+    );
+    assert!(!broker_allows_command(&app, &formatter));
+
+    // Positive control: the same fixtures and the same broker observe a real
+    // grant once the workspace is trusted, so the denials above are about the
+    // missing allowance rather than about the harness.
+    app.open_workspace(
+        dir.path(),
+        WorkspaceTrustState::Trusted,
+        PrincipalId("python-toolchain-test".to_string()),
+    )
+    .expect("re-open the same root as trusted");
+    assert!(!broker_allows_command(&app, &interpreter));
+    app.configure_python_toolchain(&interpreter, &formatter)
+        .expect("configure once the workspace is trusted");
+    assert!(broker_allows_command(&app, &interpreter));
+    assert!(broker_allows_command(&app, &formatter));
+}
+
+#[test]
+fn python_toolchain_rejects_path_resolved_executable_names() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = open_trusted_app(dir.path());
+
+    let error = app
+        .configure_python_toolchain("python", &formatter)
+        .expect_err("a bare interpreter name must be refused");
+    assert_eq!(refusal_code(error), "language_toolchain_path_not_explicit");
+    assert!(app.language_toolchain_settings().python.is_none());
+    assert!(
+        !broker_allows_command(&app, &formatter),
+        "the bare name must be refused before any path is granted"
+    );
+
+    let error = app
+        .configure_python_toolchain(&interpreter, "black")
+        .expect_err("a bare formatter name must be refused");
+    assert_eq!(refusal_code(error), "language_toolchain_path_not_explicit");
+    assert!(app.language_toolchain_settings().python.is_none());
+    assert!(
+        !broker_allows_command(&app, &interpreter),
+        "a valid first path must not be granted when the second is a bare name"
+    );
+    assert!(!broker_allows_command(&app, &formatter));
+
+    // Positive control: the same pair is accepted once both are explicit.
+    app.configure_python_toolchain(&interpreter, &formatter)
+        .expect("explicit paths are accepted");
+    assert!(broker_allows_command(&app, &interpreter));
+    assert!(broker_allows_command(&app, &formatter));
+}
+
+#[test]
+fn python_toolchain_rejects_missing_or_non_regular_executables() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = open_trusted_app(dir.path());
+
+    let missing = dir.path().join("missing-interpreter.exe");
+    let error = app
+        .configure_python_toolchain(&missing, &formatter)
+        .expect_err("a missing interpreter must be refused");
+    assert_eq!(refusal_code(error), "language_toolchain_input_invalid");
+
+    let directory = dir.path().join("interpreter-directory");
+    std::fs::create_dir(&directory).expect("directory fixture");
+    let canonical_directory = std::fs::canonicalize(&directory).expect("canonical directory");
+    let protocol = refusal(
+        app.configure_python_toolchain(&directory, &formatter)
+            .expect_err("a directory is not a regular file"),
+    );
+    assert_eq!(protocol.code, "language_toolchain_input_invalid");
+    assert!(protocol.message.contains("must be a regular file"));
+    assert!(
+        protocol
+            .message
+            .contains(canonical_directory.to_str().expect("UTF-8 directory")),
+        "the refusal must name the rejected path: {}",
+        protocol.message
+    );
+
+    let protocol = refusal(
+        app.configure_python_toolchain(&interpreter, &directory)
+            .expect_err("a directory formatter is not a regular file"),
+    );
+    assert_eq!(protocol.code, "language_toolchain_input_invalid");
+
+    assert!(app.language_toolchain_settings().python.is_none());
+    assert!(
+        !broker_allows_command(&app, &interpreter),
+        "no allowance may survive a refused configuration"
+    );
+    assert!(!broker_allows_command(&app, &formatter));
+}
+
+#[test]
+fn configure_python_toolchain_records_canonical_interpreter_and_formatter() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = open_trusted_app(dir.path());
+    app.configure_python_toolchain(&interpreter, &formatter)
+        .expect("configure the Python toolchain");
+
+    let recorded = app
+        .language_toolchain_settings()
+        .python
+        .expect("python section recorded");
+    let canonical_interpreter =
+        std::fs::canonicalize(&interpreter).expect("canonical interpreter fixture");
+    let canonical_formatter =
+        std::fs::canonicalize(&formatter).expect("canonical formatter fixture");
+    assert_eq!(
+        recorded.interpreter_executable,
+        CanonicalPath(
+            canonical_interpreter
+                .to_str()
+                .expect("UTF-8 interpreter")
+                .to_string()
+        )
+    );
+    assert_eq!(
+        recorded.formatter_executable,
+        CanonicalPath(
+            canonical_formatter
+                .to_str()
+                .expect("UTF-8 formatter")
+                .to_string()
+        )
+    );
+    assert!(Path::new(&recorded.interpreter_executable.0).is_absolute());
+    assert!(Path::new(&recorded.formatter_executable.0).is_absolute());
+    assert_eq!(app.language_toolchain_settings().schema_version, 1);
+    assert!(
+        app.language_toolchain_settings().typescript.is_none(),
+        "configuring Python must not touch the TypeScript section"
+    );
+    assert!(broker_allows_command(&app, &interpreter));
+    assert!(broker_allows_command(&app, &formatter));
+
+    // The recorded interpreter is what the Pyright payload carries.
+    let options = pyright_initialization_options(&recorded);
+    assert_eq!(
+        options["settings"]["python"]["pythonPath"]
+            .as_str()
+            .expect("pythonPath is a string"),
+        recorded.interpreter_executable.0
+    );
+    // The reachable accessor is the same payload built from the same recorded
+    // settings, and it reports nothing at all once the section is cleared.
+    assert_eq!(
+        app.pyright_configuration_payload(),
+        Some(options),
+        "the accessor must return the payload built from the recorded settings"
+    );
+    app.clear_python_toolchain();
+    assert_eq!(
+        app.pyright_configuration_payload(),
+        None,
+        "no Python section means no Pyright payload"
+    );
+}
+
+#[test]
+fn invalid_python_formatter_leaves_previous_configuration_intact() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = open_trusted_app(dir.path());
+    app.configure_python_toolchain(&interpreter, &formatter)
+        .expect("configure the first Python pair");
+    let before = app.language_toolchain_settings();
+
+    let replacement = dir.path().join("replacement-interpreter.exe");
+    std::fs::write(&replacement, b"replacement fixture").expect("replacement fixture");
+    let missing_formatter = dir.path().join("missing-formatter.exe");
+
+    let error = app
+        .configure_python_toolchain(&replacement, &missing_formatter)
+        .expect_err("an invalid formatter must refuse the whole configuration");
+    assert_eq!(refusal_code(error), "language_toolchain_input_invalid");
+
+    assert_eq!(app.language_toolchain_settings(), before);
+    assert!(
+        broker_allows_command(&app, &interpreter),
+        "the previously configured interpreter must keep its allowance"
+    );
+    assert!(broker_allows_command(&app, &formatter));
+    assert!(
+        !broker_allows_command(&app, &replacement),
+        "the refused replacement interpreter must never be granted"
+    );
+}
+
+#[test]
+fn clear_python_toolchain_revokes_only_unshared_exact_binaries() {
+    let (dir, interpreter, formatter) = python_fixture_files();
+    let mut app = open_trusted_app(dir.path());
+    app.configure_language_server_binary(LanguageServerId(104), interpreter.clone())
+        .expect("configure an unrelated server on the same exact binary");
+    app.configure_python_toolchain(&interpreter, &formatter)
+        .expect("configure the Python toolchain");
+    assert!(broker_allows_command(&app, &interpreter));
+    assert!(broker_allows_command(&app, &formatter));
+
+    app.clear_python_toolchain();
+    assert!(app.language_toolchain_settings().python.is_none());
+    assert!(
+        broker_allows_command(&app, &interpreter),
+        "an exact binary another configuration still holds must survive the clear"
+    );
+    assert!(
+        !broker_allows_command(&app, &formatter),
+        "the unshared formatter grant must be revoked"
+    );
+
+    // Clearing an already-cleared toolchain is a no-op, not a second revoke.
+    app.clear_python_toolchain();
+    assert!(broker_allows_command(&app, &interpreter));
+    assert!(!broker_allows_command(&app, &formatter));
+}

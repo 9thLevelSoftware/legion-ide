@@ -1,0 +1,25 @@
+CMD: gh run view 34322199039 --json jobs, then gh run view 34322199039 --job <id> --log-failed for each failing job, filtered to FAILED test lines
+CWD: D:/legion-ide-completion
+ROLE: record
+BEGIN
+success	102371151423	cargo-deny (advisories, bans, licenses, sources)
+failure	102371151604	Standing gates (windows-latest)
+failure	102371151608	Standing gates (ubuntu-latest)
+failure	102371151801	Standing gates (macos-latest)
+##### JOB 102371151604
+Standing gates (windows-latest)	UNKNOWN STEP	2026-09-09T07:32:46.3358393Z test language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates ... FAILED
+Standing gates (windows-latest)	UNKNOWN STEP	2026-09-09T07:32:46.7206727Z thread 'language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates' (916) panicked at crates\legion-app\src\language\typescript_organize_tests.rs:112:5:
+Standing gates (windows-latest)	UNKNOWN STEP	2026-09-09T07:32:46.7217138Z test result: FAILED. 446 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s
+##### JOB 102371151608
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:15:05.1760884Z test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... FAILED
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:15:31.8068768Z thread 'view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output' (21813) panicked at crates/legion-desktop/src/view/streamed_layout/worker.rs:659:18:
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:15:31.8072015Z test result: FAILED. 241 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 28.76s
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:16:49.6539904Z test tests::retention_drained_prefix_releases_each_unpinned_descriptor_and_preserves_lease ... FAILED
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:16:50.9735611Z thread 'tests::retention_drained_prefix_releases_each_unpinned_descriptor_and_preserves_lease' (26872) panicked at crates/legion-editor/src/lib.rs:4573:9:
+Standing gates (ubuntu-latest)	UNKNOWN STEP	2026-09-09T07:16:50.9738655Z test result: FAILED. 56 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.34s
+##### JOB 102371151801
+Standing gates (macos-latest)	UNKNOWN STEP	2026-09-09T07:21:04.5094460Z test language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates ... FAILED
+Standing gates (macos-latest)	UNKNOWN STEP	2026-09-09T07:21:05.0080310Z thread 'language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates' (100521) panicked at crates/legion-app/src/language/typescript_organize_tests.rs:112:5:
+Standing gates (macos-latest)	UNKNOWN STEP	2026-09-09T07:21:05.0083840Z test result: FAILED. 450 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.09s
+END
+EXIT=0

@@ -1112,6 +1112,29 @@ fn scan_payload_sites(
                 &format!("{prefix}.workspace_edit.title"),
                 &edit.title,
             );
+            for (annotation_index, annotation) in edit.change_annotations.iter().enumerate() {
+                scan_preview_site(
+                    sites,
+                    &format!("{prefix}.workspace_edit.change_annotations[{annotation_index}].id"),
+                    &annotation.id,
+                );
+                scan_preview_site(
+                    sites,
+                    &format!(
+                        "{prefix}.workspace_edit.change_annotations[{annotation_index}].label"
+                    ),
+                    &annotation.label,
+                );
+                if let Some(description) = annotation.description.as_deref() {
+                    scan_preview_site(
+                        sites,
+                        &format!(
+                            "{prefix}.workspace_edit.change_annotations[{annotation_index}].description"
+                        ),
+                        description,
+                    );
+                }
+            }
             for (file_index, file_edit) in edit.file_edits.iter().enumerate() {
                 for (index, text_edit) in file_edit.edits.edits.iter().enumerate() {
                     scan_preview_site(

@@ -99,6 +99,7 @@ pub(crate) fn render_proposal_cards(
             });
             // Surface the lifecycle state so terminal proposals are legible.
             ui.label(theme::muted(format!("status: {}", row.lifecycle.label)));
+            render_annotation_warnings(ui, &row.preview_warnings, row.proposal_id);
             // Wrapped, not a fixed row. Five controls side by side force the
             // inspector wider than its 288px minimum, which the panel-tiling
             // gate catches -- and in a narrow inspector a row that cannot fit is
@@ -160,10 +161,36 @@ pub(crate) fn render_proposal_cards(
     }
 }
 
+fn render_annotation_warnings(
+    ui: &mut egui::Ui,
+    warnings: &[legion_protocol::ProposalPreviewWarning],
+    proposal_id: legion_protocol::ProposalId,
+) {
+    if warnings.is_empty() {
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt(format!("proposal-annotations-{}", proposal_id.0))
+        .max_height(180.0)
+        .show(ui, |ui| {
+            egui::CollapsingHeader::new("Review warnings and annotations")
+                .default_open(true)
+                .show(ui, |ui| {
+                    for warning in warnings {
+                        ui.label(theme::muted(&warning.message));
+                    }
+                });
+        });
+}
+
 #[cfg(test)]
 mod proposal_card_rules {
     use super::proposal_is_applicable;
-    use legion_protocol::ProposalLifecycleState;
+    use super::render_annotation_warnings;
+    use legion_protocol::{
+        ProposalId, ProposalLifecycleState, ProposalPreviewWarning, ProposalPreviewWarningKind,
+        RedactionHint,
+    };
 
     /// Apply is offered for exactly one state, and never before review.
     #[test]
@@ -187,5 +214,43 @@ mod proposal_card_rules {
                 "{state:?} must not offer Apply; applying an unreviewed or terminal proposal routes around the approval this surface exists to collect"
             );
         }
+    }
+
+    #[test]
+    fn rendered_annotation_review_exposes_metadata_without_actions() {
+        let warnings = vec![ProposalPreviewWarning {
+            code: "lsp.change_annotation:default".to_string(),
+            kind: ProposalPreviewWarningKind::ChangeAnnotation,
+            message: "Rename symbol: Update definition and references Confirmation required. Affects 2 target(s).".to_string(),
+            target_id: Some("default".to_string()),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+        }];
+        let context = egui::Context::default();
+        let output = context.run_ui(egui::RawInput::default(), |outer_ui| {
+            egui::CentralPanel::default().show_inside(outer_ui, |ui| {
+                render_annotation_warnings(ui, &warnings, ProposalId(7));
+            });
+        });
+
+        fn collect_text(shape: &egui::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => texts.push(text.galley.job.text.clone()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect_text(shape, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut texts = Vec::new();
+        for clipped in &output.shapes {
+            collect_text(&clipped.shape, &mut texts);
+        }
+        let rendered = texts.join("\n");
+        assert!(rendered.contains("Rename symbol"));
+        assert!(rendered.contains("Update definition and references"));
+        assert!(rendered.contains("Confirmation required"));
     }
 }

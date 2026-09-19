@@ -1,0 +1,11 @@
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+   Compiling legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+   Compiling legion-security v0.1.0 (D:\legion-ide-completion\crates\legion-security)
+   Compiling legion-index v0.1.0 (D:\legion-ide-completion\crates\legion-index)
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+   Compiling legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+   Compiling legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.42s
+     Running `target\debug\xtask.exe check-deps`
+dependency policy checks passed

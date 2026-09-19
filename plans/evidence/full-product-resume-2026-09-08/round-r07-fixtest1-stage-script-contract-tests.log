@@ -1,0 +1,33 @@
+CMD: pwsh -NoProfile -File scripts/test-native-package-verifiers.ps1
+CWD: D:/legion-ide-completion
+BEGIN
+== native package verifier contract tests ==
+bash: C:\Program Files\Git\bin\bash.exe
+powershell: C:\Program Files\PowerShell\7\pwsh.exe
+fixtures: C:\Users\dasbl\AppData\Local\Temp\legion-verifier-tests-6c4025a832984d04a77944146a658777
+
+PASS  sh verifier plans linux-x64-deb beta workspace under <workspace>/target
+PASS  sh verifier plans linux-x64-appimage beta workspace under <workspace>/target
+PASS  sh verifier plans macos-x64-dmg beta workspace under <workspace>/target
+PASS  sh verifier plans macos-arm64-dmg beta workspace under <workspace>/target
+PASS  ps verifier plans windows-x64-msi beta workspace under <workspace>/target
+PASS  sh verifier rejects a missing DEB and prints evidence before exit
+PASS  sh verifier rejects a DEB whose sha256 does not match
+PASS  sh verifier prints the DMG failure report for a non-existent DMG
+PASS  ps verifier rejects a missing MSI and prints evidence before exit
+PASS  ps verifier rejects an MSI whose sha256 does not match
+PASS  ps verifier accepts a ProductVersion carrying surrounding whitespace
+PASS  ps verifier still rejects a genuinely different ProductVersion
+PASS  ps verifier rejects an MSI without ProductVersion with an actionable error
+PASS  stage script rejects a source under target/debug
+PASS  stage script rejects a source under target/release
+PASS  stage script rejects an MSI whose sha256 does not match its sidecar
+PASS  stage script rejects an extraction tree with no legion-desktop.exe
+PASS  stage script rejects an extraction tree with more than one legion-desktop.exe
+PASS  stage script stages the whole payload directory and writes STAGING-EVIDENCE.toml
+PASS  stage evidence records signed = false and the exact signing prerequisite
+PASS  stage script is idempotent across two runs
+
+passed=21 failed=0 skipped=0
+END
+EXIT=0

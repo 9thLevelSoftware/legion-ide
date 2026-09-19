@@ -1,0 +1,7 @@
+CMD: cargo check -p legion-input-driver --all-targets -j 1
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-input-driver v0.1.0 (D:\legion-ide-completion\crates\legion-input-driver)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.73s
+END
+EXIT=0

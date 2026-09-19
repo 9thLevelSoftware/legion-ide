@@ -5,6 +5,12 @@
 //! authenticate a candidate nomination, or produce a release verdict. An
 //! empty issue list proves metadata consistency, outcome integrity, and
 //! coverage only; it is not authentic product acceptance or release readiness.
+//!
+//! In release mode it additionally rejects any matrix configuration whose
+//! `owner_approval_ref` carries a provisional/agent-made ratification marker
+//! (see [`super::ratification`]). That rejection is a fail-closed text check
+//! and is not authentication of owner ratification: its absence establishes
+//! nothing positive about who ratified the matrix.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -20,7 +26,10 @@ use super::schema::{
 /// selected run. No verifier checkout HEAD or candidate manifest is read, and
 /// no artifact bytes are loaded or hashed.
 /// `release` adds required-product acceptance and required-matrix coverage
-/// checks; it does not authenticate evidence or nominate a candidate.
+/// checks, and rejects every matrix configuration whose `owner_approval_ref`
+/// carries a provisional/agent-made ratification marker; it does not
+/// authenticate evidence, authenticate owner ratification, or nominate a
+/// candidate.
 pub fn validate_metadata_links(
     requirements: &RequirementsDocument,
     matrix: &MatrixDocument,
@@ -175,6 +184,16 @@ pub fn validate_metadata_links(
             {
                 issues.push(format!(
                     "required matrix configuration `{}` has no eligible required-product coverage",
+                    configuration.id
+                ));
+            }
+            // Applies to every configuration, required or not: a provisional
+            // cell is provisional either way.
+            if let Some(marker) = super::ratification::provisional_ratification_marker(
+                &configuration.owner_approval_ref,
+            ) {
+                issues.push(format!(
+                    "matrix configuration `{}` owner_approval_ref carries provisional ratification marker `{marker}`: release mode rejects a provisionally ratified matrix",
                     configuration.id
                 ));
             }

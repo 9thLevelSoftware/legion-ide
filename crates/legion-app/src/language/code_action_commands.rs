@@ -7,13 +7,19 @@
 use std::collections::HashMap;
 use std::io;
 
-use legion_protocol::{LanguageToolingOperationKind, ProposalId};
+use legion_protocol::{LanguageToolingOperationKind, LspOperationContext, ProposalId};
 
 use super::code_actions::CodeActionIdentity;
 
 pub(crate) const MAX_COMMAND_SIDECARS: usize = 32;
 pub(crate) const MAX_COMMAND_ARGUMENT_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_COMMAND_ID_BYTES: usize = 256;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingLspCommandContext {
+    pub(crate) context: LspOperationContext,
+    pub(crate) operation_kind: LanguageToolingOperationKind,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CodeActionCommand {

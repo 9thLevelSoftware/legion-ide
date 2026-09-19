@@ -1,0 +1,32 @@
+CMD: cargo test -p xtask --test native_product_acceptance -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.19s
+     Running tests\native_product_acceptance.rs (target\debug\deps\native_product_acceptance-7cb1f9097afa0705.exe)
+
+running 19 tests
+test blocked_exit_code_is_distinct_from_the_conformance_failure_exit_code ... ok
+test driver_discovery_prefers_the_built_in_repo_driver_over_the_staged_path ... ok
+test blocked_report_records_neither_passed_nor_skipped ... ok
+test report_is_written_and_readable_even_when_the_run_is_blocked ... ok
+test blocked_result_carries_an_exact_actionable_prerequisite_string ... ok
+test driver_missing_prerequisite_names_the_in_repo_build_command ... ok
+test no_subprocess_is_spawned_when_the_driver_is_unavailable ... ok
+test missing_packaged_binary_is_reported_blocked_rather_than_failed ... ok
+test unavailable_driver_returns_blocked_with_a_nonzero_exit ... ok
+test a_note_in_the_driver_result_cannot_forge_the_status_field ... ok
+test a_blocked_input_class_is_never_reported_as_a_conformance_failure ... ok
+test driver_blocked_result_carries_the_drivers_exact_prerequisite_string ... ok
+test driver_blocked_exit_is_propagated_as_blocked_with_its_own_exit_code ... ok
+test command_is_not_referenced_by_any_pr_gate_workflow ... ok
+test blocked_and_deviating_classes_are_named_in_the_harness_report ... ok
+test blocked_report_never_emits_an_empty_prerequisite ... ok
+test unknown_driver_exit_code_is_an_operational_error_not_a_conformance_failure ... ok
+test conformance_failed_requires_a_driver_that_reported_a_deviation_itself ... ok
+test driver_exit_zero_contradicting_its_own_result_is_an_operational_error ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+END
+EXIT=0

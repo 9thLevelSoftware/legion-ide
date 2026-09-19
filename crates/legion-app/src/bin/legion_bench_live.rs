@@ -860,6 +860,7 @@ fn apply_existing_file_via_pipeline(
             },
             preconditions: preconditions.clone(),
         }],
+        change_annotations: Vec::new(),
         file_operations: Vec::new(),
         required_capability: capability.clone(),
         diagnostics: Vec::new(),

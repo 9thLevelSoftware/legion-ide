@@ -12,7 +12,7 @@ use std::{
 
 use legion_lsp::{
     LanguageServerAdapterPlan, LspServerBinarySource, LspServerProcessConfig, LspSupervisorConfig,
-    node_compatible_path,
+    TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE, node_compatible_path,
 };
 use legion_platform::NativeProcessService;
 use legion_protocol::{
@@ -221,6 +221,15 @@ impl LanguageStartupAuthority {
         }
     }
 
+    /// The capability broker this authority uses for language-tool launches.
+    ///
+    /// External formatter approval has to ask the same broker that recorded the
+    /// operator's exact-binary allowance; minting a second broker from the
+    /// recorded path would be self-issued authority.
+    pub fn capability_broker(&self) -> Arc<dyn CapabilityBrokerPort + Send + Sync> {
+        Arc::clone(&self.broker)
+    }
+
     /// Creates an authority with a clonable app-owned deny-by-default policy.
     pub fn with_policy_store(policy: Arc<Mutex<DenyByDefaultBroker>>) -> Self {
         let broker: Arc<dyn CapabilityBrokerPort + Send + Sync> = Arc::new(PolicyBroker {
@@ -359,6 +368,21 @@ impl LanguageStartupAuthority {
                 "artifact descriptor does not match adapter metadata",
             ));
         }
+        if metadata.package_name == TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.package_name {
+            let has_peer = initialization_options
+                .as_ref()
+                .and_then(|value| value.get("tsserver"))
+                .and_then(|value| value.get("path"))
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| !path.trim().is_empty());
+            if !has_peer {
+                return Err(invalid(
+                    "typescript-language-server requires the pinned TypeScript compiler peer; \
+                     start it through the TypeScript bundle path so TYPESCRIPT_COMPILER_ARCHIVE \
+                     is materialized",
+                ));
+            }
+        }
         approved_node
             .revalidate(
                 runtime_request,
@@ -434,6 +458,7 @@ impl LanguageStartupAuthority {
         node_path: &Path,
         cancellation: Arc<AtomicBool>,
         root_uri: String,
+        initialization_options: Option<serde_json::Value>,
     ) -> Result<LanguageServerStartConfig, LanguageSessionError> {
         validate_context(context)?;
         if cancellation.load(std::sync::atomic::Ordering::Acquire) {
@@ -508,7 +533,7 @@ impl LanguageStartupAuthority {
             &runtime_request,
             cancellation,
             root_uri,
-            None,
+            initialization_options,
             None,
         )
     }

@@ -645,6 +645,7 @@ pub fn external_edits_to_proposals(
                 redaction_hints: vec![RedactionHint::MetadataOnly],
             },
             file_edits: vec![],
+            change_annotations: Vec::new(),
             file_operations: vec![WorkspaceFileOperation::Create {
                 path: CanonicalPath(path.clone()),
                 initial_content_hash: Some(external_edit_content_fingerprint(&edit.content)),
@@ -727,6 +728,7 @@ mod tests {
                     redaction_hints: vec![RedactionHint::MetadataOnly],
                 },
                 file_edits: vec![],
+                change_annotations: Vec::new(),
                 file_operations: vec![WorkspaceFileOperation::Create {
                     path: CanonicalPath("src/external.rs".to_string()),
                     initial_content_hash: None,
@@ -787,6 +789,7 @@ mod tests {
                     redaction_hints: vec![RedactionHint::MetadataOnly],
                 },
                 file_edits: vec![],
+                change_annotations: Vec::new(),
                 file_operations: vec![WorkspaceFileOperation::Create {
                     path: CanonicalPath("deploy/config.toml".to_string()),
                     initial_content_hash: None,
@@ -842,6 +845,7 @@ mod tests {
                     redaction_hints: vec![RedactionHint::MetadataOnly],
                 },
                 file_edits: vec![],
+                change_annotations: Vec::new(),
                 file_operations: vec![WorkspaceFileOperation::Create {
                     path: CanonicalPath("src/external.rs".to_string()),
                     initial_content_hash: None,
@@ -897,6 +901,7 @@ mod tests {
                     redaction_hints: vec![RedactionHint::MetadataOnly],
                 },
                 file_edits: vec![],
+                change_annotations: Vec::new(),
                 file_operations: vec![],
                 required_capability: CapabilityId("fs.write".to_string()),
                 diagnostics: vec![],

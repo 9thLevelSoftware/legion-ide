@@ -54,6 +54,19 @@ fn same_lsp_operation_context(
         && expected.schema_version == actual.schema_version
 }
 
+fn remove_matching_command_context(
+    contexts: &mut std::collections::HashMap<String, crate::language::PendingLspCommandContext>,
+    context: &legion_protocol::LspOperationContext,
+) {
+    let key = context.request_id.0.to_string();
+    if contexts
+        .get(&key)
+        .is_some_and(|pending| same_lsp_operation_context(&pending.context, context))
+    {
+        contexts.remove(&key);
+    }
+}
+
 impl AppComposition {
     pub(crate) fn lsp_operation_context(
         &mut self,
@@ -99,6 +112,14 @@ impl AppComposition {
             self.code_action_authority
                 .remove_resolve_attempt(&operation_id);
             if let Some(pending) = self.pending_lsp_writes.remove(&operation_id) {
+                self.pending_code_action_contexts.retain(|_, context| {
+                    context.context.workspace_id != pending.workspace_id
+                        || context.context.file_id != pending.file_id
+                        || context.context.buffer_id != pending.buffer_id
+                        || context.context.snapshot_id != pending.snapshot_id
+                        || context.context.correlation_id != pending.event_context.correlation_id
+                        || context.context.causality_id != pending.event_context.causality_id
+                });
                 let _ = self.language_tooling.upsert_write_operation(
                     &pending,
                     status,
@@ -220,7 +241,7 @@ impl AppComposition {
                 });
                 return;
             };
-            if !same_lsp_operation_context(expected_context, &context)
+            if !same_lsp_operation_context(&expected_context.context, &context)
                 || self.active_documents.workspace_id() != Some(context.workspace_id)
                 || self
                     .active_documents
@@ -270,9 +291,34 @@ impl AppComposition {
             request.json_rpc_id,
             Uuid::now_v7()
         );
+        let pending_context = self
+            .pending_code_action_contexts
+            .get(&context.request_id.0.to_string())
+            .cloned();
+        let (operation_kind, proposal_kind, title) = pending_context
+            .map(|metadata| {
+                let proposal_kind = if metadata.operation_kind
+                    == LanguageToolingOperationKind::OrganizeImportsProposal
+                {
+                    LanguageProposalKind::OrganizeImports
+                } else {
+                    LanguageProposalKind::CodeAction
+                };
+                let title = if matches!(proposal_kind, LanguageProposalKind::OrganizeImports) {
+                    "Organize Imports"
+                } else {
+                    "Server workspace edit"
+                };
+                (metadata.operation_kind, proposal_kind, title.to_string())
+            })
+            .unwrap_or((
+                LanguageToolingOperationKind::CodeActionProposal,
+                LanguageProposalKind::CodeAction,
+                "Server workspace edit".to_string(),
+            ));
         let pending = crate::language::PendingLspWriteOperation {
             operation_id: operation_id.clone(),
-            operation_kind: LanguageToolingOperationKind::CodeActionProposal,
+            operation_kind,
             workspace_id: context.workspace_id,
             file_id: context.file_id,
             buffer_id: context.buffer_id,
@@ -285,9 +331,9 @@ impl AppComposition {
         self.ingest_lsp_write_side_result(
             context.buffer_id,
             LspWriteSideSpec {
-                proposal_kind: LanguageProposalKind::CodeAction,
+                proposal_kind,
                 source_kind: WorkspaceEditSourceKind::LspCodeAction,
-                title: "Server workspace edit".to_string(),
+                title,
                 detail_tag: "language_tooling.server_apply_edit",
                 detail_extra: Vec::new(),
                 command: None,
@@ -361,6 +407,14 @@ impl AppComposition {
                 return;
             }
             if pending.buffer_id != tag.buffer_id || pending.snapshot_id != tag.snapshot_id {
+                if matches!(&tag.kind, LspReadKind::CodeActionExecuteCommand { .. })
+                    && let Some(context) = tag.operation_context.as_ref()
+                {
+                    remove_matching_command_context(
+                        &mut self.pending_code_action_contexts,
+                        context,
+                    );
+                }
                 let _ = self.language_tooling.upsert_write_operation(
                     &pending,
                     LanguageToolingStatusKind::Stale,
@@ -376,6 +430,14 @@ impl AppComposition {
         let lsp_outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
+                if matches!(&tag.kind, LspReadKind::CodeActionExecuteCommand { .. })
+                    && let Some(context) = tag.operation_context.as_ref()
+                {
+                    remove_matching_command_context(
+                        &mut self.pending_code_action_contexts,
+                        context,
+                    );
+                }
                 if let Some(pending) = pending_write.as_ref() {
                     let _ = self.language_tooling.upsert_write_operation(
                         pending,
@@ -401,6 +463,11 @@ impl AppComposition {
         if let Ok(current_snapshot) = self.editor.current_snapshot(tag.buffer_id)
             && is_stale_response(lsp_outcome.issued_snapshot, current_snapshot.snapshot_id)
         {
+            if matches!(&tag.kind, LspReadKind::CodeActionExecuteCommand { .. })
+                && let Some(context) = tag.operation_context.as_ref()
+            {
+                remove_matching_command_context(&mut self.pending_code_action_contexts, context);
+            }
             if let Some(pending) = pending_write.as_ref() {
                 let _ = self.language_tooling.upsert_write_operation(
                     pending,
@@ -940,7 +1007,7 @@ impl AppComposition {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn issue_code_action_command(
+    pub(super) fn issue_code_action_command(
         &mut self,
         buffer_id: BufferId,
         response_id: &str,
@@ -1023,8 +1090,13 @@ impl AppComposition {
             }
             return Ok(());
         }
-        self.pending_code_action_contexts
-            .insert(command_request_id, operation_context);
+        self.pending_code_action_contexts.insert(
+            command_request_id,
+            crate::language::PendingLspCommandContext {
+                context: operation_context,
+                operation_kind,
+            },
+        );
         let file_id = self
             .active_documents
             .metadata_for_buffer(buffer_id)
@@ -1293,7 +1365,13 @@ impl AppComposition {
     /// The resulting proposal enters the `Previewed` state. Call
     /// [`approve_and_apply_rename_proposal`] to transition it through
     /// `Approved` → `Applied` (PKT-APPLY Task 2c).
-    fn ingest_lsp_write_side_result(
+    ///
+    /// `pub(crate)` because the external-formatter route in
+    /// `crate::language::external_formatter` lifts a whole-document
+    /// replacement into the same `{"changes": {uri: [TextEdit]}}` shape and
+    /// hands it here. That is the point: one translation, one preconditions
+    /// check, one proposal lifecycle, one `workspace/applyEdit` arbitration.
+    pub(crate) fn ingest_lsp_write_side_result(
         &mut self,
         buffer_id: BufferId,
         spec: LspWriteSideSpec,
@@ -1375,8 +1453,10 @@ impl AppComposition {
         // Build the production DocumentResolver from the current open-buffer state.
         let resolver = AppDocumentResolver::build(&self.active_documents, &self.editor);
 
+        let health = self.lsp_session.health_record();
+        let raw = crate::language::translate::normalize_pyright_annotations(raw, health.as_ref());
         let workspace_edit = match translate_workspace_edit(
-            raw,
+            &raw,
             &resolver,
             workspace_id,
             source_kind,
@@ -2547,7 +2627,20 @@ impl AppComposition {
     ///
     /// The result becomes a reviewable proposal like every other write-side
     /// action; nothing here writes.
+    ///
+    /// # Precedence
+    ///
+    /// A buffer whose language has an explicitly configured external formatter
+    /// takes that route instead, because the operator selected that tool
+    /// deliberately and a language server's own formatting would silently
+    /// override the choice. `route_external_python_formatting` answers `false`
+    /// for every other buffer — a non-Python file, or a Python file with no
+    /// configured formatter — and the language-server request below then runs
+    /// exactly as it did before this route existed.
     pub fn issue_lsp_formatting_request(&mut self, buffer_id: BufferId) -> bool {
+        if self.route_external_python_formatting(buffer_id) {
+            return true;
+        }
         let event_context = self.next_event_context();
         self.issue_lsp_write_read(
             buffer_id,
@@ -2944,7 +3037,10 @@ impl AppComposition {
                 ) {
                     self.pending_code_action_contexts.insert(
                         deferred.operation_context.request_id.0.to_string(),
-                        deferred.operation_context.clone(),
+                        crate::language::PendingLspCommandContext {
+                            context: deferred.operation_context.clone(),
+                            operation_kind: pending.operation_kind,
+                        },
                     );
                 }
                 let _ = self.language_tooling.upsert_write_operation(
@@ -2964,13 +3060,13 @@ impl AppComposition {
 /// proposal kind they are recorded as; the WorkspaceEdit → translate →
 /// validate → preview path is identical, and duplicating it once per action is
 /// how one of them quietly stops registering its proposal.
-struct LspWriteSideSpec {
-    proposal_kind: LanguageProposalKind,
-    source_kind: WorkspaceEditSourceKind,
-    title: String,
-    detail_tag: &'static str,
-    detail_extra: Vec<String>,
-    command: Option<(String, serde_json::Value)>,
+pub(crate) struct LspWriteSideSpec {
+    pub(crate) proposal_kind: LanguageProposalKind,
+    pub(crate) source_kind: WorkspaceEditSourceKind,
+    pub(crate) title: String,
+    pub(crate) detail_tag: &'static str,
+    pub(crate) detail_extra: Vec<String>,
+    pub(crate) command: Option<(String, serde_json::Value)>,
 }
 
 #[cfg(test)]

@@ -54,3 +54,15 @@ Settings overlay, but every code-canvas call site hard-codes
 a picker would offer a control that appears to work and does not — exactly what
 this gate exists to prevent. Give it an effect first, then a control.
 """
+
+[[allowed]]
+intent = "RequestCodeActionProposal"
+reason = """
+Retired in favor of the two-step request/select flow. Palette
+`language-code-action` and `:code-action` now emit RequestCodeActions for the
+current selection, and `:code-action <id>` emits SelectCodeAction against the
+live response. The leftover variant still exists so older tests can name the
+dead AppCommandRequest arm that always records failure; giving it a gesture
+would re-ship a command that cannot create a proposal. Delete the variant once
+those tests stop constructing it.
+"""

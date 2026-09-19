@@ -1,0 +1,7 @@
+CMD: cargo clippy -p xtask --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.30s
+END
+EXIT=0

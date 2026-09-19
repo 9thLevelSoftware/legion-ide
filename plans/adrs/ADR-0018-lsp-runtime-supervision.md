@@ -148,3 +148,41 @@ supersede earlier checkpoint counts without promoting product readiness.
 See [the committed handoff](../../docs/superpowers/handoffs/2026-09-06-full-product-completion-handoff.md)
 and `plans/evidence/full-product-checkpoint-2026-09-06/` for exact resume steps
 and raw logs. Work stopped at the user's request; full completion is unproved.
+
+## 2026-09-07 resume evidence
+
+Resume r3 records real TypeScript and Pyright app/server integration after
+removing fabricated local rename tokens and empty formatting, Organize Imports,
+and code-action proposals. The current path retains bounded operation identity,
+normalized Windows paths, callback proposal creation, and CAS arbitration
+before mutation. Python annotated edits retain bounded annotation metadata and
+strict index validation. Pyright diagnostics retain file, code, range, severity,
+and source metadata while redacting the message to `LSP error diagnostic`; the
+correction/clear/save test asserts this privacy boundary. See
+[`full-product-resume-2026-09-07`](../evidence/full-product-resume-2026-09-07/README.md),
+`crates/legion-app/src/language/lsp_reads.rs`,
+`crates/legion-app/src/language/translate/change_annotations.rs`, and
+`plans/evidence/full-product-resume-2026-09-07/resume-native-r3.log`.
+
+This remains app/real-server integration evidence. It does not establish
+native GUI or full-product qualification; the 59-package and 419-requirement
+scope remains unchanged and unassessed.
+
+The durable resume records also include 439 app and 16/16 language-tooling
+passes after placeholder removal, workspace all-targets clippy with `-D
+warnings` exit 0, 243 desktop unit/rendering passes, and a targeted renderer
+rerun of 1/1. The full workspace test run was interrupted during build at the
+user’s request and has no suite outcome; see
+`plans/evidence/full-product-resume-2026-09-07/resume-workspace-tests-r1-interrupted.log`.
+These results do not promote readiness.
+
+The terminal-focused checkpoint passed 6/6 with exit 0; format, dependency,
+docs-hygiene, claim-audit, and extract-before-modify checkpoint logs are
+retained under `plans/evidence/full-product-resume-2026-09-07/`.
+
+The current durable packet records 439 app and 16/16 language-tooling passes;
+the earlier stale fake-proposal fixture failures have been migrated. The
+bounded-stdin specification in commit `7cbbbf9` is planning-only and its
+implementation has not started. The full-workspace run was stopped during
+build at the user’s request and has no suite result. See the
+[2026-09-08 handoff](../../docs/superpowers/handoffs/2026-09-08-full-product-resume-handoff.md).

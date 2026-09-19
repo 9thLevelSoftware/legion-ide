@@ -1,0 +1,10 @@
+CMD: cargo check -p legion-lsp --all-targets -j 1
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking windows v0.62.2
+    Checking legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+    Checking legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.35s
+END
+EXIT=0

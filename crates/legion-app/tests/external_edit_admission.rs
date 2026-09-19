@@ -146,6 +146,7 @@ fn proposal_covering(
                 redaction_hints: vec![],
             },
             file_edits: vec![],
+            change_annotations: Vec::new(),
             file_operations: vec![WorkspaceFileOperation::Create {
                 path: CanonicalPath(path.to_string()),
                 initial_content_hash,

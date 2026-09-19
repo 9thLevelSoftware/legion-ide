@@ -474,6 +474,7 @@ fn lsp_conversion_input(
                 },
                 preconditions: preconditions.clone(),
             }],
+            change_annotations: Vec::new(),
             file_operations: Vec::new(),
             required_capability: CapabilityId("fs.write".to_string()),
             diagnostics: vec![protocol_diagnostic("lsp.edit.converted")],

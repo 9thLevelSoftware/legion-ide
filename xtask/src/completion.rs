@@ -4,6 +4,7 @@ pub mod hash;
 pub mod identity_receipts;
 pub mod links;
 pub mod outcomes;
+pub mod ratification;
 pub mod run_artifacts;
 pub mod schema;
 pub mod structure;

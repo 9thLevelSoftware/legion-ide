@@ -57,6 +57,10 @@ fn scenario(requirement_ids: &[&str], configs: &[&str]) -> Scenario {
 }
 
 fn matrix(configs: &[&str]) -> MatrixDocument {
+    matrix_with_approval(configs, "approval")
+}
+
+fn matrix_with_approval(configs: &[&str], owner_approval_ref: &str) -> MatrixDocument {
     MatrixDocument {
         schema_version: 1,
         configurations: configs
@@ -69,7 +73,7 @@ fn matrix(configs: &[&str]) -> MatrixDocument {
                 hardware: "fixture".into(),
                 project_category: "desktop".into(),
                 required: true,
-                owner_approval_ref: "approval".into(),
+                owner_approval_ref: owner_approval_ref.into(),
             })
             .collect(),
     }
@@ -129,17 +133,39 @@ fn docs(
     scenario: Scenario,
     configs: &[&str],
 ) -> (RequirementsDocument, MatrixDocument, ScenariosDocument) {
+    docs_with_approval(requirement, scenario, configs, "approval")
+}
+
+fn docs_with_approval(
+    requirement: Requirement,
+    scenario: Scenario,
+    configs: &[&str],
+    owner_approval_ref: &str,
+) -> (RequirementsDocument, MatrixDocument, ScenariosDocument) {
     (
         RequirementsDocument {
             schema_version: 1,
             requirements: vec![requirement],
         },
-        matrix(configs),
+        matrix_with_approval(configs, owner_approval_ref),
         ScenariosDocument {
             schema_version: 1,
             scenarios: vec![scenario],
         },
     )
+}
+
+/// The `owner_approval_ref` every configuration in
+/// `plans/completion/matrix.json` carries today, written out literally so that
+/// a reword of the register's marker fails a test instead of passing silently.
+const REGISTER_OWNER_APPROVAL_REF_TODAY: &str = "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)";
+
+/// Issues raised by the release-mode provisional-ratification rejection only.
+fn provisional_issues(issues: &[String]) -> Vec<&String> {
+    issues
+        .iter()
+        .filter(|issue| issue.contains("provisional ratification marker"))
+        .collect()
 }
 
 #[test]
@@ -629,4 +655,136 @@ fn out_of_scope_and_nonreciprocal_metadata_cannot_satisfy_row() {
             .iter()
             .any(|issue| issue.contains("no applicable scenario/configuration pair"))
     );
+}
+
+#[test]
+fn release_rejects_a_configuration_whose_owner_approval_is_marked_provisional() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("unassessed", true, &[], &[]),
+        scenario(&[], &[]),
+        &["CFG-1"],
+        "plans/completion/decisions.md#ratification (provisional)",
+    );
+    let issues =
+        validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+    let flagged = provisional_issues(&issues);
+    assert_eq!(flagged.len(), 1, "{issues:?}");
+    assert!(flagged[0].contains("CFG-1"), "{flagged:?}");
+    assert!(flagged[0].contains("`provisional`"), "{flagged:?}");
+}
+
+#[test]
+fn release_rejects_a_configuration_whose_owner_approval_is_marked_agent_made() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("unassessed", true, &[], &[]),
+        scenario(&[], &[]),
+        &["CFG-1"],
+        "plans/completion/decisions.md#ratification (agent-made, not owner-ratified)",
+    );
+    let issues =
+        validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+    let flagged = provisional_issues(&issues);
+    assert_eq!(flagged.len(), 1, "{issues:?}");
+    assert!(flagged[0].contains("CFG-1"), "{flagged:?}");
+    assert!(flagged[0].contains("`agent-made`"), "{flagged:?}");
+}
+
+#[test]
+fn release_rejects_the_exact_marker_string_the_register_uses_today() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("unassessed", true, &[], &[]),
+        scenario(&[], &[]),
+        &["CFG-1"],
+        REGISTER_OWNER_APPROVAL_REF_TODAY,
+    );
+    let issues =
+        validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+    let flagged = provisional_issues(&issues);
+    assert_eq!(flagged.len(), 1, "{issues:?}");
+    assert!(flagged[0].contains("CFG-1"), "{flagged:?}");
+    assert!(flagged[0].contains("`provisional`"), "{flagged:?}");
+
+    let repeated =
+        validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+    assert_eq!(issues, repeated, "release issues are not deterministic");
+}
+
+#[test]
+fn release_reports_every_provisional_configuration_not_only_the_first() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("unassessed", true, &[], &[]),
+        scenario(&[], &[]),
+        &["CFG-1", "CFG-2"],
+        REGISTER_OWNER_APPROVAL_REF_TODAY,
+    );
+    let issues =
+        validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+    let flagged = provisional_issues(&issues);
+    assert_eq!(flagged.len(), 2, "{issues:?}");
+    assert!(flagged.iter().any(|issue| issue.contains("CFG-1")));
+    assert!(flagged.iter().any(|issue| issue.contains("CFG-2")));
+    assert!(
+        issues.windows(2).all(|pair| pair[0] <= pair[1]),
+        "issues are not sorted: {issues:?}"
+    );
+}
+
+#[test]
+fn release_accepts_an_owner_approval_reference_with_no_provisional_marker() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("accepted", true, &["SCN-1"], &["CFG-1"]),
+        scenario(&["REQ-1"], &["CFG-1"]),
+        &["CFG-1"],
+        "plans/completion/decisions.md#2026-09-08-owner-ratification",
+    );
+    let issues = validate_metadata_links(
+        &requirements,
+        &matrix,
+        &scenarios,
+        &[run("run-product")],
+        "candidate-a",
+        true,
+    );
+    assert!(issues.is_empty(), "{issues:?}");
+}
+
+#[test]
+fn provisional_marker_detection_is_case_insensitive() {
+    for (owner_approval_ref, quoted) in [
+        ("decisions.md#x (PROVISIONAL)", "`PROVISIONAL`"),
+        ("decisions.md#x (Provisional)", "`Provisional`"),
+        ("decisions.md#x (Agent-Made)", "`Agent-Made`"),
+    ] {
+        let (requirements, matrix, scenarios) = docs_with_approval(
+            requirement("unassessed", true, &[], &[]),
+            scenario(&[], &[]),
+            &["CFG-1"],
+            owner_approval_ref,
+        );
+        let issues =
+            validate_metadata_links(&requirements, &matrix, &scenarios, &[], "candidate-a", true);
+        let flagged = provisional_issues(&issues);
+        assert_eq!(flagged.len(), 1, "{owner_approval_ref}: {issues:?}");
+        assert!(flagged[0].contains("CFG-1"), "{flagged:?}");
+        assert!(flagged[0].contains(quoted), "{flagged:?}");
+    }
+}
+
+#[test]
+fn development_mode_does_not_reject_a_provisional_configuration() {
+    let (requirements, matrix, scenarios) = docs_with_approval(
+        requirement("unassessed", true, &[], &[]),
+        scenario(&[], &[]),
+        &["CFG-1"],
+        REGISTER_OWNER_APPROVAL_REF_TODAY,
+    );
+    let issues = validate_metadata_links(
+        &requirements,
+        &matrix,
+        &scenarios,
+        &[],
+        "candidate-a",
+        false,
+    );
+    assert!(issues.is_empty(), "{issues:?}");
 }

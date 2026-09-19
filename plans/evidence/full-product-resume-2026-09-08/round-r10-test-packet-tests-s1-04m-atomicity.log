@@ -1,0 +1,21 @@
+CMD: cargo test -p legion-editor --test atomicity_and_retention -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.06s
+     Running tests\atomicity_and_retention.rs (target\debug\deps\atomicity_and_retention-9abbd9f50f1e0880.exe)
+
+running 8 tests
+test invalid_batch_rolls_back_live_text_version_dirty_and_side_effects ... ok
+test large_buffers_open_in_degraded_mode_instead_of_failing ... ok
+test protocol_descriptor_preserves_utf16_ranges_for_surrogate_pairs ... ok
+test batch_edit_deltas_track_cumulative_shift_from_lower_edits ... ok
+test retention_budget_evicts_oldest_unpinned_undo_snapshots ... ok
+test current_and_pending_save_snapshots_remain_pinned_under_retention_pressure ... ok
+test undo_redo_remains_correct_for_degraded_chunk_boundary_edits ... ok
+test oversize_edit_transitions_buffer_into_degraded_mode_without_losing_undo_history ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
+
+END
+EXIT=0

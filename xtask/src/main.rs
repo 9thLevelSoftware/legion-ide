@@ -518,6 +518,20 @@ enum Commands {
         #[arg(long, default_value = ".")]
         root: std::path::PathBuf,
     },
+    /// Validate the canonical completion register structure only.
+    ///
+    /// Runs the register structure validator by itself, so the register can be
+    /// checked before a candidate SHA and an evidence set exist. It takes no
+    /// candidate SHA and no release switch, and reaches no evidence, defect or
+    /// release validator. It establishes no evidence run, no acceptance status
+    /// and no implementation status: a clean result is a structural lint, never
+    /// a completion or acceptance verdict. Status counts are informational.
+    #[command(name = "verify-completion-register")]
+    VerifyCompletionRegister {
+        /// Workspace root that contains `plans/completion`. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+    },
     /// Report which DAP adapter binaries this machine has (P2.F3.T2).
     ///
     /// The dogfood tests for policy-gated adapter resolution were reporting
@@ -943,6 +957,36 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// COMP-PLAT-002: native input acceptance harness for the packaged product (ADR-0056).
+    ///
+    /// Drives the six `COMP-PLAT-002` input classes (keyboard, pointer, text,
+    /// clipboard, IME/CJK, command) against the packaged product through an
+    /// owner-installed external input driver, and observes them from outside
+    /// the product process. `xtask` never links `legion-desktop`; the product
+    /// is reached only as a subprocess.
+    ///
+    /// Exit codes: `0` passed (every class observed to conform on a real
+    /// window — never the mere absence of a failure); `1` conformance failure
+    /// (the product is wrong); `2` operational error (cannot create the output
+    /// directory, cannot write the report, driver produced no result); `3`
+    /// blocked (no driver, no interactive desktop session, no packaged
+    /// product, or a macOS/Linux host blocked on `BLK-2026-09-08-02`). Blocked
+    /// is never a pass, never a skip and never `0`.
+    ///
+    /// Not a standing gate and not merge-blocking. No workflow under
+    /// `.github/workflows/` references it, and a test asserts that.
+    #[command(name = "native-product-acceptance")]
+    NativeProductAcceptance {
+        /// Output directory for the acceptance report.
+        #[arg(long, default_value = "target/native-input-acceptance")]
+        out_dir: String,
+        /// Directory holding the packaged native product.
+        #[arg(long, default_value = "target/native-input-acceptance/package")]
+        package_dir: String,
+        /// Path to the owner-installed external native input driver.
+        #[arg(long)]
+        driver: Option<String>,
+    },
     /// Run the scripted GP-5 golden-path acceptance smoke against a throwaway fixture workspace.
     ///
     /// Drives the core IDE user journey through AppComposition: open workspace,
@@ -1053,6 +1097,9 @@ fn main() {
             release,
             root,
         } => xtask::completion_command::run_verify_completion_command(&root, &candidate, release),
+        Commands::VerifyCompletionRegister { root } => {
+            xtask::completion_command::run_verify_completion_register_command(&root)
+        }
         Commands::DapAdapterProbe {
             provenance,
             require,
@@ -1163,6 +1210,17 @@ fn main() {
             release,
             record_evidence,
         } => run_windowed_gui_e2e_command(&out_dir, release, record_evidence.as_deref()),
+        Commands::NativeProductAcceptance {
+            out_dir,
+            package_dir,
+            driver,
+        } => xtask::native_product_acceptance::run_native_product_acceptance_command(
+            &xtask::native_product_acceptance::NativeProductAcceptanceOptions {
+                out_dir,
+                package_dir,
+                driver_path: driver,
+            },
+        ),
         Commands::GoldenPath5 {
             fixture_dir,
             out_dir,

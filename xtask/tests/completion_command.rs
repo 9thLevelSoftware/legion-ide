@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -5,8 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
+use xtask::completion::structure::validate_register_structure;
 use xtask::completion_command::{
-    completion_status_counts, run_verify_completion_command, validate_completion,
+    completion_status_counts, run_verify_completion_command,
+    run_verify_completion_register_command, validate_completion, validate_completion_register,
 };
 
 mod evidence_fixture {
@@ -598,4 +601,264 @@ fn prerequisite_fulfillment_is_aggregated_per_package_configuration() {
         "shared package/config fulfillment failed: {issues:?}"
     );
     let _ = fs::remove_dir_all(root);
+}
+
+fn xtask_binary() -> PathBuf {
+    PathBuf::from(std::env::var("CARGO_BIN_EXE_xtask").expect("xtask binary path"))
+}
+
+/// The complete fixture with the candidate manifest and the entire evidence
+/// tree removed: exactly the pre-candidate state this command exists to check.
+fn register_only_fixture() -> PathBuf {
+    let (root, _) = complete_fixture();
+    fs::remove_file(root.join("plans/completion/candidate.json"))
+        .expect("remove candidate manifest");
+    fs::remove_dir_all(root.join("plans/evidence")).expect("remove evidence tree");
+    root
+}
+
+fn run_register_cli(root: &std::path::Path) -> std::process::Output {
+    Command::new(xtask_binary())
+        .args(["verify-completion-register", "--root"])
+        .arg(root)
+        .output()
+        .expect("run verify-completion-register")
+}
+
+#[test]
+fn register_command_validates_structure_without_candidate_or_evidence() {
+    let root = register_only_fixture();
+    assert!(!root.join("plans/completion/candidate.json").exists());
+    assert!(!root.join("plans/evidence").exists());
+    let candidate = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // The evidence-bearing entry point genuinely cannot run in this state.
+    let evidence_error = validate_completion(&root, candidate, false).unwrap_err();
+    assert!(
+        evidence_error.contains("plans/completion/candidate.json"),
+        "expected a candidate manifest failure, got {evidence_error}"
+    );
+    assert_eq!(run_verify_completion_command(&root, candidate, false), 1);
+
+    // The register-only path is clean on that same state.
+    let issues = validate_completion_register(&root).expect("register loads without a candidate");
+    assert!(
+        issues.is_empty(),
+        "unexpected structural issues: {issues:?}"
+    );
+    assert_eq!(run_verify_completion_register_command(&root), 0);
+
+    let output = run_register_cli(&root);
+    assert!(
+        output.status.success(),
+        "status {:?}, stderr {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("implementation status counts:"), "{stdout}");
+    assert!(stdout.contains("  implemented: 1"), "{stdout}");
+    assert!(stdout.contains("acceptance status counts:"), "{stdout}");
+    assert!(stdout.contains("  accepted: 1"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "verify-completion-register passed: register structure only, no evidence or acceptance was assessed"
+        ),
+        "{stdout}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn register_command_issue_list_matches_validate_register_structure_exactly() {
+    let root = register_only_fixture();
+    let path = root.join("plans/completion/requirements.json");
+    let mut value = read_json(&path);
+    value["requirements"][0]["title"] = "".into();
+    value["requirements"][0]["depends_on"] = json!(["REQ-MISSING"]);
+    write_json(&path, &value);
+
+    let direct: BTreeSet<String> = validate_register_structure(&root)
+        .expect("register loads")
+        .into_iter()
+        .collect();
+    assert!(
+        direct.contains("REQ-1.title is blank"),
+        "validator did not report the blank title: {direct:?}"
+    );
+    assert!(
+        direct.contains("REQ-1.depends_on unknown reference `REQ-MISSING`"),
+        "validator did not report the unknown dependency: {direct:?}"
+    );
+
+    let via_command: BTreeSet<String> = validate_completion_register(&root)
+        .expect("register loads")
+        .into_iter()
+        .collect();
+    assert_eq!(
+        via_command, direct,
+        "command issue set diverged from validate_register_structure"
+    );
+
+    let output = run_register_cli(&root);
+    assert!(!output.status.success(), "issues must exit nonzero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "verify-completion-register found {} structural issue(s):",
+            direct.len()
+        )),
+        "{stderr}"
+    );
+    let printed: BTreeSet<String> = stderr
+        .lines()
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        printed, direct,
+        "printed issue set diverged from validate_register_structure"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn register_command_reports_structural_issue_and_exits_nonzero() {
+    let root = register_only_fixture();
+    assert!(
+        validate_completion_register(&root).unwrap().is_empty(),
+        "fixture must start structurally clean"
+    );
+
+    let path = root.join("plans/completion/requirements.json");
+    let mut value = read_json(&path);
+    assert_eq!(value["requirements"][0]["acceptance"], json!("accepted"));
+    value["requirements"][0]["implementation"] = "partial".into();
+    write_json(&path, &value);
+
+    let issues = validate_completion_register(&root).unwrap();
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue == "REQ-1 accepted while implementation is not implemented"),
+        "{issues:?}"
+    );
+    assert_eq!(run_verify_completion_register_command(&root), 1);
+
+    let output = run_register_cli(&root);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("REQ-1 accepted while implementation is not implemented"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("passed"), "{stdout}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn register_command_missing_register_file_is_operational_failure() {
+    // Case 1: an empty root, where the first register file is already missing.
+    let root = temp_root();
+    let error = validate_completion_register(&root).unwrap_err();
+    assert!(
+        error.contains("plans/completion/requirements.json"),
+        "{error}"
+    );
+    assert_eq!(run_verify_completion_register_command(&root), 1);
+    let output = run_register_cli(&root);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("plans/completion/requirements.json"),
+        "{stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("passed"), "{stdout}");
+    assert!(
+        !stdout.contains("status counts:"),
+        "counts must not print off a register that failed to load: {stdout}"
+    );
+    let _ = fs::remove_dir_all(root);
+
+    // Case 2: requirements.json loads and matrix.json is missing, so the counts
+    // would have been computable but must still not be printed.
+    let root = register_only_fixture();
+    fs::remove_file(root.join("plans/completion/matrix.json")).expect("remove matrix register");
+    let error = validate_completion_register(&root).unwrap_err();
+    assert!(error.contains("plans/completion/matrix.json"), "{error}");
+    assert_eq!(run_verify_completion_register_command(&root), 1);
+    let output = run_register_cli(&root);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("plans/completion/matrix.json"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("passed"), "{stdout}");
+    assert!(
+        !stdout.contains("status counts:"),
+        "counts must not print off a register that failed to load: {stdout}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn register_cli_subprocess_rejects_candidate_and_release_flags() {
+    let executable = xtask_binary();
+    let help = Command::new(&executable)
+        .args(["verify-completion-register", "--help"])
+        .output()
+        .expect("run verify-completion-register help");
+    assert!(
+        help.status.success(),
+        "stderr {}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("--root"), "{help_text}");
+    assert!(!help_text.contains("--candidate"), "{help_text}");
+    assert!(!help_text.contains("--release"), "{help_text}");
+
+    for (args, flag) in [
+        (
+            &[
+                "verify-completion-register",
+                "--candidate",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ][..],
+            "--candidate",
+        ),
+        (
+            &["verify-completion-register", "--release"][..],
+            "--release",
+        ),
+        (
+            &[
+                "verify-completion-register",
+                "--candidate",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "--release",
+            ][..],
+            "--candidate",
+        ),
+    ] {
+        let output = Command::new(&executable)
+            .args(args)
+            .output()
+            .expect("run verify-completion-register with a rejected flag");
+        assert!(
+            !output.status.success(),
+            "{args:?} unexpectedly succeeded: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        assert!(
+            stderr.contains(flag),
+            "{args:?}: stderr does not name {flag}: {stderr}"
+        );
+        assert!(
+            stderr.contains("unexpected") || stderr.contains("unrecognized"),
+            "{args:?}: nonzero exit was not an argument rejection: {stderr}"
+        );
+    }
 }

@@ -2575,6 +2575,7 @@ fn workspace_vfs_integration_single_file_workspace_edit_create_applies_closed_fi
                 redaction_hints: Vec::new(),
             },
             file_edits: Vec::new(),
+            change_annotations: Vec::new(),
             file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
                 path: target_path,
                 initial_content_hash: None,
@@ -2675,6 +2676,7 @@ fn workspace_vfs_integration_workspace_edit_multi_file_text_edits_apply_atomical
                 },
                 preconditions: edit_preconditions,
             }],
+            change_annotations: Vec::new(),
             file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
                 path: create_path,
                 initial_content_hash: None,

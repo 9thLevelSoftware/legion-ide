@@ -551,6 +551,7 @@ fn workspace_edit_payload(source: WorkspaceEditSourceKind) -> WorkspaceEditPropo
             },
             preconditions: preconditions(),
         }],
+        change_annotations: Vec::new(),
         file_operations: vec![
             WorkspaceFileOperation::Create {
                 path: CanonicalPath("C:/repo/src/new.rs".to_string()),
@@ -640,6 +641,60 @@ fn lsp_diagnostic_summary() -> LspDiagnosticSummary {
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
+}
+
+#[test]
+fn lsp_annotations_retain_review_metadata_and_reject_invalid_associations() {
+    let mut input = lsp_edit_conversion_input(WorkspaceEditSourceKind::LspRename);
+    input.workspace_edit.change_annotations = vec![WorkspaceEditChangeAnnotation {
+        id: "rename".into(),
+        label: "Rename references".into(),
+        description: Some("Includes strings".into()),
+        needs_confirmation: true,
+        targets: vec![WorkspaceEditAnnotationTarget::TextEdit {
+            file_edit_index: 0,
+            edit_index: 0,
+        }],
+    }];
+    let proposal = convert_lsp_edit_to_workspace_proposal(input.clone()).unwrap();
+    let ProposalPayload::WorkspaceEdit(edit) = proposal.payload else {
+        panic!("workspace edit")
+    };
+    assert_eq!(
+        edit.change_annotations,
+        input.workspace_edit.change_annotations
+    );
+    assert_eq!(
+        edit.file_edits[0].preconditions.snapshot_id,
+        input.workspace_edit.file_edits[0].preconditions.snapshot_id
+    );
+    let mut invalid = input.clone();
+    invalid.workspace_edit.change_annotations[0].targets[0] =
+        WorkspaceEditAnnotationTarget::TextEdit {
+            file_edit_index: 0,
+            edit_index: u32::MAX,
+        };
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&invalid),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
+    let mut duplicate = input.clone();
+    duplicate
+        .workspace_edit
+        .change_annotations
+        .push(input.workspace_edit.change_annotations[0].clone());
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&duplicate),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
+    let mut conflicting = input.clone();
+    let mut other = input.workspace_edit.change_annotations[0].clone();
+    other.id = "other".into();
+    conflicting.workspace_edit.change_annotations.push(other);
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&conflicting),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
 }
 
 fn lsp_edit_conversion_input(source: WorkspaceEditSourceKind) -> LspEditProposalConversionInput {

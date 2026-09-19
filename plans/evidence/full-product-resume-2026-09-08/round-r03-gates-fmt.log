@@ -1,0 +1,5 @@
+CMD: cargo fmt --all --check
+CWD: /d/legion-ide-completion
+BEGIN
+END
+EXIT=0

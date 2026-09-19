@@ -17,7 +17,8 @@ use legion_protocol::{
     ProposalBatchAtomicity, ProposalBatchItem, ProposalBatchRollbackPolicy, ProposalId,
     ProposalPayload, ProposalTargetCoverage, ProposalTargetCoverageKind,
     ProposalVersionPreconditions, RedactionHint, TerminalCommandProposal, TimestampMillis,
-    WorkspaceProposal,
+    WorkspaceEditAnnotationTarget, WorkspaceEditChangeAnnotation, WorkspaceEditProposalPayload,
+    WorkspaceEditSourceKind, WorkspaceId, WorkspaceProposal,
 };
 use legion_security::secrets::{
     HIGH_ENTROPY_BITS_PER_CHAR, is_digest_shaped, is_indirection_reference,
@@ -28,6 +29,7 @@ use legion_security::{
     RedactionPayloadKind, ScanPosture, SecretConfidence, SecretRuleId,
     scan_payload_for_sensitive_markers, scan_proposal_for_secrets, scan_text_for_secrets,
 };
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Deterministic fixture generation
@@ -683,6 +685,47 @@ fn proposal_preview_summary_is_scanned() {
 
     assert!(scan.rule_ids().contains(&SecretRuleId::AwsAccessKeyId));
     assert_eq!(scan.sites[0].site_label, "preview.summary");
+}
+
+#[test]
+fn workspace_edit_annotation_metadata_is_scanned() {
+    let body = mixed_class_body(40, 174);
+    let proposal = proposal_with(
+        ProposalPayload::WorkspaceEdit(WorkspaceEditProposalPayload {
+            workspace_id: WorkspaceId(1),
+            edit_id: Uuid::from_u128(174),
+            title: "annotated edit".to_string(),
+            source: WorkspaceEditSourceKind::LspCodeAction,
+            target_coverage: ProposalTargetCoverage {
+                coverage_kind: ProposalTargetCoverageKind::Complete,
+                targets: Vec::new(),
+                omitted_target_count: 0,
+                redaction_hints: Vec::new(),
+            },
+            file_edits: Vec::new(),
+            file_operations: Vec::new(),
+            change_annotations: vec![WorkspaceEditChangeAnnotation {
+                id: "annotation-id".to_string(),
+                label: "review label".to_string(),
+                description: Some(format!("API_KEY={body}")),
+                needs_confirmation: true,
+                targets: vec![WorkspaceEditAnnotationTarget::FileOperation { operation_index: 0 }],
+            }],
+            required_capability: CapabilityId("fs.write".to_string()),
+            diagnostics: Vec::new(),
+            schema_version: 1,
+        }),
+        "annotated proposal",
+    );
+
+    let scan = scan_proposal_for_secrets(&proposal);
+    assert!(
+        scan.rule_ids()
+            .contains(&SecretRuleId::GenericSecretAssignment)
+    );
+    assert!(scan.sites.iter().any(|site| {
+        site.site_label == "payload.workspace_edit.change_annotations[0].description"
+    }));
 }
 
 #[test]

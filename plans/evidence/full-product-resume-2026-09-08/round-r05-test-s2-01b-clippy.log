@@ -1,0 +1,9 @@
+CMD: cargo clippy -p legion-lsp --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+    Checking legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.83s
+END
+EXIT=0

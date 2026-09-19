@@ -1,0 +1,40 @@
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.33s
+     Running tests\bounded_process.rs (target\debug\deps\bounded_process-a35d0a5bc136eb9d.exe)
+
+running 18 tests
+test bounded_process_honors_prelaunch_cancellation ... ok
+test bounded_child_fixture ... ok
+test bounded_process_requires_finite_timeout ... ok
+test bounded_process_reports_write_failure_when_child_exits_early ... ok
+test bounded_process_delivers_empty_stdin_as_eof ... ok
+test bounded_process_enforces_timeout_and_kills_descendants_holding_pipes ... ok
+test bounded_process_honors_live_cancellation ... ok
+test bounded_process_enforces_actual_timeout ... ok
+test bounded_process_rejects_oversize_stdin_before_spawn ... ok
+test bounded_process_streams_large_stdin_without_deadlock ... ok
+test bounded_process_terminates_on_stderr_overflow ... ok
+test bounded_process_terminates_on_stdout_overflow ... ok
+test bounded_process_caps_both_streams_in_one_child ... ok
+test bounded_process_rejects_invalid_utf8 ... ok
+test bounded_process_returns_normal_output ... ok
+test bounded_process_cancels_while_blocked_writing_stdin ... ok
+test bounded_process_times_out_while_blocked_writing_stdin ... ok
+
+thread 'bounded_process_none_stdin_behaves_as_before' (58496) panicked at crates\legion-platform\tests\bounded_process.rs:743:10:
+bounded fixture without stdin: Timeout { operation: "process `D:\\legion-ide-completion\\target\\debug\\deps\\bounded_process-a35d0a5bc136eb9d.exe`", duration: 10.0147737s }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test bounded_process_none_stdin_behaves_as_before ... FAILED
+
+failures:
+
+failures:
+    bounded_process_none_stdin_behaves_as_before
+
+test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.65s
+
+error: test failed, to rerun pass `-p legion-platform --test bounded_process`
+error: 1 target failed:
+    `-p legion-platform --test bounded_process`
+EXIT=101

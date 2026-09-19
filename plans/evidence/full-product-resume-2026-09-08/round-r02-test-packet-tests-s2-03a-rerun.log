@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests\bounded_process.rs (target\debug\deps\bounded_process-a35d0a5bc136eb9d.exe)
+
+running 1 test
+
+thread 'bounded_process_none_stdin_behaves_as_before' (42032) panicked at crates\legion-platform\tests\bounded_process.rs:743:10:
+bounded fixture without stdin: Timeout { operation: "process `D:\\legion-ide-completion\\target\\debug\\deps\\bounded_process-a35d0a5bc136eb9d.exe`", duration: 10.0104169s }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test bounded_process_none_stdin_behaves_as_before ... FAILED
+
+failures:
+
+failures:
+    bounded_process_none_stdin_behaves_as_before
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 10.47s
+
+error: test failed, to rerun pass `-p legion-platform --test bounded_process`
+error: 1 target failed:
+    `-p legion-platform --test bounded_process`
+EXIT=101

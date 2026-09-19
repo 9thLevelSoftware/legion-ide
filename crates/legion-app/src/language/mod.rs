@@ -11,6 +11,22 @@ pub use runtime::{
     NODE_RUNTIME_PROBE_STREAM_LIMIT, NODE_RUNTIME_PROBE_TIMEOUT, NodeRuntimeApprovalError,
     NodeRuntimeApprovalRequest, approve_node_runtime,
 };
+mod formatter_approval;
+pub use formatter_approval::{
+    ApprovedFormatterExecutable, FORMATTER_FINGERPRINT_MAX_BYTES, FORMATTER_PROBE_ARG_MAX_BYTES,
+    FORMATTER_PROBE_CAPABILITY, FORMATTER_PROBE_MAX_ARGS, FORMATTER_PROBE_STREAM_LIMIT,
+    FORMATTER_PROBE_TIMEOUT, FORMATTER_UNPROBEABLE_REASON_MAX_BYTES, FormatterApprovalError,
+    FormatterApprovalRequest, FormatterProbe, FormatterProbeOutcome, approve_formatter_executable,
+};
+mod external_formatter;
+pub use external_formatter::{
+    EXTERNAL_FORMATTER_BROKER_PREREQUISITE, EXTERNAL_FORMATTER_DETAIL_TAG,
+    EXTERNAL_FORMATTER_UNPROBEABLE_REASON, ExternalFormatterBounds, ExternalFormatterError,
+    ExternalFormatterRun, ExternalFormattingAdmission, PYTHON_FORMATTER_EXPECTED_EXIT_CODE,
+    PYTHON_FORMATTER_MAX_DOCUMENT_BYTES, PYTHON_FORMATTER_STDERR_LIMIT,
+    PYTHON_FORMATTER_STDIN_ARGS, PYTHON_FORMATTER_STDOUT_LIMIT, PYTHON_FORMATTER_TIMEOUT,
+    run_external_formatter,
+};
 mod startup_authority;
 pub use startup_authority::{LanguageStartupAuthority, LanguageStartupContext};
 mod typescript_bundle;
@@ -35,6 +51,8 @@ pub use session::{
 mod local_proposals;
 mod proposal;
 pub use proposal::workspace_edit_to_proposal_input;
+pub(crate) mod proposal_kinds;
+pub(crate) mod toolchain_settings;
 
 mod redaction;
 pub use redaction::{StderrSummary, redact_lsp_stderr, redact_lsp_stderr_line};
@@ -46,12 +64,19 @@ pub use translate::{
 };
 
 mod code_action_commands;
+pub(crate) use code_action_commands::PendingLspCommandContext;
 mod code_action_diagnostics;
 mod code_actions;
+#[cfg(test)]
+#[path = "formatting_dispatch_tests.rs"]
+mod formatting_dispatch_tests;
 #[cfg(test)]
 #[path = "server_apply_edit_tests.rs"]
 mod server_apply_edit_tests;
 mod server_apply_edits;
+#[cfg(test)]
+#[path = "typescript_organize_tests.rs"]
+mod typescript_organize_tests;
 pub(crate) use server_apply_edits::ServerApplyEditAuthority;
 mod apply_edit_decision;
 pub(crate) use apply_edit_decision::{

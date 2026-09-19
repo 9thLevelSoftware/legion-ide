@@ -1,0 +1,9 @@
+CMD: cargo run -p xtask -- native-product-acceptance --out-dir target/native-input-acceptance --package-dir target/native-input-acceptance/package --driver target/debug/legion-input-driver.exe
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target\debug\xtask.exe native-product-acceptance --out-dir target/native-input-acceptance --package-dir target/native-input-acceptance/package --driver target/debug/legion-input-driver.exe`
+native-product-acceptance: blocked (exit 3); this host cannot answer the question. Prerequisite: A Windows 11 x64 host on which the driver can establish its out-of-process oracles against the packaged product window. The driver reached the window but could not read it: CoInitializeEx failed: Access is denied. (0x80070005)
+error: process didn't exit successfully: `target\debug\xtask.exe native-product-acceptance --out-dir target/native-input-acceptance --package-dir target/native-input-acceptance/package --driver target/debug/legion-input-driver.exe` (exit code: 3)
+END
+EXIT=3

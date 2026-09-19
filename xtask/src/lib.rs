@@ -18,6 +18,7 @@ pub mod legion_bench_corpus;
 pub mod legion_bench_corpus_health;
 pub mod legion_bench_live;
 pub mod legion_bench_recorded;
+pub mod native_product_acceptance;
 pub mod no_egui_textedit;
 pub mod perf_harness;
 pub mod perf_trend;

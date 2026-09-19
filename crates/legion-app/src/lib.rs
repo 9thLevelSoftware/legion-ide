@@ -47,6 +47,9 @@ use git_inspection::{GitMutateOp, GitWorkRequest, GitWorker};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use language::LspWorkerRequest;
 
+pub(crate) use crate::language::proposal_kinds::LanguageProposalKind;
+pub use crate::language::toolchain_settings::LanguageToolchainConfigurationState;
+
 pub mod terminal_policy;
 
 /// Auto-updater client: manifest source, version compare, staging, journal, rollback (ADR-0042).
@@ -271,21 +274,21 @@ use legion_protocol::{
     TerminalPolicyProjection, TerminalResize, TerminalRuntimeState, TerminalScrollbackProjection,
     TerminalSearchProjection, TerminalSessionId, TextCoordinate,
     TextRange as ProtocolEditTextRange, TextTransactionDescriptor, TimestampMillis,
-    TransactionSource, TrustDecisionContext, TypeScriptToolchainProjection,
-    TypeScriptToolchainSettings, Utf16Position, Utf16Range, VersionContext, ViewportLineSlice,
-    ViewportProjection, ViewportScroll, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
-    VisualNavigationCaret, VisualNavigationDirection, VisualNavigationPosition,
-    VisualNavigationProjection, VisualNavigationRequest, VisualNavigationRow,
-    VisualNavigationWindow, VisualNavigationX, WorkbenchSettingsRecord, WorkbenchTelemetryConsent,
-    WorkspaceCloseRequest, WorkspaceEditProposalPayload, WorkspaceEditSourceKind,
-    WorkspaceGeneration, WorkspaceId, WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort,
-    WorkspaceProposal, WorkspaceRequest, WorkspaceResponse, WorkspaceSessionRecord,
-    WorkspaceTrustState, delegated_task_tool_permission_request,
-    inline_prediction_projection_from_results, validate_inline_prediction_lifecycle_command,
-    validate_legion_cloud_lane_projection, validate_legion_cloud_lane_task_request,
-    validate_legion_workflow_decision_feed_entry, validate_legion_workflow_kill_switch,
-    validate_legion_workflow_risk_monitor_snapshot, validate_mcp_registry_snapshot,
-    validate_terminal_input, validate_terminal_kill_request, validate_terminal_resize,
+    TransactionSource, TrustDecisionContext, TypeScriptToolchainProjection, Utf16Position,
+    Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, VisualNavigationCaret,
+    VisualNavigationDirection, VisualNavigationPosition, VisualNavigationProjection,
+    VisualNavigationRequest, VisualNavigationRow, VisualNavigationWindow, VisualNavigationX,
+    WorkbenchSettingsRecord, WorkbenchTelemetryConsent, WorkspaceCloseRequest,
+    WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
+    WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTrustState,
+    delegated_task_tool_permission_request, inline_prediction_projection_from_results,
+    validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
+    validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
+    validate_legion_workflow_kill_switch, validate_legion_workflow_risk_monitor_snapshot,
+    validate_mcp_registry_snapshot, validate_terminal_input, validate_terminal_kill_request,
+    validate_terminal_resize,
 };
 use legion_remote::{
     RemoteConnectionSpec, RemoteDevelopmentRuntime, RemoteOperationOutcome, RemoteRuntimeConfig,
@@ -525,7 +528,6 @@ enum PaletteCommandOperands {
     CommitMessage(String),
     StashMessage(Option<String>),
     RenameName(String),
-    CodeActionId(String),
     AcpHost {
         program: String,
         args: Vec<String>,
@@ -561,9 +563,6 @@ impl PaletteCommandOperands {
             ("language-rename", Self::RenameName(name)) => {
                 format!("Rename symbol to `{name}'")
             }
-            ("language-code-action", Self::CodeActionId(action_id)) => {
-                format!("Preview code action `{action_id}'")
-            }
             ("acp-attach-host", Self::AcpHost { program, args }) => {
                 if args.is_empty() {
                     format!("Attach ACP host `{program}'")
@@ -589,7 +588,6 @@ impl PaletteCommandOperands {
             Self::CommitMessage(message) => vec![message.clone()],
             Self::StashMessage(message) => message.iter().cloned().collect(),
             Self::RenameName(name) => vec![name.clone()],
-            Self::CodeActionId(action_id) => vec![action_id.clone()],
             Self::AcpHost { program, args } => std::iter::once(program.clone())
                 .chain(args.iter().cloned())
                 .collect(),
@@ -611,7 +609,6 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-commit" => &["git commit", "git: commit staged changes"],
         "git-stash" => &["git stash", "git: stash changes"],
         "language-rename" => &["language rename", "rename symbol", "rename"],
-        "language-code-action" => &["language code action", "code action"],
         "acp-attach-host" => &["acp attach host", "acp: attach host"],
         _ => &[],
     }
@@ -650,7 +647,6 @@ fn parse_palette_command_operands(
         "git-commit" => "Enter a commit message",
         "git-stash" => "Enter a stash message",
         "language-rename" => "Enter the new symbol name",
-        "language-code-action" => "Enter a code-action id",
         "acp-attach-host" => "Enter an ACP host program, optionally followed by arguments",
         _ => return None,
     };
@@ -673,7 +669,6 @@ fn parse_palette_command_operands(
             operands.to_string(),
         ))),
         "language-rename" => Ok(PaletteCommandOperands::RenameName(operands.to_string())),
-        "language-code-action" => Ok(PaletteCommandOperands::CodeActionId(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -1106,9 +1101,6 @@ mod daily_editing_save_all_internal_tests {
 #[cfg(test)]
 #[path = "language/code_action_tests.rs"]
 mod code_action_tests;
-#[cfg(test)]
-#[path = "language/toolchain_approval_tests.rs"]
-mod toolchain_approval_tests;
 
 /// Typed save result returned by application save routing.
 #[derive(Debug, Clone)]
@@ -4484,6 +4476,35 @@ impl AppProposalCoordinator {
     fn preview_warnings(payload: &ProposalPayload) -> Vec<ProposalPreviewWarning> {
         match payload {
             ProposalPayload::Batch(payload) => payload.preview_warnings.clone(),
+            ProposalPayload::WorkspaceEdit(payload) => payload
+                .change_annotations
+                .iter()
+                .map(|annotation| {
+                    let description = annotation
+                        .description
+                        .as_deref()
+                        .filter(|description| !description.trim().is_empty())
+                        .unwrap_or("No additional description");
+                    let confirmation = if annotation.needs_confirmation {
+                        "Confirmation required."
+                    } else {
+                        "Confirmation not requested by the language server."
+                    };
+                    ProposalPreviewWarning {
+                        code: format!("lsp.change_annotation:{}", annotation.id),
+                        kind: ProposalPreviewWarningKind::ChangeAnnotation,
+                        message: format!(
+                            "{}: {} {} Affects {} target(s).",
+                            annotation.label,
+                            description,
+                            confirmation,
+                            annotation.targets.len()
+                        ),
+                        target_id: Some(annotation.id.clone()),
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    }
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -6765,14 +6786,6 @@ fn utf16_position_from_text_coordinate(position: TextCoordinate) -> Utf16Positio
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum LanguageProposalKind {
-    Formatting,
-    Rename,
-    OrganizeImports,
-    CodeAction,
-}
-
 #[derive(Debug, Clone)]
 struct LanguageToolingWorkflow {
     projection: LanguageToolingProjection,
@@ -7452,130 +7465,6 @@ impl LanguageToolingWorkflow {
             generated_at: TimestampMillis::now(),
             schema_version: 1,
         });
-        self.projection()
-    }
-
-    fn record_proposal(
-        &mut self,
-        input: &LanguageRequestInput,
-        kind: LanguageProposalKind,
-        proposal_id: ProposalId,
-        action_id: Option<&str>,
-        message: String,
-        operation_id: Option<String>,
-    ) -> LanguageToolingProjection {
-        let operation_kind = match kind {
-            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
-            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
-            LanguageProposalKind::OrganizeImports => {
-                LanguageToolingOperationKind::OrganizeImportsProposal
-            }
-            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
-        };
-        self.projection.workspace_id = Some(input.workspace_id);
-        self.projection.buffer_id = Some(input.buffer_id);
-        self.projection.file_id = Some(input.metadata.identity.file_id);
-        self.projection.status = LanguageToolingStatusKind::Ready;
-        self.projection.status_message = message.clone();
-        self.projection.generated_at = TimestampMillis::now();
-        if matches!(kind, LanguageProposalKind::CodeAction)
-            && let Some(action_id) = action_id
-        {
-            for quick_fix in &mut self.projection.quick_fixes {
-                if quick_fix.action_id == action_id {
-                    quick_fix.proposal_id = Some(proposal_id);
-                }
-            }
-        }
-        let has_explicit_operation_id = operation_id.is_some();
-        let operation_id = operation_id.unwrap_or_else(|| self.next_operation_id(operation_kind));
-        let row = LanguageToolingOperationProjection {
-            operation_id: operation_id.clone(),
-            kind: operation_kind,
-            status: LanguageToolingStatusKind::Ready,
-            request_id: if has_explicit_operation_id {
-                None
-            } else {
-                Some(legion_protocol::LspRequestId(uuid::Uuid::now_v7()))
-            },
-            proposal_id: Some(proposal_id),
-            message,
-            correlation_id: Some(input.event_context.correlation_id),
-            causality_id: Some(input.event_context.causality_id),
-            generated_at: TimestampMillis::now(),
-            schema_version: 1,
-        };
-        if let Some(existing) = self
-            .projection
-            .operations
-            .iter_mut()
-            .find(|operation| operation.operation_id == operation_id)
-        {
-            *existing = row;
-        } else {
-            self.push_operation(row);
-        }
-        self.projection()
-    }
-
-    fn record_proposal_failure(
-        &mut self,
-        input: &LanguageRequestInput,
-        kind: LanguageProposalKind,
-        message: String,
-    ) -> LanguageToolingProjection {
-        self.record_proposal_failure_with_operation_id(input, kind, message, None)
-    }
-
-    fn record_proposal_failure_with_operation_id(
-        &mut self,
-        input: &LanguageRequestInput,
-        kind: LanguageProposalKind,
-        message: String,
-        operation_id: Option<String>,
-    ) -> LanguageToolingProjection {
-        let operation_kind = match kind {
-            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
-            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
-            LanguageProposalKind::OrganizeImports => {
-                LanguageToolingOperationKind::OrganizeImportsProposal
-            }
-            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
-        };
-        self.projection.workspace_id = Some(input.workspace_id);
-        self.projection.buffer_id = Some(input.buffer_id);
-        self.projection.file_id = Some(input.metadata.identity.file_id);
-        self.projection.status = LanguageToolingStatusKind::Failed;
-        self.projection.status_message = message.clone();
-        self.projection.generated_at = TimestampMillis::now();
-        let has_explicit_operation_id = operation_id.is_some();
-        let operation_id = operation_id.unwrap_or_else(|| self.next_operation_id(operation_kind));
-        let row = LanguageToolingOperationProjection {
-            operation_id: operation_id.clone(),
-            kind: operation_kind,
-            status: LanguageToolingStatusKind::Failed,
-            request_id: if has_explicit_operation_id {
-                None
-            } else {
-                Some(legion_protocol::LspRequestId(uuid::Uuid::now_v7()))
-            },
-            proposal_id: None,
-            message,
-            correlation_id: Some(input.event_context.correlation_id),
-            causality_id: Some(input.event_context.causality_id),
-            generated_at: TimestampMillis::now(),
-            schema_version: 1,
-        };
-        if let Some(existing) = self
-            .projection
-            .operations
-            .iter_mut()
-            .find(|operation| operation.operation_id == operation_id)
-        {
-            *existing = row;
-        } else {
-            self.push_operation(row);
-        }
         self.projection()
     }
 
@@ -13972,7 +13861,7 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
         PaletteCommandSpec {
             id: "language-code-action",
             title: "Language: Code Action",
-            detail: "Enter an action id and create a proposal preview",
+            detail: "Request code actions for the current selection",
             shortcut_label: None,
         },
     ]
@@ -14940,7 +14829,7 @@ pub struct AppComposition {
     /// Full contexts for command actions currently awaiting a server response.
     /// Keeping the complete context prevents an inbound applyEdit from being
     /// authorized solely by a recycled request-id string.
-    pending_code_action_contexts: HashMap<String, legion_protocol::LspOperationContext>,
+    pending_code_action_contexts: HashMap<String, crate::language::PendingLspCommandContext>,
     /// Arming instant, buffer, and position for the completion debounce (I1).
     lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
@@ -14996,18 +14885,6 @@ struct TypeScriptBundleStartup {
     compiler_archive: PathBuf,
     node_path: PathBuf,
     cache_root: PathBuf,
-}
-
-/// Non-persistent state of the normal TypeScript toolchain controls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LanguageToolchainConfigurationState {
-    /// No saved operator input exists.
-    Unconfigured,
-    /// Saved metadata exists but has not been explicitly approved in this app
-    /// session (including unsupported schema versions).
-    Draft,
-    /// Metadata and the app-owned runtime bindings are configured.
-    Configured,
 }
 
 #[derive(Clone)]
@@ -16909,249 +16786,6 @@ impl AppComposition {
         Ok(())
     }
 
-    /// Configure the operator-selected local TypeScript toolchain for the
-    /// active trusted workspace.
-    ///
-    /// This records only canonical input metadata. It does not materialize
-    /// either archive or start a process; each explicit start/restart creates
-    /// fresh artifact and Node receipts through the language authority.
-    pub fn configure_typescript_toolchain(
-        &mut self,
-        server_archive: impl AsRef<Path>,
-        compiler_archive: impl AsRef<Path>,
-        node_executable: impl AsRef<Path>,
-    ) -> Result<(), AppCompositionError> {
-        if self.active_documents.workspace_id().is_none() {
-            return Err(AppCompositionError::WorkspaceNotOpen);
-        }
-        if self.active_documents.active_workspace_trust != Some(WorkspaceTrustState::Trusted) {
-            return Err(AppCompositionError::Protocol(ProtocolError {
-                code: "language_toolchain_workspace_untrusted".to_string(),
-                message: "TypeScript toolchains require a trusted workspace".to_string(),
-            }));
-        }
-
-        fn canonical_regular_file(
-            path: &Path,
-            label: &str,
-        ) -> Result<PathBuf, AppCompositionError> {
-            let canonical = std::fs::canonicalize(path).map_err(|error| {
-                AppCompositionError::Protocol(ProtocolError {
-                    code: "language_toolchain_input_invalid".to_string(),
-                    message: format!("{label} is invalid: {error}"),
-                })
-            })?;
-            if !canonical.is_file() {
-                return Err(AppCompositionError::Protocol(ProtocolError {
-                    code: "language_toolchain_input_invalid".to_string(),
-                    message: format!("{label} must be a regular file"),
-                }));
-            }
-            if canonical.to_str().is_none() {
-                return Err(AppCompositionError::Protocol(ProtocolError {
-                    code: "language_toolchain_input_invalid".to_string(),
-                    message: format!("{label} path is not valid UTF-8"),
-                }));
-            }
-            Ok(canonical)
-        }
-
-        // Validate every input before changing the policy store or replacing
-        // the existing configuration, so an invalid third path is atomic.
-        let server_archive = canonical_regular_file(server_archive.as_ref(), "server archive")?;
-        let compiler_archive =
-            canonical_regular_file(compiler_archive.as_ref(), "compiler archive")?;
-        let node_executable = canonical_regular_file(node_executable.as_ref(), "Node executable")?;
-        let root = self
-            .active_documents
-            .workspace_root_path
-            .as_deref()
-            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
-        let root = std::fs::canonicalize(root).map_err(|error| {
-            AppCompositionError::Protocol(ProtocolError {
-                code: "language_toolchain_workspace_invalid".to_string(),
-                message: error.to_string(),
-            })
-        })?;
-        if !root.is_dir() {
-            return Err(AppCompositionError::Protocol(ProtocolError {
-                code: "language_toolchain_workspace_invalid".to_string(),
-                message: "workspace root must be a directory".to_string(),
-            }));
-        }
-        let previous_node = self.typescript_node_approval.clone();
-        self.language_startup_authority
-            .allow_exact_binary(&node_executable)
-            .map_err(|error| {
-                AppCompositionError::Protocol(ProtocolError {
-                    code: "language_toolchain_node_invalid".to_string(),
-                    message: error.to_string(),
-                })
-            })?;
-        self.typescript_node_approval = Some(node_executable.clone());
-        let mut replaced_nodes = HashSet::new();
-        for server_id in [
-            LanguageServerId(102),
-            LanguageServerId(106),
-            LanguageServerId(107),
-            LanguageServerId(108),
-        ] {
-            if let Some(bundle) = self.typescript_bundles.get(&server_id) {
-                replaced_nodes.insert(bundle.node_path.clone());
-            }
-            if let Some(path) = self.language_server_configured_paths.remove(&server_id) {
-                replaced_nodes.insert(path);
-            }
-            if let Some(config) = self.language_server_local_downloads.remove(&server_id) {
-                replaced_nodes.insert(config.node_path);
-            }
-            if let Some(config) = self.language_server_downloaded.remove(&server_id) {
-                replaced_nodes.insert(config.approved_node.canonical_path().to_path_buf());
-            }
-        }
-        let cache_root = root.join(".legion").join("language-tools");
-        let descriptor = crate::language::TypeScriptBundleDescriptor::pinned();
-        let settings = TypeScriptToolchainSettings {
-            server_archive: CanonicalPath(server_archive.to_str().unwrap().to_string()),
-            compiler_archive: CanonicalPath(compiler_archive.to_str().unwrap().to_string()),
-            node_executable: CanonicalPath(node_executable.to_str().unwrap().to_string()),
-        };
-        self.language_toolchain_settings.schema_version = 1;
-        for server_id in [
-            LanguageServerId(102),
-            LanguageServerId(106),
-            LanguageServerId(107),
-            LanguageServerId(108),
-        ] {
-            self.typescript_bundles.insert(
-                server_id,
-                TypeScriptBundleStartup {
-                    descriptor: descriptor.clone(),
-                    server_archive: server_archive.clone(),
-                    compiler_archive: compiler_archive.clone(),
-                    node_path: node_executable.clone(),
-                    cache_root: cache_root.clone(),
-                },
-            );
-        }
-        if let Some(previous_node) = previous_node {
-            replaced_nodes.insert(previous_node);
-        }
-        for node in replaced_nodes {
-            if node != node_executable
-                && !self
-                    .language_server_configured_paths
-                    .values()
-                    .any(|path| path == &node)
-                && !self
-                    .language_server_local_downloads
-                    .values()
-                    .any(|config| config.node_path.as_path() == node.as_path())
-                && !self
-                    .language_server_downloaded
-                    .values()
-                    .any(|config| config.approved_node.canonical_path() == node.as_path())
-                && !self
-                    .typescript_bundles
-                    .values()
-                    .any(|config| config.node_path.as_path() == node.as_path())
-            {
-                let _ = self.language_startup_authority.revoke_exact_binary(&node);
-            }
-        }
-        self.language_toolchain_settings.typescript = Some(settings);
-        Ok(())
-    }
-
-    /// Return the metadata-only local language-toolchain configuration.
-    pub fn language_toolchain_settings(&self) -> LanguageToolchainSettingsRecord {
-        self.language_toolchain_settings.clone()
-    }
-
-    /// Return the non-persistent approval/configuration state for UI
-    /// projection. A restored record is always a draft until reconfigured.
-    pub fn language_toolchain_configuration_state(&self) -> LanguageToolchainConfigurationState {
-        if self.language_toolchain_settings.typescript.is_none() {
-            LanguageToolchainConfigurationState::Unconfigured
-        } else if self.language_toolchain_settings.schema_version != 1
-            || ![102_u64, 106, 107, 108]
-                .iter()
-                .all(|id| self.typescript_bundles.contains_key(&LanguageServerId(*id)))
-        {
-            LanguageToolchainConfigurationState::Draft
-        } else {
-            LanguageToolchainConfigurationState::Configured
-        }
-    }
-
-    /// Clear the configured TypeScript toolchain without deleting its cache
-    /// or changing editor buffers and dirty state.
-    pub fn clear_typescript_toolchain(&mut self) {
-        let selected_server_is_typescript = self
-            .lsp_session
-            .selected_server_id()
-            .is_some_and(|server_id| matches!(server_id.0, 102 | 106 | 107 | 108));
-        if selected_server_is_typescript {
-            self.terminalize_pending_lsp_writes(
-                None,
-                LanguageToolingStatusKind::Cancelled,
-                "TypeScript language server configuration was cleared",
-            );
-            self.lsp_session.reset_to_idle();
-        }
-        let prior_node = self.typescript_node_approval.take();
-        let typescript_server_ids = [
-            LanguageServerId(102),
-            LanguageServerId(106),
-            LanguageServerId(107),
-            LanguageServerId(108),
-        ];
-        let mut removed_nodes = HashSet::new();
-        if let Some(node) = prior_node.clone() {
-            removed_nodes.insert(node);
-        }
-        for server_id in typescript_server_ids {
-            if let Some(path) = self.language_server_configured_paths.get(&server_id) {
-                removed_nodes.insert(path.clone());
-            }
-            if let Some(config) = self.language_server_local_downloads.get(&server_id) {
-                removed_nodes.insert(config.node_path.clone());
-            }
-            if let Some(config) = self.language_server_downloaded.get(&server_id) {
-                removed_nodes.insert(config.approved_node.canonical_path().to_path_buf());
-            }
-            if let Some(config) = self.typescript_bundles.get(&server_id) {
-                removed_nodes.insert(config.node_path.clone());
-            }
-            self.typescript_bundles.remove(&server_id);
-            self.language_server_configured_paths.remove(&server_id);
-            self.language_server_local_downloads.remove(&server_id);
-            self.language_server_downloaded.remove(&server_id);
-        }
-        self.language_toolchain_settings.typescript = None;
-        for node in removed_nodes {
-            let retained_elsewhere = self
-                .language_server_configured_paths
-                .values()
-                .any(|path| path == &node)
-                || self
-                    .language_server_local_downloads
-                    .values()
-                    .any(|config| config.node_path.as_path() == node.as_path())
-                || self
-                    .language_server_downloaded
-                    .values()
-                    .any(|config| config.approved_node.canonical_path() == node.as_path())
-                || self
-                    .typescript_bundles
-                    .values()
-                    .any(|config| config.node_path.as_path() == node.as_path());
-            if !retained_elsewhere {
-                let _ = self.language_startup_authority.revoke_exact_binary(&node);
-            }
-        }
-    }
-
     /// Test-only: starts the LSP session using an explicit server binary path,
     /// bypassing PATH-based discovery.  Allows integration tests to inject the
     /// mock server without mutating the process environment (which races in
@@ -17483,6 +17117,11 @@ impl AppComposition {
         let preparation_language_id = language_id.clone();
         let preparation_display_name = display_name.clone();
         let preparation_root_uri = root_uri.clone();
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
         let preparation = move |cancel: Arc<std::sync::atomic::AtomicBool>| {
             if cancel.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(crate::language::LanguageSessionError::InvalidConfiguration(
@@ -17501,7 +17140,7 @@ impl AppComposition {
                     preparation_display_name.clone(),
                     process.clone(),
                     preparation_root_uri.clone(),
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
@@ -17517,7 +17156,7 @@ impl AppComposition {
                     },
                     Arc::clone(&cancel),
                     preparation_root_uri.clone(),
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::DownloadedLocal(local) => authority
@@ -17529,6 +17168,7 @@ impl AppComposition {
                         &local.node_path,
                         Arc::clone(&cancel),
                         preparation_root_uri.clone(),
+                        initialization_options.clone(),
                     ),
                 LanguageStartupSelection::TypeScriptBundle(bundle) => authority
                     .prepare_typescript_bundle(
@@ -17654,6 +17294,11 @@ impl AppComposition {
         let mut context = context;
         context.correlation_id = correlation_id;
         context.causality_id = CausalityId(uuid::Uuid::now_v7());
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
         let metadata = match &selection {
             LanguageStartupSelection::Configured(_) => crate::language::LspSelectedServerMetadata {
                 server_id,
@@ -17716,7 +17361,7 @@ impl AppComposition {
                     display_name,
                     process,
                     root_uri,
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
@@ -17732,7 +17377,7 @@ impl AppComposition {
                     },
                     Arc::clone(&cancel),
                     root_uri,
-                    None,
+                    initialization_options.clone(),
                     None,
                 ),
                 LanguageStartupSelection::DownloadedLocal(local) => authority
@@ -17744,6 +17389,7 @@ impl AppComposition {
                         &local.node_path,
                         Arc::clone(&cancel),
                         root_uri,
+                        initialization_options,
                     ),
                 LanguageStartupSelection::TypeScriptBundle(bundle) => authority
                     .prepare_typescript_bundle(
@@ -19434,18 +19080,8 @@ impl AppComposition {
                         }
                         "language-code-action" => {
                             let buffer_id = self.active_documents.active_buffer_id?;
-                            let Some(Ok(PaletteCommandOperands::CodeActionId(action_id))) =
-                                parse_palette_command_operands(
-                                    command_id,
-                                    palette_query_body(PaletteMode::Command, &self.palette.query),
-                                )
-                            else {
-                                return None;
-                            };
-                            Some(CommandDispatchIntent::RequestCodeActionProposal {
-                                buffer_id,
-                                action_id,
-                            })
+                            let range = self.active_code_action_range(buffer_id)?;
+                            Some(CommandDispatchIntent::RequestCodeActions { buffer_id, range })
                         }
                         _ => palette_command_intent(command_id),
                     })
@@ -21024,19 +20660,23 @@ impl AppComposition {
                 ))
             }
             AppCommandRequest::RequestFormattingProposal { buffer_id } => {
-                self.issue_lsp_formatting_request(buffer_id);
+                if self.issue_lsp_formatting_request(buffer_id) {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                }
+                let Some(input) = self.language_request_input_for_failure(buffer_id) else {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                };
                 Ok(AppCommandOutcome::language_tooling(
-                    self.run_language_proposal(
-                        buffer_id,
+                    self.language_tooling.record_proposal_failure(
+                        &input,
                         LanguageProposalKind::Formatting,
-                        TextCoordinate {
-                            line: 0,
-                            character: 0,
-                            byte_offset: Some(0),
-                            utf16_offset: Some(0),
-                        },
-                        "format".to_string(),
-                    )?,
+                        "formatting unavailable until a live capable language server is ready"
+                            .to_string(),
+                    ),
                 ))
             }
             AppCommandRequest::RequestRenameProposal {
@@ -21044,18 +20684,22 @@ impl AppComposition {
                 position,
                 new_name,
             } => {
-                // Ask the language server too. Its answer arrives on a later
-                // drain as its own proposal; the index-backed one below returns
-                // now so the surface is never blank. Neither writes anything —
-                // both stop at Previewed.
-                self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
+                if self.issue_lsp_rename_request(buffer_id, position, new_name.clone()) {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                }
+                let Some(input) = self.language_request_input_for_failure(buffer_id) else {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                };
                 Ok(AppCommandOutcome::language_tooling(
-                    self.run_language_proposal(
-                        buffer_id,
+                    self.language_tooling.record_proposal_failure(
+                        &input,
                         LanguageProposalKind::Rename,
-                        position,
-                        new_name,
-                    )?,
+                        self.lsp_rename_unavailable_message(buffer_id).to_string(),
+                    ),
                 ))
             }
             AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => Ok(
@@ -21063,18 +20707,11 @@ impl AppComposition {
             ),
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
-                action_id,
+                action_id: _,
             } => Ok(AppCommandOutcome::language_tooling(
-                self.run_language_proposal(
+                self.record_language_proposal_unavailable(
                     buffer_id,
                     LanguageProposalKind::CodeAction,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    action_id,
                 )?,
             )),
             AppCommandRequest::RequestCodeActions { buffer_id, range } => {
@@ -21095,6 +20732,14 @@ impl AppComposition {
                 response_id,
                 action_id,
             } => {
+                let response_id = if response_id.is_empty() {
+                    self.code_action_authority
+                        .current_response_id()
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    response_id
+                };
                 let failure_buffer = self
                     .code_action_authority
                     .candidate_buffer_id(&response_id, &action_id);
@@ -34917,9 +34562,8 @@ mod lsp_explicit_start_tests {
         );
         assert_eq!(
             parse_palette_command_operands("language-code-action", "code action quick-fix"),
-            Some(Ok(PaletteCommandOperands::CodeActionId(
-                "quick-fix".to_string()
-            )))
+            None,
+            "code actions no longer take an action id; the palette requests the live list"
         );
     }
 

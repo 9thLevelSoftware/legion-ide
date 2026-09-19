@@ -2884,15 +2884,7 @@ impl DesktopCommandBridge {
                 .with_active_buffer(snapshot, |buffer_id| {
                     CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
                 }),
-            DesktopAction::RequestCodeActionProposal { action_id } => {
-                self.with_active_buffer(snapshot, |buffer_id| {
-                    CommandDispatchIntent::RequestCodeActionProposal {
-                        buffer_id,
-                        action_id,
-                    }
-                })
-            }
-            DesktopAction::RequestCodeActions => {
+            DesktopAction::RequestCodeActionProposal { .. } | DesktopAction::RequestCodeActions => {
                 let Some(viewport) = snapshot.active_buffer_projection.viewport.as_ref() else {
                     return DesktopBridgeOutput::Noop;
                 };

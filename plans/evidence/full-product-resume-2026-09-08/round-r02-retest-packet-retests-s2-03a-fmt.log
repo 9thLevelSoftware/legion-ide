@@ -1,0 +1,2 @@
+CMD= cargo fmt -p legion-platform -- --check
+EXIT=0

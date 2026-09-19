@@ -247,3 +247,44 @@ supersede earlier checkpoint counts without promoting product readiness.
 See [the committed handoff](../../docs/superpowers/handoffs/2026-09-06-full-product-completion-handoff.md)
 and `plans/evidence/full-product-checkpoint-2026-09-06/` for exact resume steps
 and raw logs. Work stopped at the user's request; full completion is unproved.
+
+## 2026-09-07 resume evidence
+
+Resume r3 evidence covers the advertised TypeScript server command with
+normalized Windows path handling, synchronization before callback-owned
+proposals, and CAS arbitration. Fabricated local rename tokens and empty
+formatting, Organize Imports, and code-action proposals were removed; server
+responses retain their bounded advertised operation and review identity.
+Python coverage retains bounded annotations and strict indices, uses the exact
+retained Pyright artifact, and verifies metadata-only diagnostic projection.
+Source anchors are `crates/legion-app/src/language/lsp_reads.rs`,
+`crates/legion-app/src/language/local_proposals.rs`,
+`crates/legion-app/src/language/translate/change_annotations.rs`, and
+`crates/legion-app/src/language/apply_edit_decision.rs`; the run log is
+`plans/evidence/full-product-resume-2026-09-07/resume-native-r3.log`.
+
+The exact runtime command and classification are recorded in
+[`full-product-resume-2026-09-07`](../evidence/full-product-resume-2026-09-07/README.md).
+This is app/server integration evidence, not native GUI or full-product
+qualification. The Python formatter and normal interpreter settings gap
+remains open, and no unrun gate or readiness row is promoted.
+
+The durable resume evidence records 439 app and 16/16 language-tooling passes
+after placeholder removal, workspace all-targets clippy with `-D warnings`
+exit 0, 243 desktop unit/rendering passes, and a targeted renderer rerun of
+1/1. The full workspace test run was interrupted during build at the user’s
+request and has no suite outcome; see
+`plans/evidence/full-product-resume-2026-09-07/resume-workspace-tests-r1-interrupted.log`.
+No pass claim is made for it or for full product qualification.
+
+The terminal-focused checkpoint passed 6/6 with exit 0; format, dependency,
+docs-hygiene, claim-audit, and extract-before-modify checkpoint logs are
+retained under `plans/evidence/full-product-resume-2026-09-07/`.
+
+The current durable packet records 439 app and 16/16 language-tooling passes
+after placeholder removal, with stale fake-proposal fixtures migrated. The
+bounded-stdin specification is planning-only in commit `7cbbbf9`; its
+implementation and real backpressure/cancellation tests remain next work. The
+full-workspace run was stopped during build at the user’s request and has no
+suite result. See the
+[2026-09-08 handoff](../../docs/superpowers/handoffs/2026-09-08-full-product-resume-handoff.md).

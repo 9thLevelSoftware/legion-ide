@@ -1,0 +1,25 @@
+CMD: cargo test -p legion-app --test python_formatter_proposal -j 1 --no-fail-fast
+CWD: /d/legion-ide-completion
+BEGIN
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.20s
+     Running tests\python_formatter_proposal.rs (target\debug\deps\python_formatter_proposal-a532a593bd3c4a62.exe)
+
+running 12 tests
+test buffer_larger_than_the_bounded_stdin_cap_fails_closed_before_spawn ... ok
+test unconfigured_python_formatter_records_failed_operation_and_no_proposal ... ok
+test nonzero_exit_code_discards_stdout_and_records_a_failed_operation ... ok
+test stale_snapshot_between_request_and_result_records_stale_and_no_proposal ... ok
+test cancellation_terminates_the_child_and_records_no_proposal ... ok
+test unchanged_formatter_output_records_a_no_op_without_minting_an_empty_proposal ... ok
+test configured_but_unapproved_formatter_never_spawns_and_records_failed_operation ... ok
+test exact_command_args_stdin_and_bounds_are_forwarded_to_the_process_service ... ok
+test formatted_stdout_becomes_a_reviewable_proposal_leaving_editor_and_disk_unchanged ... ok
+test configured_python_formatter_takes_precedence_and_a_typescript_buffer_still_routes_to_lsp ... ok
+test buffer_snapshot_is_delivered_on_stdin_and_nothing_is_written_to_disk ... ok
+test formatter_stderr_never_reaches_the_proposal_or_the_operation_message ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+END
+EXIT=0

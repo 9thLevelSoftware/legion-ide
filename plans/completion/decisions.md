@@ -455,3 +455,1037 @@ The retained `COMP-P0-F4-T1-1` protection was explicitly rewired from internal
 GAP-08 to `COMP-DIST-009`, `COMP-SCOPE-GAP-01`, and `COMP-SCOPE-GAP-02`.
 Dependencies do not point through protected edges, and combined validation
 remains acyclic; all other non-GAP objects remain exact.
+
+## Owner-blocked prerequisites (2026-09-08, round r01)
+
+This section is the canonical list of prerequisites only the owner can supply. A
+blocker never promotes or demotes an `acceptance` value by itself; it records
+exactly what is missing. An unavailable host, tool, or credential is recorded
+here as blocked with an exact prerequisite string, never as passed and never as
+skipped. A result from an available host is never substituted for a row that
+names an unavailable one.
+
+Standing authority as of this date: native GUI automation is resumed on this
+Windows host by owner instruction. macOS and Linux hosts remain unavailable and
+their rows stay blocked.
+
+### BLK-2026-09-08-01 — Unix bounded-process stdin branch
+
+Prerequisite, exact: a Linux or macOS host with this workspace checked out and a
+Rust toolchain able to run `cargo test -p legion-platform --test bounded_process`.
+
+Needed to assess the Unix nonblocking `fcntl` stdin branch of packet
+`s2-03a-bounded-stdin`. That branch is compiled out on this Windows host, so it
+stays unassessed. It is never passed by substitution from the Windows
+anonymous-pipe `PIPE_NOWAIT` branch, which exercises different code. The packet
+itself was rejected at review in round r01 and reverted; the bounded stdin
+specification `docs/superpowers/specs/2026-09-08-bounded-process-stdin.md`
+remains planning only.
+
+### BLK-2026-09-08-02 — macOS and Linux packaged native GUI rows
+
+Prerequisite, exact: a macOS host and a Linux host with the packaged native
+product installed and a real display session, able to run the windowed GUI e2e
+suite.
+
+Needed for every macOS and Linux native-GUI and packaged-journey row:
+`COMP-LANG-013`, `COMP-BTD-009`, `COMP-SCM-010`, `COMP-PRES-011`, and the
+packaged-native rows of packages `S3-07` and `S4-06`. Those rows stay blocked.
+Native GUI automation is resumed on the Windows host only, so a Windows result
+never stands in for a macOS or Linux row, and no packaged, cross-OS, or release
+readiness may be claimed from Windows evidence.
+
+### Register ratification status on this date
+
+`plans/completion/requirements.json` currently carries no `owner_approval_ref`
+values at all, so there is no ratified cell in the register on this date,
+provisional or otherwise. Should any be added, they must point at a dated entry
+in this file stating that the ratification is provisional and agent-made, and
+release mode must reject provisional cells. All 419 rows remain
+`acceptance: unassessed`.
+
+### Round r01 register effect
+
+Round r01 applied one reviewer-proposed implementation transition,
+`COMP-LANG-007` to `partial`, for the passed pure-move packet
+`s2-03b-language-extract`. The row already read `partial`, so the file is
+byte-identical before and after: 419 rows, 143 implemented / 233 partial / 43
+absent, all 419 `acceptance` values `unassessed`. The round's fifteen green logs
+are component or crate-level integrated evidence and are recorded as such in
+`plans/evidence/full-product-resume-2026-09-08/README.md`; none of them is
+packaged evidence, native GUI evidence, or product acceptance, and no acceptance
+value was set from any of them.
+
+### Round r05 additions (2026-09-08)
+
+Five prerequisites were added in round r05. `BLK-2026-09-08-01` and
+`BLK-2026-09-08-02` above are unchanged and are not re-numbered. The standing
+authority is unchanged: native GUI automation is resumed on this Windows host by
+owner instruction; macOS and Linux hosts remain unavailable and their rows stay
+blocked.
+
+#### BLK-2026-09-08-03 — external native input driver
+
+Prerequisite, exact: a Windows 11 x64 host with an interactive logged-in desktop
+session and the external native input driver installed at
+`tools/native-input-driver/legion-input-driver.exe`, able to inject OS-level
+keyboard, pointer, text, clipboard and IME/CJK input into another process and to
+read that process's UI Automation text and clipboard state from outside it.
+
+That string is quoted from `PREREQUISITE_DRIVER_MISSING` at
+`xtask/src/native_product_acceptance.rs:75-82` with its `concat!` parts joined.
+It is source text, not a harness observation: nothing reports that the harness
+emitted it, because the harness never ran.
+
+`tools/` does not exist in this worktree at all. Discovery gates before the
+harness's own session handshake, so `run_native_product_acceptance` never
+reached the `--probe-session` step that answers the interactive-session question
+by reading `interactive_session = true` out of `driver_session.toml`. No stub
+driver was written and no `run.json` was produced. Affects packet
+`s1-02b-native-acceptance-run`.
+
+#### BLK-2026-09-08-04 — packaged native product on this Windows host
+
+Prerequisite, exact: a Windows 11 x64 host with the packaged native Legion
+product installed into the package directory this command was given, containing
+the product executable, so the harness can launch the packaged product as a
+subprocess rather than a development build.
+
+`target/native-input-acceptance/package/legion-desktop.exe` is absent.
+`target/debug/legion-desktop.exe` exists and was deliberately not copied there:
+ADR-0056's subject is an owner-installed package the harness must not build, and
+staging a development build in the package directory would make a run blocked on
+a missing driver look as though it had a product to drive. Affects packet
+`s1-02b-native-acceptance-run`.
+
+#### BLK-2026-09-08-05 — native Node runtime and retained TypeScript fixtures
+
+Prerequisite, exact: a native Node runtime at or above 22.22.2 approved on this
+host plus the retained TypeScript fixtures, so that
+`cargo test -p legion-app --test typescript_app_startup -- --ignored` can
+execute.
+
+All six tests in `crates/legion-app/tests/typescript_app_startup.rs` carry
+`#[ignore = "opt-in native Node + retained TypeScript fixtures"]`, and the four
+in `python_app_startup.rs` are likewise ignored. `#[ignore]` is a compile-time
+attribute; both targets compiled and executed nothing in
+`plans/evidence/full-product-resume-2026-09-08/round-r05-test-s2-01b-blast-radius-app.log`.
+The TypeScript descriptor pinned by packet `s2-01b-typescript-registry-pin` has
+therefore launched no server, and the TypeScript/JavaScript live workflow has no
+execution evidence on this host. This is an absence of evidence, not a pass and
+not a skip. Affects `COMP-LANG-001`, `COMP-LANG-002` and `COMP-LANG-009`, whose
+`implementation` values stay `partial` and whose `acceptance` values stay
+`unassessed`.
+
+#### BLK-2026-09-08-06 — owner-selected TypeScript and JavaScript releases
+
+Prerequisite, exact: a real TypeScript and JavaScript language-server, browser
+and debug-adapter setup with owner-selected releases.
+
+The tier-two registry can now name a pinned artifact, but which releases are
+approved is an owner selection, not an agent one. Until the owner selects them,
+the TypeScript and JavaScript live workflow, browser session and debug-adapter
+rows have no configuration to run against. Affects packet
+`s2-01b-typescript-registry-pin`.
+
+#### BLK-2026-09-08-07 — approved tailwindcss-language-server artifact
+
+Prerequisite, exact: an approved `tailwindcss-language-server` release artifact
+with a published version and SHA-256, so registry entry 103 can be pinned
+instead of resolving by bare name from PATH.
+
+Entry 103 was left resolving by bare name because no approved release artifact
+with a published version and digest exists to pin it to. Inventing a version or
+a digest would be a fabricated pin, so the entry stays unpinned and visibly so.
+Affects packet `s2-01b-typescript-registry-pin`.
+
+### Round r05 register effect
+
+Round r05 applied three reviewer-proposed implementation transitions for the one
+passed packet `s2-01b-typescript-registry-pin`: `COMP-LANG-001`, `COMP-LANG-002`
+and `COMP-LANG-009` to `partial`. All three rows already read `partial`, so
+`plans/completion/requirements.json` is byte-identical before and after: 419
+rows, 143 implemented / 233 partial / 43 absent, all 419 `acceptance` values
+`unassessed`. No `owner_approval_ref` value exists anywhere in the register, so
+there is still no ratified cell on this date, provisional or otherwise.
+
+The round's nineteen logs are recorded in
+`plans/evidence/full-product-resume-2026-09-08/README.md` with one line each
+giving the exact command, the exit code and the classification. Eighteen exit 0.
+The one non-zero is `round-r05-test-s0-05c-verify-completion-register.log` at
+exit 1, which belongs to the rejected and reverted packet `s0-05c-residue-coverage`
+and describes a working tree that no longer exists; the committed tree's last
+measured value remains the 78 structural issues of round r04. The whole set is
+component evidence with four crate-level integrated test targets. None of it is
+packaged evidence, native GUI evidence, or product acceptance, and no
+`acceptance` value was set from any of it.
+
+`plans/completion/dependencies.json` still describes registry entry 104 as
+pointing at `registry.example.invalid`. That has been stale since packet
+`s2-01a`, was correctly reported by this round's reviewer and was not fixed. It
+is record-owned and is carried forward as an open repair, not as a resolved item.
+
+## 2026-09-08 provisional register ratification
+
+### What this section ratifies, and what it does not
+
+On 2026-09-08, in round r02 of the full-product-resume workspace, an agent
+authored the four canonical register files that had never existed:
+`plans/completion/matrix.json`, `plans/completion/scenarios.json`,
+`plans/completion/dependencies.json` and `plans/completion/defects.json`.
+Until they existed, `validate_register_structure` could not load the register at
+all, so the register lane had no signal of any kind.
+
+The ratification recorded here is **provisional and agent-made**. No owner has
+approved any cell in `matrix.json`, any scenario in `scenarios.json`, any
+milestone in `dependencies.json`, or either defect. Every configuration in
+`matrix.json` carries the single `owner_approval_ref` string
+
+```
+plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)
+```
+
+verbatim, in all 42 rows, and that string points at this section. The literal
+token `PROVISIONAL:` is the marker a release-mode check must look for: **release
+mode must reject every cell carrying it.** A cell becomes owner-ratified only
+when the owner replaces that string with an approval reference of their own, in
+a separate step this packet does not perform.
+
+Nothing written here is evidence. No `EvidenceRun` exists for anything in these
+four files, no row's `implementation` value moved, and no row's `acceptance`
+value moved.
+
+### Unselected values are visible placeholders
+
+Every `tool_versions` value beginning `PENDING:S0-02-` is an unselected
+placeholder awaiting an S0-02 owner decision, not an observation and not a
+support promise. The measured values on this laptop — Rust/cargo/rust-analyzer
+1.97.1, Node 24.19.0, npm 11.17.0, bundled Python 3.12.14, Windows 11
+`10.0.26200`, Git 2.55.0, PowerShell 7.6.5, Ollama 0.33.3 — were deliberately
+**not** promoted into any target pin. Availability on one developer laptop is
+not an approved support commitment, and the schema draft rationale says so
+explicitly. The one real version label kept from the plan and workflow material
+is macOS 15, which appears as `macOS-15 (plan label; exact patch pending)`
+because the exact patch level is still unresolved.
+
+The owner must still supply, before any of these cells can stop being
+provisional: exact Windows and Linux OS versions and reference hardware; the
+exact macOS patch level; Rust, rust-analyzer, TypeScript, Node, language-server,
+browser, Python, test-runner, build-backend and debug-adapter releases;
+representative project repositories with commits or tags and a lockfile and
+network policy; package formats per OS; the accessibility provider session
+configuration per OS; the Manual/offline artifact flavor and the OS-level
+per-process network-capture tool per OS; and the signer, notarizer and trust
+verifier per OS. No credential, certificate, key, keychain entry or secret name
+appears in any cell, and none may be added to one.
+
+### Matrix shape: 42 configurations
+
+- 32 language/project tuples, copied verbatim from the S0-05 schema draft: four
+  OS/architecture targets (Windows x64, macOS x64, macOS arm64, native Linux
+  x64) crossed with the eight required project categories. Only
+  `owner_approval_ref` was changed.
+- 4 `packaged-product-journey` cells, one per OS/architecture target, from the
+  proposal's platform cells `OS-WIN11-X64-REF1`, `OS-MAC15-X64-REF1`,
+  `OS-MAC15-ARM-REF1` and `OS-LINUX-UBUNTU-X64-REF1`. These exist because the
+  accessibility, workbench and Manual journey scenarios run against an OS cell,
+  not against a language tuple.
+- 3 `manual-offline-artifact` cells from `DIST-MANUAL-OFFLINE-{WIN,MAC,LINUX}`.
+- 3 `signed-stable-artifact` cells from `DIST-STABLE-SIGNED-{WIN,MAC,LINUX}`.
+
+**macOS arm64 for the distribution cells.** The Manual/offline and signed-stable
+cells use macOS arm64 rather than macOS x64 because the release workflow's
+primary macOS runner label is `macos-15` (arm64) and `macos-15-intel` is the
+secondary. Both macOS architectures remain present in the language tuples and in
+the packaged-product-journey cells; only the two distribution families are
+narrowed to the primary architecture, and widening them is an owner decision.
+
+`hardware` is non-blank on every row because the validator rejects a blank one.
+For macOS and Linux it names *target reference hardware pending owner
+selection*, and for the signed-stable cells it says explicitly that no clean
+machine is available in this workspace. No row is worded as though a macOS host,
+a Linux host, a clean VM or a signing credential existed.
+
+### Scenario shape: 37 scenarios and their requirement selection
+
+`scenarios.json` is exactly the native scenario catalog of
+`matrix-contract-draft.md`, with the brace suffixes expanded: 6 `SC-MANUAL-*`,
+16 `SC-LANG-*` (four families across Rust, TypeScript, JavaScript, Python), 3
+`SC-PLATFORM-A11Y-*`, 3 `SC-MANUAL-OFFLINE-30M-*` and 9 `SC-RELEASE-*`.
+
+Configuration binding: the six `SC-MANUAL-*` scenarios use all four
+packaged-product-journey cells; `SC-PLATFORM-A11Y-*` uses the
+packaged-product-journey cell(s) for its OS (both macOS cells for `-MAC`);
+`SC-MANUAL-OFFLINE-30M-*` uses the Manual/offline cell for its OS;
+`SC-RELEASE-*` uses the signed-stable cell for its OS; and each `SC-LANG-*`
+family uses the language tuples matching its language across all four
+OS/architecture targets.
+
+Each scenario carries at most six `requirement_ids`, chosen because the row's own
+title text names the outcome the scenario exercises. **Coverage of the 419 rows
+is explicitly not attempted here**, and no scenario was widened to raise a
+coverage number. One line per scenario:
+
+- `SC-MANUAL-OPEN-TYPE-SAVE` — PRES-001/002 are the save and Save-As/Save-All
+  write path, PRES-003 is the restart-with-dirty-buffer recovery, PRES-008 is
+  the external-overwrite conflict, WB-001 is the dirty tab and dirty-close
+  prompt, WB-007 is the palette save command the run falls back to.
+- `SC-MANUAL-WORKBENCH-RESTORE` — WB-002 splits and tab groups, WB-003 dock
+  geometry persistence and the corrupt-layout path, WB-005 restart restoration,
+  WB-001 tab order and dirty markers, CAN-001 the Canvas viewport that the
+  arrangement includes, PRES-003 the dirty buffer carried across the restart.
+- `SC-MANUAL-EDIT-INPUT-RECOVERY` — PLAT-002 is the packaged native input path
+  itself and is the row both native defects sit on; EDIT-006 clipboard, EDIT-007
+  IME commit after focus change, EDIT-008 one authoritative route per input
+  kind, EDIT-010 Vim motions through the key feed, PRES-007 grouped undo/redo.
+  The accessibility tree is used here only as an oracle; the accessibility
+  outcome rows belong to `SC-PLATFORM-A11Y-*`.
+- `SC-MANUAL-REFACTOR-SEARCH-REVIEW` — NAV-002 symbol navigation, NAV-007
+  literal and regex workspace search, NAV-009 the complete reviewable preview,
+  NAV-010 cancel without mutation, NAV-011 apply with preconditions and
+  rollback, NAV-012 stale/out-of-workspace rejection.
+- `SC-MANUAL-TERMINAL-TUI` — TERM-001 command execution from the workspace root,
+  TERM-006 interactive TUI control keys and resize, TERM-008 task exit code and
+  duration metadata, TERM-010 cancellation, timeout, kill escalation and orphan
+  cleanup, TERM-015 the child PID / launch time / exit status evidence contract,
+  PRES-012 the editor buffer surviving terminal loss.
+- `SC-MANUAL-GIT-HISTORY-RECOVERY` — SCM-002 stage/unstage including a partial
+  hunk, SCM-003 commit, SCM-004 branch workflows, SCM-005 merge conflict and
+  resolution, SCM-009 external-change and restart recovery, PRES-006 local
+  history restore through proposal authority.
+- `SC-LANG-LSP-LIFECYCLE-RUST` — LANG-002 provisioning and provenance, LANG-003
+  toolchain and workspace discovery, LANG-004 the lifecycle and its failure
+  modes, LANG-005 completion/diagnostics/hover, LANG-006 definition and
+  references, LANG-008 the real rust-analyzer process.
+- `SC-LANG-LSP-LIFECYCLE-TS` — same five lifecycle rows plus LANG-009, the row
+  that names the real TypeScript/JavaScript servers.
+- `SC-LANG-LSP-LIFECYCLE-JS` — same five lifecycle rows plus LANG-009, which
+  covers the JavaScript half of the same outcome.
+- `SC-LANG-LSP-LIFECYCLE-PY` — same five lifecycle rows plus LANG-010, the
+  Python server and isolated environment row.
+- `SC-LANG-REFACTOR-RUST` — LANG-007 is the reviewable rename/format/code-action
+  proposal outcome, LANG-006 the cross-file navigation the rename depends on,
+  LANG-005 the post-edit diagnostics, LANG-008 the Rust server.
+- `SC-LANG-REFACTOR-TS` — LANG-007, LANG-006, LANG-005 and LANG-009.
+- `SC-LANG-REFACTOR-JS` — LANG-007, LANG-006, LANG-005 and LANG-009.
+- `SC-LANG-REFACTOR-PY` — LANG-007, LANG-006, LANG-005 and LANG-010.
+- `SC-LANG-BUILD-TEST-RUST` — LANG-011 build/test discovery and execution,
+  BTD-002 prerequisite validation, BTD-003 run/stop/rerun with real exit status,
+  BTD-004 targeted and grouped tests with genuine results, BTD-005 the
+  cancellation, missing-runner and stale-result recovery states.
+- `SC-LANG-BUILD-TEST-TS` — the same five rows; they are language-general by
+  their own titles, which name all four languages.
+- `SC-LANG-BUILD-TEST-JS` — the same five rows.
+- `SC-LANG-BUILD-TEST-PY` — the same five rows.
+- `SC-LANG-DEBUG-RUST` — LANG-012 adapter resolution and session control,
+  BTD-006 adapter discovery and startup failure, BTD-007 breakpoints and
+  stepping, BTD-008 frames, variables and console evaluation, PRES-013 the
+  editor buffer surviving adapter loss.
+- `SC-LANG-DEBUG-TS` — the same five rows.
+- `SC-LANG-DEBUG-JS` — the same five rows.
+- `SC-LANG-DEBUG-PY` — the same five rows.
+- `SC-PLATFORM-A11Y-WIN` — PLAT-003 the accessibility tree and focus order,
+  PLAT-009 the packaged platform qualification that externally checks
+  accessibility, WB-004 keyboard reachability of every workbench surface,
+  WB-009 focus and DPI restoration across the matrix, SCOPE-GAP-05 the native
+  accessibility gap row.
+- `SC-PLATFORM-A11Y-MAC` — the same five rows, bound to both macOS cells.
+- `SC-PLATFORM-A11Y-LINUX` — the same five rows.
+- `SC-MANUAL-OFFLINE-30M-WIN` — DIST-004 the separately labelled Manual/offline
+  artifact with zero egress, TRAIN-006 the OS-level capture proving no egress
+  regardless of stored consent, SCOPE-GAP-06 the Manual/offline zero-egress gap
+  row. The editing, search and Git work inside the thirty minutes is the vehicle,
+  not the outcome under test, so those rows are not claimed here.
+- `SC-MANUAL-OFFLINE-30M-MAC` — the same three rows.
+- `SC-MANUAL-OFFLINE-30M-LINUX` — the same three rows.
+- `SC-RELEASE-CLEAN-INSTALL-WIN` — DIST-003 real signer and OS-verifier
+  evidence, DIST-007 clean-machine install and trust qualification,
+  SCOPE-GAP-02 the release signing and trust gap row.
+- `SC-RELEASE-CLEAN-INSTALL-MAC` — the same three rows.
+- `SC-RELEASE-CLEAN-INSTALL-LINUX` — the same three rows.
+- `SC-RELEASE-UPDATE-ROLLBACK-WIN` — DIST-005 channel descriptors, hashes and
+  feed provenance, DIST-006 the helper-driven atomic swap, restart
+  acknowledgement and rollback, SCOPE-GAP-03 the signed update and rollback gap
+  row.
+- `SC-RELEASE-UPDATE-ROLLBACK-MAC` — the same three rows.
+- `SC-RELEASE-UPDATE-ROLLBACK-LINUX` — the same three rows.
+- `SC-RELEASE-CRASH-PRIVACY-WIN` — DIST-008 opt-in, metadata-only, redacted,
+  exportable and deletable diagnostics with a deletion receipt, PRES-004 crash
+  and restart recovery of dirty text, SCOPE-GAP-04 the packaged
+  work-preservation gap row, SCOPE-GAP-10 the support, privacy and legal
+  distribution gap row.
+- `SC-RELEASE-CRASH-PRIVACY-MAC` — the same four rows.
+- `SC-RELEASE-CRASH-PRIVACY-LINUX` — the same four rows.
+
+Deliberately **not** bound in this packet: the S2-06 umbrella evidence rows
+`COMP-LANG-013` and `COMP-BTD-009`, and the other packaged-journey umbrella rows
+(`COMP-SCM-010`, `COMP-PRES-011`, `COMP-CAN-009`, `COMP-DIST-010`,
+`COMP-GAP-001`). They describe the existence of an EvidenceRun per configuration
+rather than a behaviour a single scenario exercises, and binding them would
+inflate coverage without adding a checkable outcome. Their binding is left open.
+
+Each `sensitive_artifact_policy` is written for its own scenario; the
+crash/privacy, release and Manual/offline policies are strict about payload
+inspection, capture filtering and sealed retention, while the editor and
+workbench policies are ordinary. No single policy string is pasted across all
+37 scenarios.
+
+### Package register: 54 packages, 419 rows
+
+`dependencies.json` contains exactly the 54 distinct `package_id` values present
+in `requirements.json` — no invented aggregate owner — and their
+`requirement_ids` partition all 419 rows exactly once, derived mechanically from
+`requirements.json` rather than hand-typed.
+
+**`owner_role` rule.** A package takes the `owner_role` carried by the most of
+its own rows; a tie is broken in favour of `luna_worker`. Eight packages have
+rows with more than one role: `S0-02`, `S3-01`, `S3-05`, `S3-06`, `S4-02`,
+`S4-03`, `S4-04` and `S4-05`. Under the rule they resolve to `luna_worker`,
+`luna_worker`, `luna_worker`, `luna_worker`, `sol_engineer`, `luna_worker`,
+`sol_engineer` and `sol_engineer` respectively. No tie actually occurred, so the
+tie-break was not exercised. This is routing metadata, not an assignment of work
+to a person.
+
+**`implementation_stage`.** For 52 packages every row declares the same stage and
+that stage is used. `XQ-03` and `XQ-07` each have rows at both S0 and S1; the
+declared value is `S0` for both, per the S0-01b section above ("`XQ-02` stage 1,
+`XQ-03`/`XQ-07`/`XQ-08` stage 0, `XQ-04`/`XQ-05`/`XQ-06` stage 1"). The
+divergence is recorded here rather than repaired: repairing the individual rows
+would mean editing `requirements.json`, which this packet may not do.
+
+**`acceptance_stage`.** No source plan declares an acceptance stage separate from
+the implementation stage for any of the 54 packages. Every `acceptance_stage`
+therefore repeats its package's `implementation_stage`. **This is a provisional
+default, not a plan fact**, and it must be revisited when the owner ratifies the
+stage model.
+
+**`deliverable_refs`.** Each milestone cites the plan file and the heading that
+defines the package, using the heading's GitHub anchor slug so the reference
+resolves rather than merely naming the package, for example
+`docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-04-finish-editing-semantics-input-methods-keymaps-and-settings`.
+All 54 packages have such a heading: `S0-*` in the full-product-completion plan,
+`S1-*` and `S2-*` in the manual-language plan, `S3-*`, `S4-*` and `S5-*` in the
+AI/team plan, and `XQ-*` and `S6-01` in the production-qualification plan. Every
+path and anchor was verified against the file before it was written. Each package
+has `<pkg>:implemented` and `<pkg>:accepted`, with `accepted` depending on
+`implemented` and no other edges, so the milestone graph is acyclic by
+construction.
+
+**`external_prerequisites`.** Only real holds are listed; a package with no
+external prerequisite has an empty list, and none was padded. The two open
+blockers are reused verbatim: `BLK-2026-09-08-01` is attached to `S1-06`, the
+package that owns the terminal and bounded-process execution rows whose Unix
+stdin branch it concerns; `BLK-2026-09-08-02` is attached to `S3-07` and `S4-06`,
+which it names explicitly; to `S1-07`, `S1-08` and `S2-06`, the packages that own
+the four requirement rows it names (`COMP-SCM-010` in `S1-07`, `COMP-PRES-011` in
+`S1-08`, `COMP-LANG-013` and `COMP-BTD-009` in `S2-06`); to `XQ-02`, whose whole
+task is ingesting native input and accessibility evidence on Windows, macOS and
+Linux; and to `S6-01`, whose final journey spans all three OSes. The remaining
+entries are the holds the
+matrix-contract-draft lists under "Observed, declared, and missing inputs",
+attached to the packages that need them: version and repository selection to
+`S0-02` and `S2-01`; reference hardware and images to `S0-02`; the
+TypeScript/JavaScript server, browser and debug setup, the usable Pyright
+artifact and the Python environment to `S2-02` and `S2-05`; the debug-adapter
+binaries to `S2-05`; the accessibility provider session to `XQ-02`; the signing,
+notarization and feed infrastructure to `XQ-04`, `XQ-07` and `S6-01`; clean
+machines to `XQ-07` and `S6-01`; the OS-level per-process network capture to
+`XQ-06`; the external endpoints and credentials to `S3-02`, `S5-07`, `S5-09`,
+`S5-11` and `S5-14`; and the independent external auditor and archived report to
+`XQ-08`.
+
+### Defects: two native Windows observations, and nothing invented
+
+`defects.json` contains exactly the two observations from the native Windows
+baseline session of 2026-09-05. Both sit on `COMP-PLAT-002`, the packaged native
+input path row, on scenario `SC-MANUAL-EDIT-INPUT-RECOVERY` and configuration
+`CFG-WIN11-X64-PRODUCT-JOURNEY`.
+
+- **`DEF-2026-09-05-01` — Home and End have no editor mapping.** Severity `P1`,
+  `invalidates_required_outcome: true`. P1 rather than P0 because the product
+  still starts, still edits and still saves, and no data is lost or silently
+  corrupted; P1 rather than P2 because line-start and line-end motion is part of
+  the ordinary keyboard contract every editor user relies on many times an hour,
+  and `COMP-PLAT-002` is a required row that cannot be accepted while a standard
+  key produces no effect at all. Status is `fixed-awaiting-verification`:
+  `crates/legion-desktop/src/workflow.rs` now maps `Home`/`End` to
+  `EditorBoundaryKind::LineStart`/`LineEnd` and, with the command modifier, to
+  `DocumentStart`/`DocumentEnd`, but **no native run has re-observed the key
+  since that change**, so `verification_run_ids` is empty and the defect is not
+  closed. Closing it requires a native EvidenceRun; the validator only demands
+  verification runs for `closed`, so this honesty is a discipline, not a
+  mechanism.
+- **`DEF-2026-09-05-02` — native Ctrl+S did not persist.** Severity `P1`,
+  `invalidates_required_outcome: true`. P1 rather than P0 because the dirty
+  indicator stayed set, so the user was told the truth about the unsaved state,
+  a working save route exists through the command palette, and no data was lost;
+  P1 rather than P2 because the platform save chord is the single most-used
+  command in an editor and `COMP-PLAT-002` cannot be accepted while it does
+  nothing. Status is `open`. The cause is **not** established: the observed field
+  records the leading explanation — a frame-level `egui::Modifiers.command`
+  mismatch for an injected `Control_L+s` — explicitly as
+  `HYPOTHESIS, UNCONFIRMED`, because no native event log capturing the actual
+  `egui::InputState.modifiers` or `Event::Key` fields for that chord exists. The
+  automation-tool and desktop-focus interference events observed in the same
+  session are deliberately excluded and are not recorded as product behaviour.
+
+`repair_package_id` is `S1-04` for the first (editing semantics, input methods
+and keymaps) and `S1-02` for the second (the native input acceptance boundary).
+`owner` names a role, `luna_worker`, not a person.
+
+### What this packet did not touch, and what remains open
+
+`plans/completion/requirements.json` was not read for values to change, not
+written and not staged; it is byte-identical to HEAD. `plans/completion/candidate.json`
+was not created; nominating a candidate is a separate, owner-authorised step.
+No `acceptance` value moved anywhere: all 419 rows remain `unassessed`.
+
+Binding the 419 rows back to scenarios, configurations and defects — filling
+`scenario_ids`, `configuration_ids` and `defect_ids` in `requirements.json` —
+remains open and is owned by the record role. Because those arrays are all still
+empty, `validate_register_structure` is expected to exit nonzero on four issue
+classes attributable to that missing binding: required rows with empty coverage
+(419), scenario-to-requirement links that are not yet bidirectional (170),
+requirement/scenario/configuration triples not yet linked by the requirement
+(923), and the two defect links that are not yet bidirectional (2). That nonzero
+exit is the correct, truthful result for this repository today; a clean run would
+have meant scenarios or defects had been omitted, or links invented. Any further
+issue in those four classes is a defect in these four files.
+
+A fifth group of 65 issues is expected as well, and none of it is reachable from
+the four files this packet owns. It comes entirely from `requirements.json` and
+the workspace paths it points at: 34 `source_refs` entries that name a directory
+rather than a file (`plans/evidence/production/M9/`, `crates/legion-app/tests`,
+`crates/legion-desktop/tests`); 26 product rows that still carry
+`protected_product_ids`, plus one whose protected target is not a product row;
+three `legacy_ids` values (`COMP-P4-F1-T1-1`, `COMP-P4-F1-T2-1`,
+`COMP-P4-F1-T3-1`) that are requirement ids rather than Kanban task ids; and
+`COMP-DIST-010`, a product row whose `package_id` is `S6-01`. These are recorded
+here as observations for the record role. They are not repaired by this packet,
+they say nothing about the four new files, and they must not be counted against
+them.
+
+## Owner-blocked prerequisites — round r06 additions and changes (2026-09-08)
+
+Six owner-blocked prerequisites were surfaced in round r06 and **all six are
+restatements of prerequisites already recorded above**. No new prerequisite was
+found, none was invented, and no `BLK-2026-09-08-08` exists:
+
+- `BLK-2026-09-08-02` — a macOS host and a Linux host with the packaged native
+  product installed and a real display session, able to run the windowed GUI
+  e2e suite.
+- `BLK-2026-09-08-04` — a Windows 11 x64 host with the packaged native Legion
+  product installed into the package directory this command was given,
+  containing the product executable, so the harness can launch the packaged
+  product as a subprocess rather than a development build.
+- `BLK-2026-09-08-01` — a Linux or macOS host with this workspace checked out
+  and a Rust toolchain able to run
+  `cargo test -p legion-platform --test bounded_process`.
+- `BLK-2026-09-08-05` — a native Node runtime at or above 22.22.2 approved on
+  this host plus the retained TypeScript fixtures, so that
+  `cargo test -p legion-app --test typescript_app_startup -- --ignored` can
+  execute.
+- `BLK-2026-09-08-06` — a real TypeScript and JavaScript language-server,
+  browser and debug-adapter setup with owner-selected releases.
+- `BLK-2026-09-08-07` — an approved `tailwindcss-language-server` release
+  artifact with a published version and SHA-256, so registry entry 103 can be
+  pinned instead of resolving by bare name from PATH.
+
+The standing authority is unchanged: native GUI automation is resumed on this
+Windows host by owner instruction; macOS and Linux hosts remain unavailable and
+their rows stay blocked, and a Windows result never substitutes for a macOS or
+Linux row.
+
+### BLK-2026-09-08-03 is retired by construction
+
+`BLK-2026-09-08-03` asked the owner to install an external native input driver
+at `tools/native-input-driver/legion-input-driver.exe`. Round r06's packet
+`s1-02c-native-input-driver` **builds that driver from source in this
+repository**, as the workspace crate
+[`crates/legion-input-driver`](../../crates/legion-input-driver/src/main.rs).
+`PREREQUISITE_DRIVER_MISSING` at
+`xtask/src/native_product_acceptance.rs:80-90` now names
+`cargo build -p legion-input-driver --release` instead of an installation, and
+the retained staged path survives only as the last of three discovery
+candidates (`target/release`, then `target/debug`, then
+`tools/native-input-driver/`), so an owner-staged binary still works. The
+retirement is recorded in the ADR-0056 amendment dated 2026-09-08 and in
+`blockers.json`, where the blocker's `status` is now `retired` and its original
+prerequisite string is left unedited as the true record of what the harness said
+on its own date.
+
+**The r05 entry for `BLK-2026-09-08-03` earlier in this file is not rewritten.**
+It recorded the state truthfully on 2026-09-08 in round r05, including the exact
+string the harness carried then. This section supersedes it; it does not correct
+it. The same applies to
+`plans/evidence/completion/native-manual-open-type-save-r05-win11-x64/host-observations.md`,
+which still quotes the old prerequisite and is left as the record of what was
+observed when it was written.
+
+**What this retirement does not do.** It produces no acceptance evidence and it
+unblocks no run. `xtask native-product-acceptance` was not invoked at all in
+round r06: no product window was opened, no OS-level input was injected into any
+process, and no `run.json` was written. On this host
+`target/debug/legion-input-driver.exe` exists only as a side effect of the cargo
+lane's own test builds, no `target/release/legion-input-driver.exe` exists, and
+`target/native-input-acceptance/package/` does not exist.
+**`BLK-2026-09-08-04` is not retired and still blocks every run.**
+`COMP-PLAT-002` stays `implementation: partial`, `acceptance: unassessed`.
+
+### A standing constraint on the first native acceptance artifact
+
+Before any `xtask native-product-acceptance` artifact is transcribed into
+`plans/completion/defects.json` or into any requirement row, this must be
+settled first. The harness currently writes `status = "conformance-failed"`,
+`exit_code = 1` for **any** post-driver outcome that is not
+`driver_code == 0 && window_created && 6/6 conforms` — including the driver's own
+exit `3`/blocked. The driver as built exits 3/blocked on this host by design,
+because `observe_ime_cjk` blocks whenever the product window's keyboard layout
+is not CJK. The first real run would therefore produce an artifact blaming the
+product for a missing IME, which is exactly what the harness's own
+`missing_packaged_binary_is_reported_blocked_rather_than_failed` test calls
+filing a false defect. The mapping is pre-existing and was not introduced by
+round r06. **Until a follow-up propagates the driver's blocked exit into a
+blocked harness status, no `conformance-failed` artifact from this command may
+be entered anywhere in the register.**
+
+### Round r06 register effect
+
+Round r06 applied fifteen reviewer-proposed implementation transitions across
+three passed packets: `COMP-PLAT-002` to `partial` and `COMP-P1-F1-T1-1` to
+`implemented` for `s1-02c-native-input-driver`; `COMP-DIST-010`,
+`COMP-PLAT-001` and `COMP-DIST-001` to `absent` and `COMP-P1-F1-T4-1`,
+`COMP-P1-F3-T1-1`, `COMP-P1-F4-T1-1`, `COMP-P6-F4-T1-1`, `COMP-P7-F1-T1-1`,
+`COMP-P8-F2-T1-1` and `COMP-P9-F3-T1-1` to `implemented` for
+`s0-05d-register-kind-repair`; and `COMP-LANG-001`, `COMP-LANG-002` and
+`COMP-LANG-009` to `partial` for `s2-01c-pinned-archive-extract`. **All fifteen
+were verified no-ops** — every row already held the value its reviewer proposed.
+`plans/completion/requirements.json` is byte-identical across the record step:
+419 rows, 143 implemented / 233 partial / 43 absent, all 419 `acceptance` values
+`unassessed`.
+
+That is now three rounds — r01, r05 and r06 — in which every proposed transition
+was a no-op. The `implementation` column has not been exercised by the
+transition mechanism at all, and a future round should expect its first real
+transition to surface disagreements these no-ops have hidden.
+
+The file *is* modified against the previous commit, by
+`s0-05d-register-kind-repair`: `kind` on 32 rows, `scenario_ids` and
+`configuration_ids` on 75 rows, and `protected_product_ids` on 32 rows. The
+`implementation` and `acceptance` columns are untouched on all 419 rows against
+the previous commit as well as across the record step. No `owner_approval_ref`
+value exists anywhere in the register, so there is still no ratified cell on this
+date, provisional or otherwise.
+
+The brief authorised 34 re-kindings; 32 were applied, `COMP-P1-F1-T3-1` was held
+back and `COMP-DIST-010` was declined — 32 + 1 + 1 = 34, reconciled against the
+file. Seven re-kinded rows sit at `implementation: absent` (`COMP-PLAT-001`,
+`COMP-DIST-001`, `COMP-SCOPE-FAMILY-15-01`, `COMP-SCOPE-FAMILY-17-01`,
+`COMP-REMOTE-001`, `COMP-COLLAB-001`, `COMP-TRAIN-001`), and two more
+(`COMP-LANG-001`, `COMP-BTD-001`) at `partial` and stage S2 rather than Stage 0.
+
+`plans/completion/dependencies.json` entry 104 no longer names the deliberate
+placeholder host `registry.example.invalid`; it now names the pinned Pyright
+1.1.400 archive, its `policy://lsp-download/pyright` gate and its Node 14.0.0
+minimum. That closes the stale-register item carried forward from round r05.
+Two further `registry.example.invalid` assertions remain and are **not** fixed:
+`plans/completion/language-tooling-scope-audit.md:26` and `:60`. They are
+carried forward as an open repair.
+
+### The register's structural-issue count was not measured this round
+
+No `verify-completion-register` run happened in round r06. The
+`s0-05d-register-kind-repair` report predicts 3 remaining structural issues after
+its edits, and a reviewer's independently written port of
+`validate_register_structure` reproduced 78-at-HEAD and 3-on-tree, but neither is
+an exit code from the validator itself and **neither is recorded here as a
+measurement**. The last figure measured on a tree that exists remains the **78
+structural issues of round r04**. Closing it needs exactly
+`cargo run -p xtask -- verify-completion-register --root .` run from the
+workspace root by the cargo lane and logged with its own frame.
+
+One pre-existing register edge holds one of the three predicted remaining issues
+open and its repair is an open record-role decision, deliberately **not** made
+this round: `COMP-P0-F3-T1-1`, `COMP-P0-F3-T2-1` and `COMP-P0-F3-T3-1` — the
+Kanban backlog and its validator — all name `COMP-P1-F1-T3-1` ("Each
+representative workflow has at least one headless test driving it through the
+harness") in `protected_product_ids`. Choosing which of those four rows is
+misclassified is a register judgement that wants the measured validator output in
+front of it, which this round does not have. No row was accepted, no exemption
+was added, and no convenient target was minted to work around it.
+
+### Round r06 evidence classification
+
+The round's thirty logs are recorded in
+`plans/evidence/full-product-resume-2026-09-08/README.md` with one line each
+giving the exact command, the exit code and the classification. Twenty-eight
+exit 0. The two non-zero are both `EXIT=101` clippy failures on mechanical lints
+in *test* targets — `unused import: windows_uia::*` and
+`assertions_on_constants` — both repaired in the fix pass and both superseded by
+retests at exit 0; the failing logs are retained because they happened. Every
+fast gate step exited 0.
+
+The whole set is **component evidence with five crate-level integrated test
+targets. None of it is packaged evidence, native GUI evidence, or product
+acceptance**, and no `acceptance` value was set from any of it. In particular
+the `native_product_acceptance` and `driver_contract` targets exercise the
+harness and the driver's own contract against fixtures and temp directories;
+they opened no window and injected no input.
+
+## Owner-blocked prerequisites — round r07 additions (2026-09-08)
+
+Ten owner-blocked prerequisites were surfaced in round r07. **Four are
+restatements** of prerequisites already recorded above; **six are new** and are
+recorded here and in `blockers.json` as `BLK-2026-09-08-08` through
+`BLK-2026-09-08-13`. Every new prerequisite string is quoted or paraphrased from
+a package's `external_prerequisites` list in
+[`plans/completion/dependencies.json`](dependencies.json) or from source text
+named in the blocker's `prerequisite_source`. **None was invented.**
+
+### The four restatements
+
+- `BLK-2026-09-08-02` — a macOS host and a Linux host with the packaged native
+  product installed and a real display session, able to run the windowed GUI
+  e2e suite. Restated this round with a **wider scope** than the r01 entry
+  recorded: besides `COMP-LANG-013`, `COMP-BTD-009`, `COMP-SCM-010`,
+  `COMP-PRES-011` and packages `S3-07` and `S4-06`, it blocks package `XQ-02`
+  and the macOS/Linux halves of every packaged journey row, and packet `s0-05e`
+  added it to `XQ-07`'s `external_prerequisites`. The blocker's prerequisite
+  string is unchanged; the widened scope is recorded in its `scope_note_r07`
+  field rather than by rewriting the r01 entry.
+- `BLK-2026-09-08-01` — a Linux or macOS host with this workspace checked out
+  and a Rust toolchain able to run
+  `cargo test -p legion-platform --test bounded_process`. The Unix nonblocking
+  `fcntl` stdin branch is compiled out on this Windows host and stays
+  unassessed; it is never passed by substitution from the Windows
+  `PIPE_NOWAIT` branch.
+- `BLK-2026-09-08-06` — a real TypeScript and JavaScript language-server,
+  browser and debug-adapter setup with owner-selected releases.
+- `BLK-2026-09-08-07` — an approved `tailwindcss-language-server` release
+  artifact with a published version and SHA-256.
+
+`BLK-2026-09-08-04` also still stands, unretired: no MSI was built in round r07
+and nothing was staged, so
+`target/native-input-acceptance/package/legion-desktop.exe` is still absent and
+still blocks every harness run. **No blocker changed status this round.**
+
+### BLK-2026-09-08-08 — signing, notarization and update-feed infrastructure
+
+> Owner-supplied signing, notarization and update-feed infrastructure; no
+> signing credential, certificate, key, notarization tool, provider or feed is
+> available in the retained facts.
+
+Quoted verbatim from the `external_prerequisites` of packages `S6-01`, `XQ-04`
+and `XQ-07`. Blocks `COMP-DIST-003`, `COMP-DIST-005`, `COMP-DIST-006`,
+`COMP-DIST-007` and the signed half of `COMP-DIST-010`. The r07 package work is
+deliberately unsigned and does not touch it: `scripts/package-native.ps1` writes
+`signer_status = "unsigned-beta/no-os-code-signing"` into
+`RELEASE-METADATA.toml`, and `scripts/stage-native-acceptance-package.ps1`
+copies that value verbatim into `STAGING-EVIDENCE.toml` beside an explicit
+`signed = false`, so an unsigned artifact cannot be staged as anything else. No
+signature, notarisation or publisher identity was produced.
+
+### BLK-2026-09-08-09 — a clean virtual machine per supported OS
+
+> A clean virtual machine for each supported OS with no prior Legion
+> installation.
+
+Quoted verbatim from the `external_prerequisites` of `S6-01` and `XQ-07`. Blocks
+`COMP-DIST-007` clean-machine install and trust qualification. Any package the
+r07 sequence would produce is built and extracted on a developer host, and an
+`msiexec /a` administrative extraction is not an installation.
+
+### BLK-2026-09-08-10 — an OS-level per-process network capture
+
+> An OS-level per-process DNS, TCP and UDP network capture on each supported
+> OS, applied to the packaged Manual/offline artifact process tree.
+
+Quoted from `XQ-06`'s `external_prerequisites`. Blocks `COMP-DIST-004`
+zero-egress verification. It also constrains
+`SC-TRAIN-PACKAGED-STAGE5-MANUAL-OFFLINE`, the scenario packet `s0-05e`
+authored for `COMP-TRAIN-009`: its `OR-NO-EGRESS` oracle cannot be answered
+without such a capture, and its `RC-NO-CAPTURE-TOOL` recovery case records
+blocked with this exact prerequisite rather than passing.
+
+### BLK-2026-09-08-11 — an independent external security and privacy auditor
+
+> An engaged independent external security and privacy auditor and the archived
+> audit report; the register currently records that report as missing.
+
+Quoted from `XQ-08`'s `external_prerequisites`. Blocks `COMP-P9-F2-T4-1`. No
+agent may stand in for an independent external auditor, and no report exists to
+archive.
+
+### BLK-2026-09-08-12 — named external endpoints and their credentials
+
+> Named external endpoints and their credentials for the remote, provider,
+> collaboration and enterprise claims; none is available in the retained facts.
+
+Quoted from `S5-14`'s `external_prerequisites`. Blocks `COMP-ENT-005`, and
+constrains what `COMP-TRAIN-009`'s new qualification scenario can ever be run
+against: a host-controlled collection endpoint is one of the things
+`SC-TRAIN-PACKAGED-STAGE5-QUALIFICATION` needs, and its
+`RC-NO-HOST-CONTROLLED-DESTINATION` recovery case exists for exactly that
+absence.
+
+### BLK-2026-09-08-13 — a CJK IME active on the packaged product's window
+
+> A Windows 11 x64 host with a CJK IME installed (for example Microsoft IME for
+> Japanese) and active as the input layout of the packaged product's window, so
+> the driver can drive a real composition by key injection rather than
+> synthesizing a commit.
+
+Quoted verbatim from `IME_PREREQUISITE` at
+`crates/legion-input-driver/src/main.rs:513-518` with the `concat!` parts
+joined — source text, not a harness observation. (The round brief cited lines
+507-512, the constant's position before this round's `main.rs` edit; the text is
+unchanged.) `observe_ime_cjk` blocks whenever the product window's keyboard
+layout is not CJK, so the `ime-cjk` class will report blocked on the first real
+conformance run on this host. Packet `s1-02d` landed first precisely so that
+outcome is published as `status = "blocked"`, `exit_code = 3` carrying this
+prerequisite, rather than as `status = "conformance-failed"`, `exit_code = 1`
+against the product. **It has never been observed:**
+`xtask native-product-acceptance` has not been invoked and no `run.json` exists.
+
+### The r06 standing constraint is retired in code only
+
+Round r06 recorded a standing constraint: until the driver's blocked exit was
+propagated into a blocked harness status, no `conformance-failed` artifact from
+`xtask native-product-acceptance` could be entered anywhere in the register.
+Packet `s1-02d` propagates it. A driver that exits `3`/blocked now yields
+`status = "blocked"`, `exit_code = 3`, carrying the driver's own composed
+prerequisite, and the artifact gains `input_classes_blocked` and
+`input_classes_deviating` so a blocked run names which oracles had no answer.
+
+**That retirement is in the code and nowhere else.** No
+`native-product-acceptance` artifact of any status exists on this host, nothing
+was transcribed into `defects.json` or any requirement row, and no run was
+unblocked. Two asymmetries in the new mapping survive and are recorded in
+`packets.json` under the packet's `review_follow_ups`: the pass arm does not
+consult the two new fields, and the conformance-failed arm has no
+`stated_status` guard matching the pass arm's `stated_status_denies_pass`. Both
+are unreachable from today's driver. `COMP-PLAT-002` stays
+`implementation: partial`, `acceptance: unassessed`.
+
+### Round r07 register effect
+
+Round r07 applied eight reviewer-proposed implementation transitions across
+three passed packets: `COMP-PLAT-002` to `partial` and `COMP-P1-F1-T1-1` to
+`implemented` for `s1-02d`; `COMP-P1-F1-T3-1`, `COMP-P0-F3-T1-1`, `-T2-1` and
+`-T3-1` to `implemented` and `COMP-DIST-010` and `COMP-TRAIN-009` to `absent`
+for `s0-05e`; and `COMP-PLAT-002` to `partial` again for `s1-02e`. **All eight
+were verified no-ops** — every row already held the value proposed for it.
+
+`plans/completion/requirements.json` holds 419 rows before and after,
+143 `implemented` / 233 `partial` / 43 `absent`, and all 419 `acceptance` values
+`unassessed`. The `implementation` and `acceptance` columns are byte-identical
+to `HEAD` as well. The file *is* modified against `HEAD` (`21dfc0b`), on 11
+fields across 6 rows, all authored by `s0-05e` and all of them structural:
+
+- `COMP-P1-F1-T3-1` — `kind` `product` to `internal`; `scenario_ids` to
+  `[SC-REPO-GUI-HARNESS-SOURCE-GATES]`; `configuration_ids` to the four
+  `CFG-*-RUST-WORKSPACE` rows; `protected_product_ids` to
+  `[COMP-P1-F1-T1-1, COMP-PLAT-002]`.
+- `COMP-P0-F3-T1-1`, `-T2-1`, `-T3-1` — `protected_product_ids` from
+  `[COMP-P1-F1-T3-1]` to `[COMP-SCOPE-GAP-01, COMP-SCOPE-GAP-02]`, because the
+  row they protected is no longer a product row.
+- `COMP-TRAIN-009` — `scenario_ids` to the two newly authored
+  `SC-TRAIN-PACKAGED-STAGE5-*` scenarios; `configuration_ids` to seven
+  `MANUAL-OFFLINE` / `PRODUCT-JOURNEY` configurations.
+- `COMP-DIST-010` — `stage` `S6` to `S1`, `package_id` `S6-01` to `XQ-07`,
+  keeping `kind: product` so its distribution journeys must still be truly
+  earned.
+
+The product-row count moves 357 to 356 with `COMP-P1-F1-T3-1`'s re-kinding,
+replaced by a protection edge to two product rows, so release gating is not
+loosened. No `owner_approval_ref` value exists anywhere in the register, so
+there is still **no ratified cell, provisional or otherwise**.
+
+Two register judgements in that set want owner ratification rather than agent
+confidence. `XQ-07` as `COMP-DIST-010`'s home is argued from declared scope and
+the argument holds, but
+`docs/superpowers/plans/2026-09-04-production-qualification.md:325` still names
+`S6-01` as the consumer that performs this row's update/rollback and
+uninstall/deletion outcomes; either ratify `XQ-07`/`S1` or amend the plan prose,
+because the row cannot return to `S6-01` while the validator rejects a product
+row owned by S6. And all three `COMP-P0-F3-*` rows received the identical
+protection pair, defensible as one guarantee at three layers but disclosed as a
+judgement, not a ruling: if the owner reads the backlog as safeguarding
+something narrower, all three edges move together.
+
+`plans/completion/requirements.json` is committed in round r07's **record**
+commit rather than in `s0-05e`'s, even though `s0-05e` authored its content,
+because the round rule reserves that file to the record role. `scenarios.json`
+(120 scenarios to 122) and `dependencies.json` ride in `s0-05e`'s own commit.
+
+### The register's structural-issue count was not measured this round either
+
+There is no r07 `verify-completion-register` log. `s0-05e`'s success criterion —
+exit 0 with zero structural issues — is **predicted, not measured**. The last
+measured figure remains 3 structural issues at exit 1, from round r06's
+post-round run, and its three issues are exactly the three this packet
+addresses. Two independently written Node ports of `validate_register_structure`
+both calibrate to 3 at that commit and report 0 on this tree; that is
+corroboration by reimplementation, not an exit code. Exact prerequisite to close
+it: the cargo lane runs `cargo run -p xtask -- verify-completion-register
+--root .` from `D:/legion-ide-completion`, logs it with a
+CMD/CWD/BEGIN/END/EXIT frame, and a later record cites the measured issue list
+and exit code in place of this prediction.
+
+### Round r07 evidence classification
+
+Nineteen raw logs, **all nineteen ending `EXIT=0`** — the first round in this
+effort with no non-zero log at all. Every one is **component evidence, with
+three crate-level integrated test targets
+(`xtask --test native_product_acceptance`,
+`legion-input-driver --test driver_contract`,
+`xtask --test completion_command`) and one PowerShell contract suite
+(`scripts/test-native-package-verifiers.ps1`). Not packaged evidence, not native
+GUI evidence, not product acceptance.** No product window was opened, no
+OS-level input was injected into any process, `xtask native-product-acceptance`
+was not invoked, no MSI was built, and nothing was staged. All nineteen were
+copied byte-identical, SHA-256 verified after each copy, into
+[`plans/evidence/full-product-resume-2026-09-08/`](../evidence/full-product-resume-2026-09-08/README.md),
+whose README carries one line per log with its exact command, exit code and
+classification.
+
+## Owner-blocked prerequisites — round r10 additions (2026-09-09)
+
+Eleven owner-blocked prerequisites were surfaced in round r10. **Ten are
+restatements** of prerequisites already recorded above; **one is new** and is
+recorded here and in `blockers.json` as `BLK-2026-09-09-14`. No prerequisite
+string was invented, and **no blocker changed status this round**.
+
+### The ten restatements
+
+`BLK-2026-09-08-02` (macOS and Linux hosts with the packaged product and a real
+display), `BLK-2026-09-08-05` (an approved native Node >= 22.22.2 plus retained
+TypeScript fixtures), `BLK-2026-09-08-06` (owner-selected TypeScript/JavaScript
+server, browser and debug-adapter releases), `BLK-2026-09-08-07` (an approved
+`tailwindcss-language-server` artifact with version and SHA-256),
+`BLK-2026-09-08-08` (signing, notarization and update-feed infrastructure),
+`BLK-2026-09-08-09` (a clean VM per supported OS), `BLK-2026-09-08-10` (an
+OS-level per-process DNS/TCP/UDP capture on the packaged process tree),
+`BLK-2026-09-08-11` (an engaged external security and privacy auditor with an
+archived report), `BLK-2026-09-08-12` (named external endpoints and credentials
+for remote/provider/collaboration/enterprise claims) and `BLK-2026-09-08-13` (a
+Windows 11 x64 host with a CJK IME active as the packaged window's input
+layout). None of them was touched by round r10, which shipped three test-side
+repairs and nothing else.
+
+`BLK-2026-09-08-05` carries a re-measurement note rather than a status change.
+Round r08 measured node `v24.19.0` on this host with the retained archives
+present, and `round-r08-test-s2-02a-live-language-servers.log` records
+`typescript_app_startup` at 6 passed / 0 failed, `EXIT=0` — which is exactly the
+command the blocker names. The record role does not retire an owner-blocked
+prerequisite on its own reading of a prior round's log; the coordinator is asked
+to rule on it. It stays `blocked` until then, and this note is the reason it
+should not stay there quietly.
+
+### BLK-2026-09-09-14 — macOS 15 and Ubuntu 24.04 hosts for local reproduction of hosted test failures
+
+> A macOS 15 host and an Ubuntu 24.04 host with this workspace checked out and
+> the workspace Rust toolchain, able to run `cargo test -p legion-app --lib`,
+> `cargo test -p legion-desktop --lib` and `cargo test -p legion-editor --lib`
+> locally, so that the failures observed in hosted `Legion Gates` run
+> `34322199039` can be reproduced and a candidate repair falsified before it is
+> pushed.
+
+This is distinct from `BLK-2026-09-08-01`, which names a Linux or macOS host for
+one specific test (`legion-platform --test bounded_process`), and from
+`BLK-2026-09-08-02`, which needs the **packaged** product and a real display.
+This one needs only a source checkout and a toolchain, and it exists because all
+three r10 repairs are reasoned from hosted logs and validated on a host where
+none of the three target failures reproduces.
+
+**Measured this round, and it changes the shape of the request.** The record
+role ran `gh run list --branch codex/full-product-resume --workflow
+"Legion Gates" --limit 30` and `gh run view 34322199039 --job <id> --log-failed`
+for each failing job. Nine runs on this branch, all nine `completed / failure`.
+Run `34322199039` failed on **all three** `Standing gates` jobs, not two:
+
+| Job | Failing test | Packet |
+| --- | --- | --- |
+| `windows-latest` (`102371151604`) | `language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates`, panic at `typescript_organize_tests.rs:112:5`; 446 passed / 1 failed | `s2-03e` |
+| `macos-latest` (`102371151801`) | the same test, same panic site; 450 passed / 1 failed | `s2-03e` |
+| `ubuntu-latest` (`102371151608`) | `view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output`, panic at `worker.rs:659:18`; 241 passed / 1 failed | `s1-08a` |
+| `ubuntu-latest` (`102371151608`) | `tests::retention_drained_prefix_releases_each_unpinned_descriptor_and_preserves_lease`, panic at `legion-editor/src/lib.rs:4573:9`; 56 passed / 1 failed | `s1-04m` |
+
+So the round brief's framing — three repairs to `macos-latest` and
+`ubuntu-latest` failures — is wrong in two ways. The TypeScript failure is on
+`windows-latest` and `macos-latest`, not on `ubuntu-latest` (`ubuntu-latest` ran
+`legion-app --lib` clean at 451 passed / 0 failed), and the branch is red on
+three operating systems rather than two.
+
+**The `s2-03e` half of this blocker is not owner-blocked at all**, and that is
+recorded here rather than filed as a host request the owner cannot usefully
+answer: a hosted `windows-latest` runner already reproduces that failure, and
+this Windows host does not, at the same test count (447 here; 446 passed + 1
+failed there). A hosted runner is reachable by pushing this branch. What is
+genuinely blocked is macOS and Linux, for `s1-08a` and `s1-04m`.
+
+Affects packets `s2-03e-typescript-organize-path-shape`,
+`s1-08a-streamed-worker-mailbox-flake` and `s1-04m-snapshot-lease-expiry`, and
+requirements `COMP-LANG-007`, `COMP-P1-F4-T2-1`, `COMP-PRES-007` and
+`COMP-P0-F4-T5-1`. It promotes and demotes nothing on its own.
+
+### Round r10 register effect
+
+**None in `implementation` or `acceptance`.** All four reviewer-proposed
+transitions across the three passed packets were applied as written and **all
+four were verified no-ops**: `COMP-LANG-007` (`partial`), `COMP-P0-F4-T5-1`
+(`partial`), `COMP-P1-F4-T2-1` (`implemented`) and `COMP-PRES-007` (`partial`)
+each already held the proposed value.
+[`plans/completion/requirements.json`](requirements.json) is **byte-identical**
+before and after the record step — it does not appear in `git diff --numstat`
+at all. 419 rows before, 419 after; 143 implemented / 233 partial / 43 absent,
+before and after; all 419 `acceptance: unassessed`, before and after.
+
+That is thirty consecutive no-op transitions across r05, r06, r07 and r10 —
+three, fifteen, eight and four. The `implementation` column has now gone four
+recorded rounds unexercised. The reading stays the honest one: reviewers keep
+proposing the value a row already holds, and none of these packets produced the
+kind of evidence that moves a row. For r10 that is exactly right — three test
+repairs add no product capability — but it means the column's first real
+transition is still ahead, and will surface disagreements these no-ops hide.
+
+### Round r10 evidence classification
+
+Twenty-four raw logs, **all twenty-four ending `EXIT=0`**. Twenty-two are
+cargo-lane logs and every one of them is **component evidence: not packaged
+evidence, not native GUI evidence, not product acceptance.** No product window
+was opened, no OS-level input was injected, `xtask native-product-acceptance`
+was not invoked, no MSI was built and nothing was staged.
+`round-r10-test-packet-tests-s1-04m-atomicity.log` runs a `tests/` binary, but it
+links one crate and drives its public API in-process, so it is a crate-level
+test rather than an integration of the product's parts.
+`round-r10-test-packet-tests-s1-08a-soak.log` is 30 repetitions of the same
+in-process unit tests on this host — a local flake measurement, not evidence
+about the hosted runners.
+
+The remaining two, `round-r10-record-gh-run-list.log` and
+`round-r10-record-gh-run-34322199039-failed-tests.log`, are neither component
+nor integrated evidence: they are **hosted-CI observations** taken by the record
+role, a record of what GitHub-hosted runners reported. The standing rule already
+classifies a GitHub-hosted runner as a component-layer workspace gate and never
+as a substitute for packaged-product acceptance, and nothing here changes that.
+
+All twenty-four were copied byte-identical (`cmp` clean on every file) into
+[`plans/evidence/full-product-resume-2026-09-08/`](../evidence/full-product-resume-2026-09-08/README.md),
+whose README carries one line per log with its exact command, exit code and
+classification. Those logs were filed in the `2026-09-08` directory by explicit
+round instruction; rounds r08 and r09 filed theirs under
+`plans/evidence/full-product-resume-2026-09-09/`, so r10 evidence is not
+co-located with the rounds immediately before it.
+
+### What round r10 does not establish
+
+No repair in this round is observed to fix anything. Exact prerequisite for
+closing that: a completed `Legion Gates` run on branch
+`codex/full-product-resume` after these commits land, with `windows-latest`,
+`ubuntu-latest` and `macos-latest` all green. Until that run exists, the three
+packets are plausible repairs validated against a host that reproduces none of
+the failures they target — and for `s2-03e` specifically, the reason this
+Windows host passes a test the hosted `windows-latest` runner fails at the same
+panic site is undetermined, which makes the 8.3 short-name falsification the
+brief marked optional the obvious next step rather than an optional one.

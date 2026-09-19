@@ -376,6 +376,36 @@ These dependency entries are approval boundaries, not activation by themselves. 
 
 Phase 8 production capability names are reserved for security-broker decisions before runtime activation: `remote.transport.connect`, `remote.transport.listen`, `remote.agent.package.activate`, `terminal.launch`, `terminal.input`, `terminal.resize`, `terminal.close`, `terminal.kill`, `telemetry.spool.write`, `telemetry.export.hosted`, `telemetry.consent.revoke`, `retention.raw_source.capture`, `retention.raw_source.read`, `retention.raw_source.delete`, `retention.raw_source.export.hosted`, `storage.migration.apply`, and `storage.migration.repair`. Unknown capability names remain denied, air-gap denies hosted egress and non-loopback remote transport, and terminal/runtime/retention/telemetry activation remains disabled by default.
 
+- `legion-input-driver` may depend on:
+
+  (Nothing. `legion-input-driver` is the ADR-0056 native input acceptance
+  instrument: a leaf binary with an empty allowed internal dependency set and no
+  product authority whatsoever. It is never linked by the product or by `xtask`,
+  which reaches it only as a subprocess discovered on the filesystem, and **no
+  crate may depend on `legion-input-driver`**. It owns no protocol type, no
+  capability, no policy decision and no workspace mutation path, and it may not
+  gain one; if this instrument ever needs to know something about the product,
+  the answer is a better external oracle, not a dependency edge and not a
+  product-side hook.)
+
+ADR-0056 acceptance instrument dependency admission, for `legion-input-driver`
+only: the `windows` crate with the `Win32_Foundation`, `Win32_System_Com`,
+`Win32_System_DataExchange`, `Win32_System_Memory`,
+`Win32_System_StationsAndDesktops`, `Win32_UI_Accessibility`,
+`Win32_UI_Input_KeyboardAndMouse` and `Win32_UI_WindowsAndMessaging` features,
+scoped to OS-level input injection (`SendInput`, the Win32 clipboard API and its
+`GlobalAlloc`/`GlobalLock` buffers) and out-of-process observation (UI Automation
+element, text-pattern and bounding-rectangle reads, top-level window
+enumeration, and attaching to the input desktop with `OpenInputDesktop` /
+`SetThreadDesktop`) for the native input acceptance harness. This admission
+authorizes no product runtime edge, no PTY ownership and no job-object
+ownership, and it does not widen the existing `windows` admissions held by
+`legion-platform` (ConPTY) or `legion-lsp` (Job Objects), which stay exactly as
+written above. It is a build-time dependency of a test instrument only: nothing
+here is reachable from a product binary, because nothing depends on this crate.
+Any additional `windows` feature, or any external crate beyond `windows`,
+requires an ADR-0056 amendment, cargo-deny/license review, and contract tests.
+
 ### 2. Shared Contracts Boundary
 
 - Cross-domain project/editor/indexer/tracker interactions should flow through `legion-protocol` types and traits.

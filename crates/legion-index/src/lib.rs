@@ -5676,6 +5676,7 @@ pub fn build_structural_rewrite_preview_payload(
             redaction_hints: vec![RedactionHint::MetadataOnly],
         },
         file_edits,
+        change_annotations: Vec::new(),
         file_operations: Vec::new(),
         required_capability: CapabilityId("editor.write".to_string()),
         diagnostics,
@@ -5767,6 +5768,7 @@ pub fn build_rename_preview_payload(
             edits: EditBatch { edits },
             preconditions,
         }],
+        change_annotations: Vec::new(),
         file_operations: Vec::new(),
         required_capability: CapabilityId("editor.write".to_string()),
         diagnostics: vec![diagnostic(

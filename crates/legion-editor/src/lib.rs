@@ -4522,6 +4522,16 @@ mod tests {
             .collect::<Vec<_>>();
         let lease_id = Uuid::now_v7();
         let lease_snapshot = snapshots[0].clone();
+        // `snapshots[0]` is not the buffer's current snapshot, and the only lease
+        // constructor, `EditorEngine::lease_snapshot`, always leases the current
+        // one, so this record has to be hand-inserted. Give it the same real
+        // time-to-live that constructor gives (`TimestampMillis::now()` plus
+        // `DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS`); with a zero TTL the lease expires
+        // the instant it is created and
+        // `enforce_snapshot_retention_policy`'s opening `sweep_expired_snapshot_leases`
+        // removes the only pin holding `ids[0]` whenever the millisecond ticks first.
+        let now = TimestampMillis::now();
+        let expires_at = TimestampMillis(now.0.saturating_add(DEFAULT_SNAPSHOT_LEASE_TTL_MILLIS));
         engine.snapshot_leases.insert(
             lease_id,
             SnapshotLeaseRecord {
@@ -4532,7 +4542,7 @@ mod tests {
                     snapshot_id: ids[0],
                     buffer_version: lease_snapshot.buffer_version(),
                     consumer_kind: SnapshotConsumerKind::Ui,
-                    expires_at: TimestampMillis::now(),
+                    expires_at,
                     chunk_count: lease_snapshot.chunk_descriptors().len() as u32,
                     schema_version: 2,
                 },
@@ -4605,6 +4615,150 @@ mod tests {
                 .retained_snapshots
                 .iter()
                 .any(|entry| entry.descriptor.snapshot_id == ids[0])
+        );
+    }
+
+    #[test]
+    fn retention_budget_evicts_oldest_unpinned_undo_snapshots() {
+        // Lib-level companion to the integration test of the same name. The
+        // integration harness can only observe `retained_snapshot_count()`, so
+        // *which* descriptor the budget evicts is asserted here against the
+        // private descriptor register.
+        let policy = SnapshotRetentionPolicy {
+            max_snapshot_count: 4,
+            max_estimated_bytes: usize::MAX,
+            eviction_preference: SnapshotEvictionPreference::UndoThenRedo,
+        };
+        let mut engine = EditorEngine::with_snapshot_retention_policy(policy);
+        let buffer_id = engine
+            .open_buffer(WorkspaceId(1), FileId(992), "retention-budget.txt", "seed")
+            .expect("open buffer");
+        let mut post_edit_ids = Vec::new();
+        for _ in 0..8 {
+            engine
+                .apply_edit(
+                    buffer_id,
+                    TextEdit::insert(TextPosition::new(0, 0), "x"),
+                    TransactionSource::User,
+                    None,
+                    None,
+                )
+                .expect("edit under retention pressure");
+            post_edit_ids.push(
+                engine
+                    .current_snapshot(buffer_id)
+                    .expect("current snapshot")
+                    .snapshot_id,
+            );
+        }
+        let current_id = *post_edit_ids.last().expect("eight edits were applied");
+        let retained_ids = engine
+            .retained_snapshots
+            .iter()
+            .map(|entry| entry.descriptor.snapshot_id)
+            .collect::<Vec<_>>();
+        assert!(
+            retained_ids.len() <= 4,
+            "retention budget must bound the descriptor register: {retained_ids:?}"
+        );
+        assert!(
+            retained_ids.contains(&current_id),
+            "the current snapshot is never evictable: {retained_ids:?}"
+        );
+        assert!(
+            !retained_ids.contains(&post_edit_ids[0]),
+            "the oldest unpinned undo snapshot is evicted first: {retained_ids:?}"
+        );
+        assert!(
+            !engine.pinned_snapshot_ids.contains(&post_edit_ids[0]),
+            "evicting a descriptor also drops its retention pin"
+        );
+        assert!(
+            engine
+                .retained_snapshots
+                .iter()
+                .all(|entry| entry.buffer_id == buffer_id),
+            "eviction must not leave descriptors attributed to another buffer"
+        );
+        assert!(engine.undo_len(buffer_id).expect("undo len") <= 3);
+        assert_eq!(engine.text(buffer_id).expect("text"), "xxxxxxxxseed");
+    }
+
+    #[test]
+    fn current_and_pending_save_snapshots_remain_pinned_under_retention_pressure() {
+        // Lib-level companion to the integration test of the same name. The
+        // integration harness asserts `pinned_snapshot_count() >= 2`; this one
+        // asserts the *identity* of the two survivors and that the pin predicate
+        // `is_snapshot_pinned` is what keeps them, since the budget of 2 is
+        // already saturated by them alone.
+        let policy = SnapshotRetentionPolicy {
+            max_snapshot_count: 2,
+            max_estimated_bytes: usize::MAX,
+            eviction_preference: SnapshotEvictionPreference::UndoThenRedo,
+        };
+        let mut engine = EditorEngine::with_snapshot_retention_policy(policy);
+        let buffer_id = engine
+            .open_buffer(WorkspaceId(1), FileId(993), "pins-component.txt", "seed")
+            .expect("open buffer");
+        engine
+            .apply_edit(
+                buffer_id,
+                TextEdit::insert(TextPosition::new(0, 4), "!"),
+                TransactionSource::User,
+                None,
+                None,
+            )
+            .expect("edit before save");
+        let pending_snapshot_id = engine
+            .request_save(buffer_id, None)
+            .expect("request save")
+            .snapshot_id;
+        for _ in 0..8 {
+            engine
+                .apply_edit(
+                    buffer_id,
+                    TextEdit::insert(TextPosition::new(0, 0), "x"),
+                    TransactionSource::User,
+                    None,
+                    None,
+                )
+                .expect("edit under retention pressure");
+        }
+        let current_id = engine
+            .current_snapshot(buffer_id)
+            .expect("current snapshot")
+            .snapshot_id;
+        assert_ne!(
+            current_id, pending_snapshot_id,
+            "the pending save must be an older snapshot than the current one"
+        );
+        let retained_ids = engine
+            .retained_snapshots
+            .iter()
+            .map(|entry| entry.descriptor.snapshot_id)
+            .collect::<Vec<_>>();
+        assert!(
+            retained_ids.contains(&pending_snapshot_id),
+            "the pending save descriptor survives a budget of two: {retained_ids:?}"
+        );
+        assert!(
+            retained_ids.contains(&current_id),
+            "the current descriptor survives a budget of two: {retained_ids:?}"
+        );
+        assert!(
+            engine.is_snapshot_pinned(pending_snapshot_id),
+            "the pending save request is what pins the older descriptor"
+        );
+        assert!(
+            engine.is_snapshot_pinned(current_id),
+            "being a buffer's current snapshot is what pins the newest descriptor"
+        );
+        assert!(
+            engine
+                .pending_save_requests()
+                .iter()
+                .any(|request| request.snapshot_id == pending_snapshot_id),
+            "the save request is still pending after eight further edits"
         );
     }
 

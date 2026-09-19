@@ -32,6 +32,9 @@ members = [
     "crates/legion-retention",
     "crates/legion-sandbox",
     "crates/legion-cli",
+    # ADR-0056 acceptance instrument. A leaf with no internal dependencies and
+    # no product authority; nothing in the workspace may depend on it.
+    "crates/legion-input-driver",
 ]
 
 [workspace.package]

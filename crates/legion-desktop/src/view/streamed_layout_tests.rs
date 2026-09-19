@@ -841,7 +841,8 @@ fn terminal_owned_worker_error_settles_without_repaint_or_reread() {
     let identity = source.identity;
     let mut pool = StreamedLayoutCachePool::default();
     let mut settled = false;
-    for _ in 0..200 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
         pool.begin_frame(&[identity]);
         let mut result: Option<Result<StreamedPaintResult, StreamedLayoutError>> = None;
         with_ui(&context, |ui| {
@@ -873,7 +874,7 @@ fn terminal_owned_worker_error_settles_without_repaint_or_reread() {
             settled = true;
             break;
         }
-        std::thread::yield_now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
     assert!(settled, "terminal worker error did not settle");
     let reads = source.reads.load(Ordering::Relaxed);

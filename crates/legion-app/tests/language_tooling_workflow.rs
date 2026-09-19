@@ -1,14 +1,19 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use legion_app::language::{LspReadOutcome, LspWorkerRequest, LspWorkerResult};
 use legion_app::{AppCommandOutcome, AppComposition, AppSaveOutcome};
 use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
-    LanguageToolingOperationKind, PrincipalId, ProposalLifecycleState, ProposalPayloadKind,
-    ProtocolDiagnosticSeverity, RedactionHint, TextCoordinate, Utf16Position, Utf16Range,
-    WorkspaceTrustState,
+    LanguageId, LanguageServerId, LanguageToolingOperationKind, LanguageToolingStatusKind,
+    LspCapabilitySummary, LspResultStatus, LspServerBinaryProvenance, LspServerHealthRecord,
+    PrincipalId, ProposalLifecycleState, ProposalPayload, ProposalPayloadKind,
+    ProtocolDiagnosticSeverity, ProtocolTextRange, RedactionHint, TextCoordinate, Utf16Position,
+    Utf16Range, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
 use serde_json::json;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::time::Duration;
 use uuid::Uuid;
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -30,6 +35,74 @@ fn position(byte_offset: u64) -> TextCoordinate {
         byte_offset: Some(byte_offset),
         utf16_offset: Some(byte_offset),
     }
+}
+
+fn language_test_health() -> LspServerHealthRecord {
+    LspServerHealthRecord {
+        server_id: LanguageServerId(1),
+        language_id: LanguageId("rust".to_string()),
+        binary_provenance: LspServerBinaryProvenance::Configured,
+        binary_path_hash: None,
+        artifact_hash: None,
+        version: None,
+        init_status: LspResultStatus::Fresh,
+        capabilities: [
+            "completionProvider",
+            "documentFormattingProvider",
+            "renameProvider",
+            "codeActionProvider",
+        ]
+        .into_iter()
+        .map(|capability| LspCapabilitySummary {
+            capability: capability.to_string(),
+            supported: true,
+            dynamic_registration: false,
+            option_hash: None,
+            redaction_hints: Vec::new(),
+            schema_version: 1,
+        })
+        .collect(),
+        diagnostics_latency_ms: None,
+        restart_count: 0,
+        download_decision_id: None,
+        schema_version: 1,
+    }
+}
+
+fn drain_did_open(requests: &Receiver<LspWorkerRequest>) {
+    match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("didOpen request")
+    {
+        LspWorkerRequest::DidOpenDeferred { text_rx, .. } => {
+            assert!(
+                text_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("didOpen text")
+                    .is_some()
+            );
+        }
+        _ => panic!("expected deferred didOpen"),
+    }
+}
+
+fn send_lsp_result(
+    app: &mut AppComposition,
+    results: &SyncSender<LspWorkerResult>,
+    tag: legion_app::language::LspRequestTag,
+    result: serde_json::Value,
+) {
+    results
+        .send(LspWorkerResult::ReadResult {
+            outcome: Ok(LspReadOutcome {
+                result,
+                issued_snapshot: tag.snapshot_id,
+                status: LspResultStatus::Fresh,
+            }),
+            tag,
+        })
+        .expect("send LSP result");
+    app.drain_lsp_session();
 }
 
 #[test]
@@ -106,7 +179,7 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
     let target = root.join("main.rs");
     std::fs::write(
         &target,
-        "fn main() {\n    let value = 1;\n    println!(\"{value}\");\n}\n",
+        "fn  main() {\n    let value = 1;\n    println!(\"{value}\");\n}\n",
     )
     .expect("write source file");
 
@@ -117,8 +190,10 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
         PrincipalId("principal-language".to_string()),
     )
     .expect("open workspace");
+    let (requests, results) = app.set_lsp_request_harness_for_test(language_test_health());
     app.open_file(target.to_string_lossy())
         .expect("open source file");
+    drain_did_open(&requests);
     let buffer_id = app.active_buffer_id().expect("active buffer");
     let original_text = app
         .editor()
@@ -132,10 +207,27 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
             position: position(3),
         })
         .expect("completion dispatch");
-    let projection = match completion {
-        AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
+    let initial_projection = match completion {
+        AppCommandOutcome::LanguageToolingUpdated(projection) => *projection,
         other => panic!("expected language projection, got {other:?}"),
     };
+    assert_eq!(initial_projection.buffer_id, Some(buffer_id));
+    let completion_tag = match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("completion request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected completion request"),
+    };
+    send_lsp_result(
+        &mut app,
+        &results,
+        completion_tag,
+        json!({
+            "items": [{"label": "value", "detail": "i32", "kind": 6}]
+        }),
+    );
+    let mut projection = app.language_tooling_projection();
     assert_eq!(projection.buffer_id, Some(buffer_id));
     assert!(!projection.completions.is_empty());
     assert!(
@@ -148,10 +240,37 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
     let formatting = app
         .dispatch_ui_intent(CommandDispatchIntent::RequestFormattingProposal { buffer_id })
         .expect("formatting proposal dispatch");
-    let projection = match formatting {
-        AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
+    projection = match formatting {
+        AppCommandOutcome::LanguageToolingUpdated(projection) => *projection,
         other => panic!("expected language projection, got {other:?}"),
     };
+    let tag = match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("formatting request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected formatting request"),
+    };
+    assert!(
+        projection
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == LanguageToolingOperationKind::FormattingProposal)
+            .all(|operation| operation.proposal_id.is_none())
+    );
+    send_lsp_result(
+        &mut app,
+        &results,
+        tag,
+        json!([{
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 12 }
+            },
+            "newText": "fn main() {"
+        }]),
+    );
+    projection = app.language_tooling_projection();
     let proposal_id = projection
         .operations
         .iter()
@@ -172,6 +291,10 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
         app.editor().text(buffer_id).expect("active buffer text"),
         original_text
     );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("disk text"),
+        original_text
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }
@@ -180,7 +303,11 @@ fn language_tooling_workflow_refreshes_projection_without_ui_text_ownership() {
 fn language_tooling_workflow_creates_rename_preview_without_mutating_disk() {
     let root = create_root();
     let target = root.join("lib.rs");
-    std::fs::write(&target, "pub fn old_name() {}\n").expect("write source file");
+    std::fs::write(
+        &target,
+        "pub fn old_name() {}\nfn caller() { old_name(); }\n",
+    )
+    .expect("write source file");
 
     let mut app = AppComposition::new();
     app.open_workspace(
@@ -189,8 +316,10 @@ fn language_tooling_workflow_creates_rename_preview_without_mutating_disk() {
         PrincipalId("principal-language".to_string()),
     )
     .expect("open workspace");
+    let (requests, results) = app.set_lsp_request_harness_for_test(language_test_health());
     app.open_file(target.to_string_lossy())
         .expect("open source file");
+    drain_did_open(&requests);
     let buffer_id = app.active_buffer_id().expect("active buffer");
 
     let outcome = app
@@ -200,19 +329,72 @@ fn language_tooling_workflow_creates_rename_preview_without_mutating_disk() {
             new_name: "new_name".to_string(),
         })
         .expect("rename proposal dispatch");
-    let projection = match outcome {
-        AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
+    let mut projection = match outcome {
+        AppCommandOutcome::LanguageToolingUpdated(projection) => *projection,
         other => panic!("expected language projection, got {other:?}"),
+    };
+    let tag = match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("rename request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected rename request"),
     };
     assert!(
         projection
             .operations
             .iter()
-            .any(|operation| operation.proposal_id.is_some())
+            .filter(|operation| operation.kind == LanguageToolingOperationKind::RenameProposal)
+            .all(|operation| operation.proposal_id.is_none())
+    );
+    let uri = app
+        .document_uri_for_buffer_for_test(buffer_id)
+        .expect("document URI");
+    send_lsp_result(
+        &mut app,
+        &results,
+        tag,
+        json!({
+            "changes": {
+                uri: [
+                    {"range": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 15}}, "newText": "new_name"},
+                    {"range": {"start": {"line": 1, "character": 14}, "end": {"line": 1, "character": 22}}, "newText": "new_name"}
+                ]
+            }
+        }),
+    );
+    projection = app.language_tooling_projection();
+    let proposal_id = projection
+        .operations
+        .iter()
+        .find(|operation| {
+            operation.kind == LanguageToolingOperationKind::RenameProposal
+                && operation.proposal_id.is_some()
+        })
+        .and_then(|operation| operation.proposal_id)
+        .expect("rename proposal id");
+    let proposal = app
+        .workspace_proposal_for_id(proposal_id)
+        .expect("rename workspace proposal");
+    let ProposalPayload::WorkspaceEdit(payload) = proposal.payload else {
+        panic!("rename must produce workspace edit payload");
+    };
+    assert_eq!(payload.file_edits.len(), 1);
+    assert_eq!(payload.file_edits[0].edits.edits.len(), 2);
+    assert!(
+        payload.file_edits[0]
+            .edits
+            .edits
+            .iter()
+            .all(|edit| edit.replacement == "new_name")
+    );
+    assert_eq!(
+        app.editor().text(buffer_id).expect("editor text"),
+        "pub fn old_name() {}\nfn caller() { old_name(); }\n"
     );
     assert_eq!(
         std::fs::read_to_string(&target).expect("disk text"),
-        "pub fn old_name() {}\n"
+        "pub fn old_name() {}\nfn caller() { old_name(); }\n"
     );
 
     std::fs::remove_dir_all(&root).ok();
@@ -232,15 +414,17 @@ fn language_tooling_projects_diagnostic_quick_fixes_and_correlates_code_action_p
         PrincipalId("principal-language".to_string()),
     )
     .expect("open workspace");
+    let (requests, results) = app.set_lsp_request_harness_for_test(language_test_health());
     app.open_file(target.to_string_lossy())
         .expect("open source file");
+    drain_did_open(&requests);
     let buffer_id = app.active_buffer_id().expect("active buffer");
 
     let diagnostics = app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshOutline { buffer_id })
         .expect("diagnostic refresh dispatch");
     let projection = match diagnostics {
-        AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
+        AppCommandOutcome::LanguageToolingUpdated(projection) => *projection,
         other => panic!("expected language projection, got {other:?}"),
     };
     let quick_fix = projection
@@ -259,22 +443,91 @@ fn language_tooling_projects_diagnostic_quick_fixes_and_correlates_code_action_p
     assert!(quick_fix.proposal_id.is_none());
     let action_id = quick_fix.action_id.clone();
 
-    let code_action = app
+    let legacy = app
         .dispatch_ui_intent(CommandDispatchIntent::RequestCodeActionProposal {
             buffer_id,
             action_id: action_id.clone(),
         })
-        .expect("code action dispatch");
-    let projection = match code_action {
+        .expect("legacy fabricated quick-fix rejection is projected");
+    let legacy_projection = match legacy {
         AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
+        other => panic!("expected failed language projection, got {other:?}"),
+    };
+    assert!(legacy_projection.operations.iter().any(|operation| {
+        operation.kind == LanguageToolingOperationKind::CodeActionProposal
+            && operation.status == LanguageToolingStatusKind::Failed
+            && operation.proposal_id.is_none()
+    }));
+    assert!(
+        requests.try_recv().is_err(),
+        "legacy ID must not issue an LSP request"
+    );
+
+    let code_action = app
+        .dispatch_ui_intent(CommandDispatchIntent::RequestCodeActions {
+            buffer_id,
+            range: ProtocolTextRange {
+                start: position(0),
+                end: position(0),
+            },
+        })
+        .expect("code action request dispatch");
+    let mut projection = match code_action {
+        AppCommandOutcome::LanguageToolingUpdated(projection) => *projection,
         other => panic!("expected language projection, got {other:?}"),
     };
+    let tag = match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("code action request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected code action request"),
+    };
+    assert!(
+        projection
+            .operations
+            .iter()
+            .filter(|operation| operation.kind == LanguageToolingOperationKind::CodeActionProposal)
+            .all(|operation| operation.proposal_id.is_none())
+    );
+    let uri = app
+        .document_uri_for_buffer_for_test(buffer_id)
+        .expect("document URI");
+    send_lsp_result(
+        &mut app,
+        &results,
+        tag,
+        json!([{
+            "title": "Tighten validation",
+            "kind": "quickfix.diagnostic",
+            "diagnostics": [],
+            "edit": {"changes": {uri: [{
+                "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 4}},
+                "newText": "let _ = true;\n    "
+            }]}}
+        }]),
+    );
+    projection = app.language_tooling_projection();
+    let candidate = projection
+        .code_action_candidates
+        .first()
+        .cloned()
+        .expect("LSP code action candidate");
+    app.dispatch_ui_intent(CommandDispatchIntent::SelectCodeAction {
+        response_id: candidate.response_id,
+        action_id: candidate.action_id,
+    })
+    .expect("select LSP code action");
+    projection = app.language_tooling_projection();
     let proposal_id = projection
-        .quick_fixes
+        .operations
         .iter()
-        .find(|quick_fix| quick_fix.action_id == action_id)
-        .and_then(|quick_fix| quick_fix.proposal_id)
-        .expect("quick fix records created proposal id");
+        .find(|operation| {
+            operation.kind == LanguageToolingOperationKind::CodeActionProposal
+                && operation.proposal_id.is_some()
+        })
+        .and_then(|operation| operation.proposal_id)
+        .expect("selected code action creates proposal id");
     assert!(projection.operations.iter().any(|operation| {
         operation.kind == LanguageToolingOperationKind::CodeActionProposal
             && operation.proposal_id == Some(proposal_id)
@@ -290,6 +543,14 @@ fn language_tooling_projects_diagnostic_quick_fixes_and_correlates_code_action_p
         .expect("proposal ledger row");
     assert_eq!(proposal.payload_kind, ProposalPayloadKind::WorkspaceEdit);
     assert_eq!(proposal.lifecycle.state, ProposalLifecycleState::Previewed);
+    assert_eq!(
+        app.editor().text(buffer_id).expect("editor text"),
+        "fn main() {\n    // TODO: tighten validation\n}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("disk text"),
+        "fn main() {\n    // TODO: tighten validation\n}\n"
+    );
 
     std::fs::remove_dir_all(&root).ok();
 }

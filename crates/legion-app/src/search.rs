@@ -1396,6 +1396,7 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
             },
             file_edits,
+            change_annotations: Vec::new(),
             file_operations: Vec::new(),
             required_capability: CapabilityId(WORKSPACE_REPLACE_CAPABILITY.to_string()),
             diagnostics: Vec::new(),

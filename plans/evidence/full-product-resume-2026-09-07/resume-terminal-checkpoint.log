@@ -1,0 +1,14 @@
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.48s
+     Running tests\language_terminal_integration.rs (target\debug\deps\language_terminal_integration-37530cc97909d81b.exe)
+
+running 6 tests
+test language_read_only_actions_do_not_mutate ... ok
+test language_projection_switching_buffers_drops_stale_rows ... ok
+test language_cancellation_and_terminal_denial_are_projected_fail_closed ... ok
+test rust_analyzer_runnable_code_lens_launches_the_terminal_fixture ... ok
+test terminal_actions_cannot_mutate_editor_or_disk ... ok
+test unavailable_language_edit_actions_preserve_text_without_manufacturing_proposals ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+

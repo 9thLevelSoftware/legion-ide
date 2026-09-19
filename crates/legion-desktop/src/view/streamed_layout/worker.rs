@@ -426,6 +426,76 @@ fn publish_result(registry: &Mutex<WorkerRegistry>, state: &WorkerState, error: 
 mod tests {
     use super::*;
     use egui::{Context, RawInput};
+    use std::time::Instant;
+
+    /// Ceiling for every condition wait in this module.
+    ///
+    /// These tests observe a real worker thread, so anything they need from it
+    /// must be waited for as a condition rather than assumed to have happened
+    /// after a fixed sleep: a loaded shared CI runner can leave that thread
+    /// unscheduled for orders of magnitude longer than any constant a developer
+    /// host would pick. The budget is deliberately far larger than the work
+    /// involved -- a passing run leaves it almost entirely unused -- and every
+    /// expiry below is a hard failure that names what was still true.
+    const WORKER_WAIT_BUDGET: Duration = Duration::from_secs(30);
+
+    /// Polls `condition` until it holds or [`WORKER_WAIT_BUDGET`] expires.
+    ///
+    /// Returns whether the condition held; the caller must assert on that, so a
+    /// timeout can never be mistaken for success.
+    #[must_use]
+    fn wait_for(mut condition: impl FnMut() -> bool) -> bool {
+        let deadline = Instant::now() + WORKER_WAIT_BUDGET;
+        loop {
+            if condition() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Submits `make_job()`, retrying only while the bounded command mailbox is
+    /// still full, and panics if it is still full after [`WORKER_WAIT_BUDGET`].
+    ///
+    /// [`StreamedWorkerScheduler::submit`] enforces two independent bounds: the
+    /// registry admission count against `MAX_ADMITTED_JOBS`, refused as
+    /// [`StreamedWorkerSubmitError::AdmissionFull`], and the separate
+    /// `MAX_ADMITTED_JOBS`-deep command channel, refused as
+    /// [`StreamedWorkerSubmitError::MailboxFull`].
+    /// [`StreamedWorkerHandle::cancel`] frees the first immediately but not the
+    /// second: its cancel command is a best-effort `try_send`, and the submit
+    /// commands already queued stay in the channel until the worker thread
+    /// consumes them. A caller can therefore hold no admitted jobs at all and
+    /// still be refused with `MailboxFull`. That is intended backpressure -- the
+    /// production caller in the parent module drops both refusals alike and
+    /// retries on a later frame -- so a test that needs a submission to land
+    /// waits for the mailbox to drain instead of assuming a fixed sleep drained
+    /// it. Every other refusal is a real failure and panics immediately.
+    fn submit_when_mailbox_accepts(
+        scheduler: &StreamedWorkerScheduler,
+        mut make_job: impl FnMut() -> StreamedWorkerJob,
+        context: &str,
+    ) -> StreamedWorkerHandle {
+        let deadline = Instant::now() + WORKER_WAIT_BUDGET;
+        let mut refusals = 0_u64;
+        loop {
+            match scheduler.submit(make_job()) {
+                Ok(handle) => return handle,
+                Err(StreamedWorkerSubmitError::MailboxFull) if Instant::now() < deadline => {
+                    refusals += 1;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!(
+                    "{context}: scheduler refused submission with {error:?} after {refusals} \
+                     mailbox refusals within {:?}",
+                    WORKER_WAIT_BUDGET
+                ),
+            }
+        }
+    }
 
     struct WorkerSource {
         identity: DesktopSourceIdentity,
@@ -640,8 +710,19 @@ mod tests {
         for handle in &handles {
             handle.cancel();
         }
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(scheduler.drain_results().is_empty());
+        // `cancel` removes the registry slot outright, taking with it any result
+        // the worker had already published into it, so this holds the instant
+        // the cancels return and needs no barrier. The stronger property -- that
+        // a cancelled job publishes nothing *later*, once the worker finally
+        // works through the commands that were queued behind the cancels -- is
+        // asserted continuously inside the churn loop below, which drains on
+        // every poll and requires every result it sees to belong to the one live
+        // job. That window covers the whole backlog drain, where the previous
+        // fixed 5ms sleep covered only 5ms of it.
+        assert!(
+            scheduler.drain_results().is_empty(),
+            "cancelling every admitted job must leave no drainable result"
+        );
 
         let live_source: Arc<dyn DesktopLineSource + Send + Sync> = Arc::new(WorkerSource {
             identity,
@@ -649,24 +730,47 @@ mod tests {
             revoked: Arc::new(AtomicBool::new(false)),
         });
         for generation in 0..128_u64 {
-            let handle = scheduler
-                .submit(job(
-                    Arc::clone(&live_source),
-                    snapshot.clone(),
-                    key.clone(),
-                    20_000 + generation,
-                ))
-                .expect("cancellation churn slot must be reusable");
+            // Admission is free here -- every earlier job was cancelled -- but
+            // the bounded command mailbox still holds the 64 submits and the
+            // cancels queued behind them, and only the worker thread draining it
+            // frees a slot. Wait for that observable condition instead of
+            // assuming a sleep drained it.
+            let handle = submit_when_mailbox_accepts(
+                &scheduler,
+                || {
+                    job(
+                        Arc::clone(&live_source),
+                        snapshot.clone(),
+                        key.clone(),
+                        20_000 + generation,
+                    )
+                },
+                "cancellation churn slot must be reusable",
+            );
+            // The submit above now lands at the first moment the mailbox has a
+            // free slot, which can be while the worker is still chewing through
+            // the commands queued ahead of it, so the wait for this job's
+            // terminal result is sized for a loaded runner rather than for the
+            // one second the previous fixed iteration count allowed.
             let mut terminal = None;
-            for _ in 0..1_000 {
-                if let Some(result) = scheduler.drain_results().into_iter().find(|result| {
+            let published = wait_for(|| {
+                let drained = scheduler.drain_results();
+                assert!(
+                    drained.iter().all(|result| result.slot == handle.slot()),
+                    "cancelled jobs must publish nothing: expected only slot {}, drained {:?}",
+                    handle.slot(),
+                    drained.iter().map(|result| result.slot).collect::<Vec<_>>()
+                );
+                terminal = drained.into_iter().find(|result| {
                     result.slot == handle.slot() && (result.eof || result.error.is_some())
-                }) {
-                    terminal = Some(result);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
+                });
+                terminal.is_some()
+            });
+            assert!(
+                published,
+                "every churn generation must publish a terminal result within {:?}",
+                WORKER_WAIT_BUDGET
+            );
             let terminal = terminal.expect("every churn generation must publish a terminal result");
             assert!(terminal.eof, "churn generation must reach EOF");
             assert!(
@@ -773,9 +877,23 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(error_seen);
-        std::thread::sleep(Duration::from_millis(5));
-        assert!(scheduler.drain_results().is_empty());
-        assert!(source_weak.upgrade().is_none());
+        // The worker drops the failed `WorkerState` -- and with it the last
+        // strong reference to the source -- immediately after publishing the
+        // terminal result, but "immediately" is the worker thread's next few
+        // instructions, and a loaded runner may not schedule them inside any
+        // fixed sleep. Wait for the release itself; a failed job is never
+        // re-queued, so nothing further can be published while we wait and the
+        // drain assertion below keeps its meaning.
+        let released = wait_for(|| source_weak.upgrade().is_none());
+        assert!(
+            scheduler.drain_results().is_empty(),
+            "a terminal worker result must be published exactly once"
+        );
+        assert!(
+            released && source_weak.upgrade().is_none(),
+            "worker must release the source after its terminal result within {:?}",
+            WORKER_WAIT_BUDGET
+        );
         handle.cancel();
     }
 }

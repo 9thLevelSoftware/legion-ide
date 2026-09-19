@@ -1,0 +1,21 @@
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+   Compiling legion-desktop v0.1.0 (D:\legion-ide-completion\crates\legion-desktop)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.89s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 1 test
+test view::proposal_cards::proposal_card_rules::rendered_annotation_review_exposes_metadata_without_actions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 242 filtered out; finished in 0.02s
+

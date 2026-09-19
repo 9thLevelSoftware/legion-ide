@@ -1,0 +1,1594 @@
+CMD: cargo run -p xtask -- verify-completion-register --root .
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running `target\debug\xtask.exe verify-completion-register --root .`
+implementation status counts:
+  absent: 43
+  implemented: 143
+  partial: 233
+acceptance status counts:
+  unassessed: 419
+verify-completion-register found 1579 structural issue(s):
+- COMP-BTD-001 required row has empty scenario/configuration coverage
+- COMP-BTD-002 required row has empty scenario/configuration coverage
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-002 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 required row has empty scenario/configuration coverage
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-003 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 required row has empty scenario/configuration coverage
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-004 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 required row has empty scenario/configuration coverage
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-005 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 required row has empty scenario/configuration coverage
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-006 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 required row has empty scenario/configuration coverage
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-007 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 required row has empty scenario/configuration coverage
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-BTD-008 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-BTD-009 required row has empty scenario/configuration coverage
+- COMP-CAN-001 required row has empty scenario/configuration coverage
+- COMP-CAN-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-CAN-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-CAN-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-CAN-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-CAN-002 required row has empty scenario/configuration coverage
+- COMP-CAN-003 required row has empty scenario/configuration coverage
+- COMP-CAN-004 required row has empty scenario/configuration coverage
+- COMP-CAN-005 required row has empty scenario/configuration coverage
+- COMP-CAN-006 required row has empty scenario/configuration coverage
+- COMP-CAN-007 required row has empty scenario/configuration coverage
+- COMP-CAN-008 required row has empty scenario/configuration coverage
+- COMP-CAN-009 required row has empty scenario/configuration coverage
+- COMP-CAN-010 required row has empty scenario/configuration coverage
+- COMP-COLLAB-001 required row has empty scenario/configuration coverage
+- COMP-COLLAB-002 required row has empty scenario/configuration coverage
+- COMP-COLLAB-003 required row has empty scenario/configuration coverage
+- COMP-COLLAB-004 required row has empty scenario/configuration coverage
+- COMP-COLLAB-005 required row has empty scenario/configuration coverage
+- COMP-COLLAB-006 required row has empty scenario/configuration coverage
+- COMP-CTX-001 required row has empty scenario/configuration coverage
+- COMP-CTX-002 required row has empty scenario/configuration coverage
+- COMP-CTX-003 required row has empty scenario/configuration coverage
+- COMP-CTX-004 required row has empty scenario/configuration coverage
+- COMP-CTX-005 required row has empty scenario/configuration coverage
+- COMP-CTX-006 required row has empty scenario/configuration coverage
+- COMP-CTX-007 required row has empty scenario/configuration coverage
+- COMP-CTX-008 required row has empty scenario/configuration coverage
+- COMP-CTX-009 required row has empty scenario/configuration coverage
+- COMP-CTX-010 required row has empty scenario/configuration coverage
+- COMP-DIST-001 required row has empty scenario/configuration coverage
+- COMP-DIST-002 required row has empty scenario/configuration coverage
+- COMP-DIST-003 required row has empty scenario/configuration coverage
+- COMP-DIST-003 scenario SC-RELEASE-CLEAN-INSTALL-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-003 scenario SC-RELEASE-CLEAN-INSTALL-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-003 scenario SC-RELEASE-CLEAN-INSTALL-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-004 required row has empty scenario/configuration coverage
+- COMP-DIST-004 scenario SC-MANUAL-OFFLINE-30M-LINUX configuration CFG-LINUX-UBUNTU-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-DIST-004 scenario SC-MANUAL-OFFLINE-30M-MAC configuration CFG-MAC15-ARM64-MANUAL-OFFLINE not linked by requirement
+- COMP-DIST-004 scenario SC-MANUAL-OFFLINE-30M-WIN configuration CFG-WIN11-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-DIST-005 required row has empty scenario/configuration coverage
+- COMP-DIST-005 scenario SC-RELEASE-UPDATE-ROLLBACK-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-005 scenario SC-RELEASE-UPDATE-ROLLBACK-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-005 scenario SC-RELEASE-UPDATE-ROLLBACK-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-006 required row has empty scenario/configuration coverage
+- COMP-DIST-006 scenario SC-RELEASE-UPDATE-ROLLBACK-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-006 scenario SC-RELEASE-UPDATE-ROLLBACK-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-006 scenario SC-RELEASE-UPDATE-ROLLBACK-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-007 required row has empty scenario/configuration coverage
+- COMP-DIST-007 scenario SC-RELEASE-CLEAN-INSTALL-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-007 scenario SC-RELEASE-CLEAN-INSTALL-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-007 scenario SC-RELEASE-CLEAN-INSTALL-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-008 required row has empty scenario/configuration coverage
+- COMP-DIST-008 scenario SC-RELEASE-CRASH-PRIVACY-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-008 scenario SC-RELEASE-CRASH-PRIVACY-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-008 scenario SC-RELEASE-CRASH-PRIVACY-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-DIST-009 required row has empty scenario/configuration coverage
+- COMP-DIST-010 product requirement cannot be owned by S6
+- COMP-DIST-010 required row has empty scenario/configuration coverage
+- COMP-EDIT-001 required row has empty scenario/configuration coverage
+- COMP-EDIT-002 required row has empty scenario/configuration coverage
+- COMP-EDIT-003 required row has empty scenario/configuration coverage
+- COMP-EDIT-004 required row has empty scenario/configuration coverage
+- COMP-EDIT-005 required row has empty scenario/configuration coverage
+- COMP-EDIT-006 required row has empty scenario/configuration coverage
+- COMP-EDIT-006 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-006 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-006 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-006 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-007 required row has empty scenario/configuration coverage
+- COMP-EDIT-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-008 required row has empty scenario/configuration coverage
+- COMP-EDIT-008 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-008 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-008 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-008 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-009 required row has empty scenario/configuration coverage
+- COMP-EDIT-010 required row has empty scenario/configuration coverage
+- COMP-EDIT-010 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-010 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-010 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-010 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-EDIT-011 required row has empty scenario/configuration coverage
+- COMP-EDIT-012 required row has empty scenario/configuration coverage
+- COMP-EDIT-013 required row has empty scenario/configuration coverage
+- COMP-ENT-001 required row has empty scenario/configuration coverage
+- COMP-ENT-002 required row has empty scenario/configuration coverage
+- COMP-ENT-003 required row has empty scenario/configuration coverage
+- COMP-ENT-004 required row has empty scenario/configuration coverage
+- COMP-ENT-005 required row has empty scenario/configuration coverage
+- COMP-ENT-006 required row has empty scenario/configuration coverage
+- COMP-GAP-001 required row has empty scenario/configuration coverage
+- COMP-LANG-001 required row has empty scenario/configuration coverage
+- COMP-LANG-002 required row has empty scenario/configuration coverage
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-002 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 required row has empty scenario/configuration coverage
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-003 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 required row has empty scenario/configuration coverage
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-004 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 required row has empty scenario/configuration coverage
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-005 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 required row has empty scenario/configuration coverage
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-006 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 required row has empty scenario/configuration coverage
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-007 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-008 required row has empty scenario/configuration coverage
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-LSP-LIFECYCLE-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-008 scenario SC-LANG-REFACTOR-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-009 required row has empty scenario/configuration coverage
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-LSP-LIFECYCLE-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-009 scenario SC-LANG-REFACTOR-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-010 required row has empty scenario/configuration coverage
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-LSP-LIFECYCLE-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-010 scenario SC-LANG-REFACTOR-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-011 required row has empty scenario/configuration coverage
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-011 scenario SC-LANG-BUILD-TEST-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 required row has empty scenario/configuration coverage
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-LANG-012 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-LANG-013 required row has empty scenario/configuration coverage
+- COMP-NAV-001 required row has empty scenario/configuration coverage
+- COMP-NAV-002 required row has empty scenario/configuration coverage
+- COMP-NAV-002 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-002 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-002 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-002 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-003 required row has empty scenario/configuration coverage
+- COMP-NAV-004 required row has empty scenario/configuration coverage
+- COMP-NAV-005 required row has empty scenario/configuration coverage
+- COMP-NAV-006 required row has empty scenario/configuration coverage
+- COMP-NAV-007 required row has empty scenario/configuration coverage
+- COMP-NAV-007 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-007 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-007 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-007 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-008 required row has empty scenario/configuration coverage
+- COMP-NAV-009 required row has empty scenario/configuration coverage
+- COMP-NAV-009 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-009 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-009 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-009 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-010 required row has empty scenario/configuration coverage
+- COMP-NAV-010 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-010 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-010 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-010 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-011 required row has empty scenario/configuration coverage
+- COMP-NAV-011 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-011 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-011 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-011 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-012 required row has empty scenario/configuration coverage
+- COMP-NAV-012 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-012 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-012 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-012 scenario SC-MANUAL-REFACTOR-SEARCH-REVIEW configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-NAV-013 required row has empty scenario/configuration coverage
+- COMP-P0-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P0-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P0-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P0-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P0-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P0-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P0-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P0-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P0-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P0-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P0-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T4-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T5-1 required row has empty scenario/configuration coverage
+- COMP-P0-F4-T6-1 required row has empty scenario/configuration coverage
+- COMP-P0-F5-T1-1 required row has empty scenario/configuration coverage
+- COMP-P0-F5-T2-1 required row has empty scenario/configuration coverage
+- COMP-P0-F5-T3-1 required row has empty scenario/configuration coverage
+- COMP-P1-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P1-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P1-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P1-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P1-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P1-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P1-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P1-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T2-1-02 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P1-F3-T5-1 required row has empty scenario/configuration coverage
+- COMP-P1-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P1-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P1-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P1-F4-T4-1 required row has empty scenario/configuration coverage
+- COMP-P1-F4-T5-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T5-1 required row has empty scenario/configuration coverage
+- COMP-P2-F1-T6-1 required row has empty scenario/configuration coverage
+- COMP-P2-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P2-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P2-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P2-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P2-F2-T5-1 required row has empty scenario/configuration coverage
+- COMP-P2-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P2-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P2-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P2-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P2-F3-T5-1 required row has empty scenario/configuration coverage
+- COMP-P2-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P2-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P2-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P2-F4-T4-1 required row has empty scenario/configuration coverage
+- COMP-P2-F5-T1-1 required row has empty scenario/configuration coverage
+- COMP-P2-F5-T2-1 required row has empty scenario/configuration coverage
+- COMP-P2-F5-T3-1 required row has empty scenario/configuration coverage
+- COMP-P2-F5-T4-1 required row has empty scenario/configuration coverage
+- COMP-P3-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P3-F1-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P3-F1-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P3-F1-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P3-F1-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P3-F2-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P3-F2-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P3-F2-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P3-F2-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P3-F3-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P3-F3-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P3-F3-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P3-F3-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P3-F4-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P3-F4-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P3-F4-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P3-F4-T4-1 required row has empty scenario/configuration coverage
+- COMP-P3-F4-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P4-F1-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P4-F1-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P4-F1-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P4-F1-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P4-F2-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P4-F2-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P4-F2-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P4-F2-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P4-F3-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P4-F3-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P4-F3-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P4-F3-T4-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P4-F4-T1-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P4-F4-T2-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P4-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P4-F4-T3-1.source_refs path `plans/evidence/production/M9/` is not a file
+- COMP-P5-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P5-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P5-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P5-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P5-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P5-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P5-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P5-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P5-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P5-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P5-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P5-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P5-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P5-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P5-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P6-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P6-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P6-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P6-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P6-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P6-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P6-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P6-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P6-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P6-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P6-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P6-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P6-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P6-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P6-F5-T1-1 required row has empty scenario/configuration coverage
+- COMP-P6-F5-T1-1-02 required row has empty scenario/configuration coverage
+- COMP-P7-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P7-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P7-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P7-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P7-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P7-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P7-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P7-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P8-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P8-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P8-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P8-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P8-F1-T5-1 required row has empty scenario/configuration coverage
+- COMP-P8-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P8-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P8-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P8-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P8-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P8-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P8-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P8-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P8-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-P8-F5-T1-1 required row has empty scenario/configuration coverage
+- COMP-P8-F5-T2-1 required row has empty scenario/configuration coverage
+- COMP-P8-F5-T3-1 required row has empty scenario/configuration coverage
+- COMP-P9-F1-T1-1 required row has empty scenario/configuration coverage
+- COMP-P9-F1-T2-1 required row has empty scenario/configuration coverage
+- COMP-P9-F1-T3-1 required row has empty scenario/configuration coverage
+- COMP-P9-F1-T4-1 required row has empty scenario/configuration coverage
+- COMP-P9-F2-T1-1 required row has empty scenario/configuration coverage
+- COMP-P9-F2-T2-1 required row has empty scenario/configuration coverage
+- COMP-P9-F2-T3-1 required row has empty scenario/configuration coverage
+- COMP-P9-F2-T4-1 required row has empty scenario/configuration coverage
+- COMP-P9-F3-T1-1 required row has empty scenario/configuration coverage
+- COMP-P9-F3-T2-1 required row has empty scenario/configuration coverage
+- COMP-P9-F3-T3-1 required row has empty scenario/configuration coverage
+- COMP-P9-F3-T4-1 required row has empty scenario/configuration coverage
+- COMP-P9-F4-T1-1 required row has empty scenario/configuration coverage
+- COMP-P9-F4-T2-1 required row has empty scenario/configuration coverage
+- COMP-P9-F4-T3-1 required row has empty scenario/configuration coverage
+- COMP-PLAT-001 required row has empty scenario/configuration coverage
+- COMP-PLAT-002 required row has empty scenario/configuration coverage
+- COMP-PLAT-002 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-002 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-002 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-002 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-003 required row has empty scenario/configuration coverage
+- COMP-PLAT-003 scenario SC-PLATFORM-A11Y-LINUX configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-003 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-003 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-003 scenario SC-PLATFORM-A11Y-WIN configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-004 required row has empty scenario/configuration coverage
+- COMP-PLAT-005 required row has empty scenario/configuration coverage
+- COMP-PLAT-006 required row has empty scenario/configuration coverage
+- COMP-PLAT-007 required row has empty scenario/configuration coverage
+- COMP-PLAT-008 required row has empty scenario/configuration coverage
+- COMP-PLAT-009 required row has empty scenario/configuration coverage
+- COMP-PLAT-009 scenario SC-PLATFORM-A11Y-LINUX configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-009 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-009 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PLAT-009 scenario SC-PLATFORM-A11Y-WIN configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-001 required row has empty scenario/configuration coverage
+- COMP-PRES-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-002 required row has empty scenario/configuration coverage
+- COMP-PRES-002 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-002 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-002 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-002 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 required row has empty scenario/configuration coverage
+- COMP-PRES-003 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-004 required row has empty scenario/configuration coverage
+- COMP-PRES-004 scenario SC-RELEASE-CRASH-PRIVACY-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-PRES-004 scenario SC-RELEASE-CRASH-PRIVACY-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-PRES-004 scenario SC-RELEASE-CRASH-PRIVACY-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-PRES-005 required row has empty scenario/configuration coverage
+- COMP-PRES-006 required row has empty scenario/configuration coverage
+- COMP-PRES-006 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-006 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-006 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-006 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-007 required row has empty scenario/configuration coverage
+- COMP-PRES-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-007 scenario SC-MANUAL-EDIT-INPUT-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-008 required row has empty scenario/configuration coverage
+- COMP-PRES-008 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-008 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-008 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-008 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-009 required row has empty scenario/configuration coverage
+- COMP-PRES-010 required row has empty scenario/configuration coverage
+- COMP-PRES-011 required row has empty scenario/configuration coverage
+- COMP-PRES-012 required row has empty scenario/configuration coverage
+- COMP-PRES-012 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-012 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-012 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-012 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-PRES-013 required row has empty scenario/configuration coverage
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-JS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-JS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-JS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-JS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-JS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-APP not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-LINUX-UBUNTU-X64-PY-PKG not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-APP not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-ARM64-PY-PKG not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-APP not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-MAC15-X64-PY-PKG not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-APP not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-PY configuration CFG-WIN11-X64-PY-PKG not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-BIN not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-LIB not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-BIN not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-LIB not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-ARM64-RUST-WORKSPACE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-BIN not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-LIB not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-MAC15-X64-RUST-WORKSPACE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-BIN not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-LIB not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-RUST configuration CFG-WIN11-X64-RUST-WORKSPACE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-LINUX-UBUNTU-X64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-ARM64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-MAC15-X64-TSJS-NODE not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TS-BROWSER not linked by requirement
+- COMP-PRES-013 scenario SC-LANG-DEBUG-TS configuration CFG-WIN11-X64-TSJS-NODE not linked by requirement
+- COMP-PROV-001 required row has empty scenario/configuration coverage
+- COMP-PROV-002 required row has empty scenario/configuration coverage
+- COMP-PROV-002.legacy_ids unknown Kanban task `COMP-P4-F1-T2-1`
+- COMP-PROV-003 required row has empty scenario/configuration coverage
+- COMP-PROV-003.legacy_ids unknown Kanban task `COMP-P4-F1-T3-1`
+- COMP-PROV-004 required row has empty scenario/configuration coverage
+- COMP-PROV-005 required row has empty scenario/configuration coverage
+- COMP-PROV-005.legacy_ids unknown Kanban task `COMP-P4-F1-T1-1`
+- COMP-PROV-006 required row has empty scenario/configuration coverage
+- COMP-PROV-007 required row has empty scenario/configuration coverage
+- COMP-PROV-008 required row has empty scenario/configuration coverage
+- COMP-PROV-009 required row has empty scenario/configuration coverage
+- COMP-PROV-010 required row has empty scenario/configuration coverage
+- COMP-PROV-011 required row has empty scenario/configuration coverage
+- COMP-REMOTE-001 required row has empty scenario/configuration coverage
+- COMP-REMOTE-002 required row has empty scenario/configuration coverage
+- COMP-REMOTE-003 required row has empty scenario/configuration coverage
+- COMP-REMOTE-004 required row has empty scenario/configuration coverage
+- COMP-REMOTE-005 required row has empty scenario/configuration coverage
+- COMP-REMOTE-006 required row has empty scenario/configuration coverage
+- COMP-REMOTE-007 required row has empty scenario/configuration coverage
+- COMP-REMOTE-008 required row has empty scenario/configuration coverage
+- COMP-REMOTE-009 required row has empty scenario/configuration coverage
+- COMP-REMOTE-010 required row has empty scenario/configuration coverage
+- COMP-REMOTE-011 required row has empty scenario/configuration coverage
+- COMP-REMOTE-012 required row has empty scenario/configuration coverage
+- COMP-REMOTE-013 required row has empty scenario/configuration coverage
+- COMP-REMOTE-014 required row has empty scenario/configuration coverage
+- COMP-REMOTE-015 required row has empty scenario/configuration coverage
+- COMP-REMOTE-016 required row has empty scenario/configuration coverage
+- COMP-REMOTE-017 required row has empty scenario/configuration coverage
+- COMP-REMOTE-018 required row has empty scenario/configuration coverage
+- COMP-SCM-001 required row has empty scenario/configuration coverage
+- COMP-SCM-002 required row has empty scenario/configuration coverage
+- COMP-SCM-002 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-002 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-002 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-002 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-003 required row has empty scenario/configuration coverage
+- COMP-SCM-003 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-003 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-003 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-003 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-004 required row has empty scenario/configuration coverage
+- COMP-SCM-004 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-004 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-004 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-004 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-005 required row has empty scenario/configuration coverage
+- COMP-SCM-005 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-005 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-005 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-005 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-006 required row has empty scenario/configuration coverage
+- COMP-SCM-007 required row has empty scenario/configuration coverage
+- COMP-SCM-008 required row has empty scenario/configuration coverage
+- COMP-SCM-009 required row has empty scenario/configuration coverage
+- COMP-SCM-009 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-009 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-009 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-009 scenario SC-MANUAL-GIT-HISTORY-RECOVERY configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCM-010 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-04.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-05.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-06 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-06.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-07 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-07.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-08 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-08.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-09 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-09.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-10 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-10.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-11 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-11.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-12-13 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-12-13.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-13-01 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-02 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-02.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-13-03 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-03.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-13-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-06 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-06.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-13-07 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-08 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-08.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-13-09 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-10 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-11 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-13-11.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-14-01 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-02 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-03 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-06 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-07 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-08 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-09 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-10 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-11 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-14-12 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-15-01 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-15-02 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-15-03 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-15-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-15-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-01 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-02 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-02.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-03 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-03.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-04.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-05.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-06 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-06.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-07 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-08 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-08.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-09 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-09.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-10 required row has empty scenario/configuration coverage
+- COMP-SCOPE-FAMILY-17-10.protected_product_ids must be empty for product
+- COMP-SCOPE-FAMILY-17-11 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-01 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-02 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-02 scenario SC-RELEASE-CLEAN-INSTALL-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-02 scenario SC-RELEASE-CLEAN-INSTALL-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-02 scenario SC-RELEASE-CLEAN-INSTALL-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-03 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-03 scenario SC-RELEASE-UPDATE-ROLLBACK-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-03 scenario SC-RELEASE-UPDATE-ROLLBACK-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-03 scenario SC-RELEASE-UPDATE-ROLLBACK-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-04 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-04 scenario SC-RELEASE-CRASH-PRIVACY-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-04 scenario SC-RELEASE-CRASH-PRIVACY-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-04 scenario SC-RELEASE-CRASH-PRIVACY-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-05 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-05 scenario SC-PLATFORM-A11Y-LINUX configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCOPE-GAP-05 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCOPE-GAP-05 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCOPE-GAP-05 scenario SC-PLATFORM-A11Y-WIN configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-SCOPE-GAP-06 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-06 scenario SC-MANUAL-OFFLINE-30M-LINUX configuration CFG-LINUX-UBUNTU-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-SCOPE-GAP-06 scenario SC-MANUAL-OFFLINE-30M-MAC configuration CFG-MAC15-ARM64-MANUAL-OFFLINE not linked by requirement
+- COMP-SCOPE-GAP-06 scenario SC-MANUAL-OFFLINE-30M-WIN configuration CFG-WIN11-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-SCOPE-GAP-07 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-08 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-09 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-10 required row has empty scenario/configuration coverage
+- COMP-SCOPE-GAP-10 scenario SC-RELEASE-CRASH-PRIVACY-LINUX configuration CFG-LINUX-UBUNTU-X64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-10 scenario SC-RELEASE-CRASH-PRIVACY-MAC configuration CFG-MAC15-ARM64-STABLE-SIGNED not linked by requirement
+- COMP-SCOPE-GAP-10 scenario SC-RELEASE-CRASH-PRIVACY-WIN configuration CFG-WIN11-X64-STABLE-SIGNED not linked by requirement
+- COMP-TERM-001 required row has empty scenario/configuration coverage
+- COMP-TERM-001 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-001 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-001 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-001 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-002 required row has empty scenario/configuration coverage
+- COMP-TERM-004 required row has empty scenario/configuration coverage
+- COMP-TERM-005 required row has empty scenario/configuration coverage
+- COMP-TERM-006 required row has empty scenario/configuration coverage
+- COMP-TERM-006 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-006 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-006 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-006 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-007 required row has empty scenario/configuration coverage
+- COMP-TERM-008 required row has empty scenario/configuration coverage
+- COMP-TERM-008 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-008 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-008 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-008 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-009 required row has empty scenario/configuration coverage
+- COMP-TERM-010 required row has empty scenario/configuration coverage
+- COMP-TERM-010 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-010 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-010 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-010 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-011 required row has empty scenario/configuration coverage
+- COMP-TERM-012 required row has empty scenario/configuration coverage
+- COMP-TERM-013 required row has empty scenario/configuration coverage
+- COMP-TERM-014 required row has empty scenario/configuration coverage
+- COMP-TERM-015 required row has empty scenario/configuration coverage
+- COMP-TERM-015 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-015 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-015 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-015 scenario SC-MANUAL-TERMINAL-TUI configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-TERM-016 required row has empty scenario/configuration coverage
+- COMP-TRAIN-001 required row has empty scenario/configuration coverage
+- COMP-TRAIN-002 required row has empty scenario/configuration coverage
+- COMP-TRAIN-003 required row has empty scenario/configuration coverage
+- COMP-TRAIN-004 required row has empty scenario/configuration coverage
+- COMP-TRAIN-005 required row has empty scenario/configuration coverage
+- COMP-TRAIN-006 required row has empty scenario/configuration coverage
+- COMP-TRAIN-006 scenario SC-MANUAL-OFFLINE-30M-LINUX configuration CFG-LINUX-UBUNTU-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-TRAIN-006 scenario SC-MANUAL-OFFLINE-30M-MAC configuration CFG-MAC15-ARM64-MANUAL-OFFLINE not linked by requirement
+- COMP-TRAIN-006 scenario SC-MANUAL-OFFLINE-30M-WIN configuration CFG-WIN11-X64-MANUAL-OFFLINE not linked by requirement
+- COMP-TRAIN-007 required row has empty scenario/configuration coverage
+- COMP-TRAIN-008 required row has empty scenario/configuration coverage
+- COMP-TRAIN-009 required row has empty scenario/configuration coverage
+- COMP-TRAIN-010 required row has empty scenario/configuration coverage
+- COMP-TRUST-001 required row has empty scenario/configuration coverage
+- COMP-TRUST-002 required row has empty scenario/configuration coverage
+- COMP-TRUST-002.protected_product_ids must be empty for product
+- COMP-TRUST-003 required row has empty scenario/configuration coverage
+- COMP-TRUST-003.protected_product_ids must be empty for product
+- COMP-TRUST-004 required row has empty scenario/configuration coverage
+- COMP-TRUST-004.protected_product_ids must be empty for product
+- COMP-TRUST-004.protected_product_ids target `COMP-P9-F2-T2-1` is not a product requirement
+- COMP-TRUST-005 required row has empty scenario/configuration coverage
+- COMP-TRUST-005.protected_product_ids must be empty for product
+- COMP-TRUST-006 required row has empty scenario/configuration coverage
+- COMP-TRUST-006.protected_product_ids must be empty for product
+- COMP-TRUST-006.source_refs path `crates/legion-app/tests` is not a file
+- COMP-TRUST-006.source_refs path `crates/legion-desktop/tests` is not a file
+- COMP-WB-001 required row has empty scenario/configuration coverage
+- COMP-WB-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-001 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-002 required row has empty scenario/configuration coverage
+- COMP-WB-002 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-002 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-002 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-002 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-003 required row has empty scenario/configuration coverage
+- COMP-WB-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-003 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-004 required row has empty scenario/configuration coverage
+- COMP-WB-004 scenario SC-PLATFORM-A11Y-LINUX configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-004 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-004 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-004 scenario SC-PLATFORM-A11Y-WIN configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-005 required row has empty scenario/configuration coverage
+- COMP-WB-005 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-005 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-005 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-005 scenario SC-MANUAL-WORKBENCH-RESTORE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-006 required row has empty scenario/configuration coverage
+- COMP-WB-007 required row has empty scenario/configuration coverage
+- COMP-WB-007 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-007 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-007 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-007 scenario SC-MANUAL-OPEN-TYPE-SAVE configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-008 required row has empty scenario/configuration coverage
+- COMP-WB-009 required row has empty scenario/configuration coverage
+- COMP-WB-009 scenario SC-PLATFORM-A11Y-LINUX configuration CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-009 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-ARM64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-009 scenario SC-PLATFORM-A11Y-MAC configuration CFG-MAC15-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-009 scenario SC-PLATFORM-A11Y-WIN configuration CFG-WIN11-X64-PRODUCT-JOURNEY not linked by requirement
+- COMP-WB-010 required row has empty scenario/configuration coverage
+- COMP-WB-011 required row has empty scenario/configuration coverage
+- COMP-WB-012 required row has empty scenario/configuration coverage
+- COMP-WB-013 required row has empty scenario/configuration coverage
+- DEF-2026-09-05-01 requirement link is not bidirectional
+- DEF-2026-09-05-02 requirement link is not bidirectional
+- SC-LANG-BUILD-TEST-JS requirement link COMP-BTD-002 is not bidirectional
+- SC-LANG-BUILD-TEST-JS requirement link COMP-BTD-003 is not bidirectional
+- SC-LANG-BUILD-TEST-JS requirement link COMP-BTD-004 is not bidirectional
+- SC-LANG-BUILD-TEST-JS requirement link COMP-BTD-005 is not bidirectional
+- SC-LANG-BUILD-TEST-JS requirement link COMP-LANG-011 is not bidirectional
+- SC-LANG-BUILD-TEST-PY requirement link COMP-BTD-002 is not bidirectional
+- SC-LANG-BUILD-TEST-PY requirement link COMP-BTD-003 is not bidirectional
+- SC-LANG-BUILD-TEST-PY requirement link COMP-BTD-004 is not bidirectional
+- SC-LANG-BUILD-TEST-PY requirement link COMP-BTD-005 is not bidirectional
+- SC-LANG-BUILD-TEST-PY requirement link COMP-LANG-011 is not bidirectional
+- SC-LANG-BUILD-TEST-RUST requirement link COMP-BTD-002 is not bidirectional
+- SC-LANG-BUILD-TEST-RUST requirement link COMP-BTD-003 is not bidirectional
+- SC-LANG-BUILD-TEST-RUST requirement link COMP-BTD-004 is not bidirectional
+- SC-LANG-BUILD-TEST-RUST requirement link COMP-BTD-005 is not bidirectional
+- SC-LANG-BUILD-TEST-RUST requirement link COMP-LANG-011 is not bidirectional
+- SC-LANG-BUILD-TEST-TS requirement link COMP-BTD-002 is not bidirectional
+- SC-LANG-BUILD-TEST-TS requirement link COMP-BTD-003 is not bidirectional
+- SC-LANG-BUILD-TEST-TS requirement link COMP-BTD-004 is not bidirectional
+- SC-LANG-BUILD-TEST-TS requirement link COMP-BTD-005 is not bidirectional
+- SC-LANG-BUILD-TEST-TS requirement link COMP-LANG-011 is not bidirectional
+- SC-LANG-DEBUG-JS requirement link COMP-BTD-006 is not bidirectional
+- SC-LANG-DEBUG-JS requirement link COMP-BTD-007 is not bidirectional
+- SC-LANG-DEBUG-JS requirement link COMP-BTD-008 is not bidirectional
+- SC-LANG-DEBUG-JS requirement link COMP-LANG-012 is not bidirectional
+- SC-LANG-DEBUG-JS requirement link COMP-PRES-013 is not bidirectional
+- SC-LANG-DEBUG-PY requirement link COMP-BTD-006 is not bidirectional
+- SC-LANG-DEBUG-PY requirement link COMP-BTD-007 is not bidirectional
+- SC-LANG-DEBUG-PY requirement link COMP-BTD-008 is not bidirectional
+- SC-LANG-DEBUG-PY requirement link COMP-LANG-012 is not bidirectional
+- SC-LANG-DEBUG-PY requirement link COMP-PRES-013 is not bidirectional
+- SC-LANG-DEBUG-RUST requirement link COMP-BTD-006 is not bidirectional
+- SC-LANG-DEBUG-RUST requirement link COMP-BTD-007 is not bidirectional
+- SC-LANG-DEBUG-RUST requirement link COMP-BTD-008 is not bidirectional
+- SC-LANG-DEBUG-RUST requirement link COMP-LANG-012 is not bidirectional
+- SC-LANG-DEBUG-RUST requirement link COMP-PRES-013 is not bidirectional
+- SC-LANG-DEBUG-TS requirement link COMP-BTD-006 is not bidirectional
+- SC-LANG-DEBUG-TS requirement link COMP-BTD-007 is not bidirectional
+- SC-LANG-DEBUG-TS requirement link COMP-BTD-008 is not bidirectional
+- SC-LANG-DEBUG-TS requirement link COMP-LANG-012 is not bidirectional
+- SC-LANG-DEBUG-TS requirement link COMP-PRES-013 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-002 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-003 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-004 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-JS requirement link COMP-LANG-009 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-002 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-003 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-004 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-PY requirement link COMP-LANG-010 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-002 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-003 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-004 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-RUST requirement link COMP-LANG-008 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-002 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-003 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-004 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-LSP-LIFECYCLE-TS requirement link COMP-LANG-009 is not bidirectional
+- SC-LANG-REFACTOR-JS requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-REFACTOR-JS requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-REFACTOR-JS requirement link COMP-LANG-007 is not bidirectional
+- SC-LANG-REFACTOR-JS requirement link COMP-LANG-009 is not bidirectional
+- SC-LANG-REFACTOR-PY requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-REFACTOR-PY requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-REFACTOR-PY requirement link COMP-LANG-007 is not bidirectional
+- SC-LANG-REFACTOR-PY requirement link COMP-LANG-010 is not bidirectional
+- SC-LANG-REFACTOR-RUST requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-REFACTOR-RUST requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-REFACTOR-RUST requirement link COMP-LANG-007 is not bidirectional
+- SC-LANG-REFACTOR-RUST requirement link COMP-LANG-008 is not bidirectional
+- SC-LANG-REFACTOR-TS requirement link COMP-LANG-005 is not bidirectional
+- SC-LANG-REFACTOR-TS requirement link COMP-LANG-006 is not bidirectional
+- SC-LANG-REFACTOR-TS requirement link COMP-LANG-007 is not bidirectional
+- SC-LANG-REFACTOR-TS requirement link COMP-LANG-009 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-EDIT-006 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-EDIT-007 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-EDIT-008 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-EDIT-010 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-PLAT-002 is not bidirectional
+- SC-MANUAL-EDIT-INPUT-RECOVERY requirement link COMP-PRES-007 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-PRES-006 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-SCM-002 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-SCM-003 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-SCM-004 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-SCM-005 is not bidirectional
+- SC-MANUAL-GIT-HISTORY-RECOVERY requirement link COMP-SCM-009 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-LINUX requirement link COMP-DIST-004 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-LINUX requirement link COMP-SCOPE-GAP-06 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-LINUX requirement link COMP-TRAIN-006 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-MAC requirement link COMP-DIST-004 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-MAC requirement link COMP-SCOPE-GAP-06 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-MAC requirement link COMP-TRAIN-006 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-WIN requirement link COMP-DIST-004 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-WIN requirement link COMP-SCOPE-GAP-06 is not bidirectional
+- SC-MANUAL-OFFLINE-30M-WIN requirement link COMP-TRAIN-006 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-PRES-001 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-PRES-002 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-PRES-003 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-PRES-008 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-WB-001 is not bidirectional
+- SC-MANUAL-OPEN-TYPE-SAVE requirement link COMP-WB-007 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-002 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-007 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-009 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-010 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-011 is not bidirectional
+- SC-MANUAL-REFACTOR-SEARCH-REVIEW requirement link COMP-NAV-012 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-PRES-012 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-TERM-001 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-TERM-006 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-TERM-008 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-TERM-010 is not bidirectional
+- SC-MANUAL-TERMINAL-TUI requirement link COMP-TERM-015 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-CAN-001 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-PRES-003 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-WB-001 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-WB-002 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-WB-003 is not bidirectional
+- SC-MANUAL-WORKBENCH-RESTORE requirement link COMP-WB-005 is not bidirectional
+- SC-PLATFORM-A11Y-LINUX requirement link COMP-PLAT-003 is not bidirectional
+- SC-PLATFORM-A11Y-LINUX requirement link COMP-PLAT-009 is not bidirectional
+- SC-PLATFORM-A11Y-LINUX requirement link COMP-SCOPE-GAP-05 is not bidirectional
+- SC-PLATFORM-A11Y-LINUX requirement link COMP-WB-004 is not bidirectional
+- SC-PLATFORM-A11Y-LINUX requirement link COMP-WB-009 is not bidirectional
+- SC-PLATFORM-A11Y-MAC requirement link COMP-PLAT-003 is not bidirectional
+- SC-PLATFORM-A11Y-MAC requirement link COMP-PLAT-009 is not bidirectional
+- SC-PLATFORM-A11Y-MAC requirement link COMP-SCOPE-GAP-05 is not bidirectional
+- SC-PLATFORM-A11Y-MAC requirement link COMP-WB-004 is not bidirectional
+- SC-PLATFORM-A11Y-MAC requirement link COMP-WB-009 is not bidirectional
+- SC-PLATFORM-A11Y-WIN requirement link COMP-PLAT-003 is not bidirectional
+- SC-PLATFORM-A11Y-WIN requirement link COMP-PLAT-009 is not bidirectional
+- SC-PLATFORM-A11Y-WIN requirement link COMP-SCOPE-GAP-05 is not bidirectional
+- SC-PLATFORM-A11Y-WIN requirement link COMP-WB-004 is not bidirectional
+- SC-PLATFORM-A11Y-WIN requirement link COMP-WB-009 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-LINUX requirement link COMP-DIST-003 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-LINUX requirement link COMP-DIST-007 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-LINUX requirement link COMP-SCOPE-GAP-02 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-MAC requirement link COMP-DIST-003 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-MAC requirement link COMP-DIST-007 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-MAC requirement link COMP-SCOPE-GAP-02 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-WIN requirement link COMP-DIST-003 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-WIN requirement link COMP-DIST-007 is not bidirectional
+- SC-RELEASE-CLEAN-INSTALL-WIN requirement link COMP-SCOPE-GAP-02 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-LINUX requirement link COMP-DIST-008 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-LINUX requirement link COMP-PRES-004 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-LINUX requirement link COMP-SCOPE-GAP-04 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-LINUX requirement link COMP-SCOPE-GAP-10 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-MAC requirement link COMP-DIST-008 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-MAC requirement link COMP-PRES-004 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-MAC requirement link COMP-SCOPE-GAP-04 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-MAC requirement link COMP-SCOPE-GAP-10 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-WIN requirement link COMP-DIST-008 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-WIN requirement link COMP-PRES-004 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-WIN requirement link COMP-SCOPE-GAP-04 is not bidirectional
+- SC-RELEASE-CRASH-PRIVACY-WIN requirement link COMP-SCOPE-GAP-10 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-LINUX requirement link COMP-DIST-005 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-LINUX requirement link COMP-DIST-006 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-LINUX requirement link COMP-SCOPE-GAP-03 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-MAC requirement link COMP-DIST-005 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-MAC requirement link COMP-DIST-006 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-MAC requirement link COMP-SCOPE-GAP-03 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-WIN requirement link COMP-DIST-005 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-WIN requirement link COMP-DIST-006 is not bidirectional
+- SC-RELEASE-UPDATE-ROLLBACK-WIN requirement link COMP-SCOPE-GAP-03 is not bidirectional
+error: process didn't exit successfully: `target\debug\xtask.exe verify-completion-register --root .` (exit code: 1)
+END
+EXIT=1

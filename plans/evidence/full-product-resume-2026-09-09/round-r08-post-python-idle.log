@@ -1,0 +1,16 @@
+CMD: cargo test -p legion-app --test python_app_startup -j 1 --no-fail-fast -- --ignored --nocapture
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s
+     Running tests\python_app_startup.rs (target\debug\deps\python_app_startup-08100240498e019d.exe)
+
+running 4 tests
+test native_python_rename_external_overwrite_rejects_without_partial_mutation ... ok
+test native_python_diagnostic_clears_after_editor_replace_and_save ... ok
+test native_python_rename_is_reviewable_cancelable_and_saves_cross_file_edit ... ok
+test explicit_python_startup_is_lazy_live_and_restart_preserves_dirty_text ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.53s
+
+END
+EXIT=0

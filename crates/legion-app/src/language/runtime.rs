@@ -5,6 +5,11 @@
 //! retains probe output.  The resulting record is an approval receipt for the
 //! exact executable that was probed; it is not permission to launch another
 //! executable.
+//!
+//! The identity, budget, broker and bounded-probe mechanics live in the shared
+//! items at the bottom of this module and are reused verbatim by the sibling
+//! `formatter_approval` module, so a later change to the TOCTOU window is made
+//! once rather than in two drifting copies.
 
 use std::{
     fs::File,
@@ -15,7 +20,9 @@ use std::{
 };
 
 use legion_lsp::LspNodeVersion;
-use legion_platform::{BoundedProcessRequest, PlatformError, ProcessRequest, ProcessService};
+use legion_platform::{
+    BoundedProcessRequest, PlatformError, ProcessRequest, ProcessResult, ProcessService,
+};
 use legion_protocol::{
     CanonicalPath, CapabilityBrokerPort, CapabilityCommandClass, CapabilityDecisionId,
     CapabilityId, CapabilityRequest, CapabilityRequestContext, CapabilityResponse, CausalityId,
@@ -32,14 +39,24 @@ use thiserror::Error;
 pub const NODE_RUNTIME_PROBE_CAPABILITY: &str = "lsp.launch";
 
 /// Maximum bytes retained from either probe stream.
-pub const NODE_RUNTIME_PROBE_STREAM_LIMIT: usize = 4 * 1024;
+pub const NODE_RUNTIME_PROBE_STREAM_LIMIT: usize = EXECUTABLE_PROBE_STREAM_LIMIT;
 
 /// Finite overall approval budget. Hashing, broker evaluation, and the child
 /// probe share this budget; the child receives only the remaining duration.
-pub const NODE_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const NODE_RUNTIME_PROBE_TIMEOUT: Duration = EXECUTABLE_PROBE_TIMEOUT;
 
 /// Maximum executable size admitted to the bounded identity hash.
-pub const NODE_RUNTIME_FINGERPRINT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+pub const NODE_RUNTIME_FINGERPRINT_MAX_BYTES: u64 = EXECUTABLE_FINGERPRINT_MAX_BYTES;
+
+/// Maximum bytes retained from either stream of any bounded executable probe.
+pub(crate) const EXECUTABLE_PROBE_STREAM_LIMIT: usize = 4 * 1024;
+
+/// Finite overall budget shared by hashing, broker evaluation and the child
+/// probe at every executable-approval boundary.
+pub(crate) const EXECUTABLE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum executable size admitted to a bounded identity hash.
+pub(crate) const EXECUTABLE_FINGERPRINT_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Input captured from the app's real workspace/principal/event context.
 #[derive(Debug, Clone)]
@@ -156,6 +173,17 @@ pub enum NodeRuntimeApprovalError {
     MalformedVersion,
 }
 
+impl From<ExecutableIdentityError> for NodeRuntimeApprovalError {
+    fn from(error: ExecutableIdentityError) -> Self {
+        match error {
+            ExecutableIdentityError::Invalid(message) => Self::InvalidExecutable(message),
+            ExecutableIdentityError::Changed => Self::ExecutableChanged,
+            ExecutableIdentityError::Cancelled => Self::Cancelled,
+            ExecutableIdentityError::DeadlineExceeded => Self::DeadlineExceeded,
+        }
+    }
+}
+
 /// Request and probe one explicitly selected local Node executable.
 ///
 /// Broker evaluation happens before `execute_bounded`, and the canonical path
@@ -180,88 +208,43 @@ pub fn approve_node_runtime(
     let deadline = Instant::now() + NODE_RUNTIME_PROBE_TIMEOUT;
     let (canonical_path, fingerprint) =
         canonical_regular_file(&request.executable, &cancellation, deadline)?;
-    let canonical_path_dto = CanonicalPath(canonical_path_to_string(&canonical_path)?);
+    let canonical_command = canonical_path_to_string(&canonical_path)?;
     let capability_id = CapabilityId(NODE_RUNTIME_PROBE_CAPABILITY.to_string());
-    let command_binary = canonical_path_dto.0.clone();
-    let context = CapabilityRequestContext {
-        command_binary: Some(command_binary.clone()),
-        command_class: Some(CapabilityCommandClass::LanguageServer),
-        lsp_server_binary: Some(command_binary),
-        ..CapabilityRequestContext::default()
-    };
-    let response = broker
-        .handle(CapabilityRequest::Request {
-            principal_id: request.principal_id.clone(),
-            capability_id: capability_id.clone(),
-            workspace_trust_state: request.workspace_trust_state.clone(),
-            target_path: Some(canonical_path_dto),
-            decision_id: None,
-            context,
-            correlation_id: request.correlation_id,
-        })
-        .map_err(|error| NodeRuntimeApprovalError::CapabilityRejected(error.message))?;
-    let decision_id = match response {
-        CapabilityResponse::Decision(decision)
-            if decision.granted
-                && decision.decision_id.0 != 0
-                && decision.capability == capability_id =>
-        {
-            decision.decision_id
-        }
-        CapabilityResponse::Decision(decision) => {
-            return Err(NodeRuntimeApprovalError::CapabilityRejected(format!(
-                "decision did not grant requested capability (id={}, granted={}, capability={})",
-                decision.decision_id.0, decision.granted, decision.capability.0
-            )));
-        }
-        CapabilityResponse::Granted(grant)
-            if grant.decision_id.0 != 0
-                && grant.principal_id == request.principal_id
-                && grant.capability_id == capability_id =>
-        {
-            grant.decision_id
-        }
-        CapabilityResponse::Granted(_) => {
-            return Err(NodeRuntimeApprovalError::CapabilityRejected(
-                "grant response did not match principal or capability".to_string(),
-            ));
-        }
-        CapabilityResponse::Denied(denial) => {
-            return Err(NodeRuntimeApprovalError::CapabilityRejected(denial.reason));
-        }
-    };
+    let decision_id = request_granted_decision(
+        broker,
+        &request.principal_id,
+        &capability_id,
+        &request.workspace_trust_state,
+        CanonicalPath(canonical_command.clone()),
+        language_tool_capability_context(&canonical_command),
+        request.correlation_id,
+    )
+    .map_err(NodeRuntimeApprovalError::CapabilityRejected)?;
 
     // The broker call is an unbounded external seam. Recheck the identity and
     // finite budget immediately before spawning so a replacement during the
     // broker window cannot be probed under the old decision.
-    check_budget(&cancellation, deadline)?;
-    let (broker_path, broker_fingerprint) =
-        canonical_regular_file(&request.executable, &cancellation, deadline)?;
-    if broker_path != canonical_path || broker_fingerprint != fingerprint {
-        return Err(NodeRuntimeApprovalError::ExecutableChanged);
-    }
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    if remaining.is_zero() {
-        return Err(NodeRuntimeApprovalError::DeadlineExceeded);
-    }
+    recheck_executable_identity(
+        &request.executable,
+        &canonical_path,
+        &fingerprint,
+        &cancellation,
+        deadline,
+    )?;
 
-    let probe = process
-        .execute_bounded(&BoundedProcessRequest::new(
-            ProcessRequest {
-                command: canonical_path_to_string(&canonical_path)?,
-                args: vec!["--version".to_string()],
-                cwd: None,
-                env: Vec::new(),
-                stdin: None,
-                timeout: Some(remaining),
-                cancelled: false,
-            },
-            NODE_RUNTIME_PROBE_STREAM_LIMIT,
-            NODE_RUNTIME_PROBE_STREAM_LIMIT,
-            remaining,
-            cancellation.clone(),
-        ))
-        .map_err(|error| NodeRuntimeApprovalError::ProbeFailed(platform_error_message(error)))?;
+    let probe = run_bounded_probe(
+        process,
+        canonical_command,
+        vec!["--version".to_string()],
+        NODE_RUNTIME_PROBE_STREAM_LIMIT,
+        deadline,
+        cancellation.clone(),
+    )
+    .map_err(|error| match error {
+        BoundedProbeError::DeadlineExceeded => NodeRuntimeApprovalError::DeadlineExceeded,
+        BoundedProbeError::Cancelled => NodeRuntimeApprovalError::Cancelled,
+        BoundedProbeError::Failed(message) => NodeRuntimeApprovalError::ProbeFailed(message),
+    })?;
     // The process authority may return successfully just as cancellation is
     // raised. Do not mint a receipt from that race.
     check_budget(&cancellation, deadline)?;
@@ -277,12 +260,13 @@ pub fn approve_node_runtime(
             "observed Node version is below the required minimum".to_string(),
         ));
     }
-    check_budget(&cancellation, deadline)?;
-    let (after_path, after_fingerprint) =
-        canonical_regular_file(&request.executable, &cancellation, deadline)?;
-    if after_path != canonical_path || after_fingerprint != fingerprint {
-        return Err(NodeRuntimeApprovalError::ExecutableChanged);
-    }
+    recheck_executable_identity(
+        &request.executable,
+        &canonical_path,
+        &fingerprint,
+        &cancellation,
+        deadline,
+    )?;
 
     Ok(ApprovedNodeRuntime {
         canonical_path,
@@ -355,48 +339,86 @@ fn validate_request(request: &NodeRuntimeApprovalRequest) -> Result<(), NodeRunt
     Ok(())
 }
 
-fn canonical_regular_file(
+// ---------------------------------------------------------------------------
+// Shared executable-approval mechanics.
+//
+// Every item below is boundary-agnostic and is used by both
+// `approve_node_runtime` and the sibling `formatter_approval` module. Keeping
+// exactly one copy is deliberate: a second copy would be a second place where
+// the TOCTOU window could be reopened by a partial edit.
+// ---------------------------------------------------------------------------
+
+/// Failure of a bounded identity or budget check, mapped by each boundary into
+/// its own public error enum. It never carries process output.
+#[derive(Debug)]
+pub(crate) enum ExecutableIdentityError {
+    /// The selected path could not be canonicalized or is not a regular file.
+    Invalid(String),
+    /// The canonical path or content fingerprint changed.
+    Changed,
+    /// The bounded operation was cancelled.
+    Cancelled,
+    /// The bounded operation exceeded its finite deadline.
+    DeadlineExceeded,
+}
+
+/// Failure of the bounded child probe. `Failed` carries the platform error
+/// text only; probe stdout/stderr never reaches this value.
+#[derive(Debug)]
+pub(crate) enum BoundedProbeError {
+    /// No budget remained for the child before it was started, or the platform
+    /// classified the running child as timed out.
+    DeadlineExceeded,
+    /// The cancellation flag was raised while the child was running.
+    Cancelled,
+    /// The bounded process authority refused or failed the child.
+    Failed(String),
+}
+
+/// Canonicalizes `path`, proves it is a bounded regular file, and hashes its
+/// content under the shared cancellation flag and finite deadline.
+pub(crate) fn canonical_regular_file(
     path: &Path,
     cancellation: &AtomicBool,
     deadline: Instant,
-) -> Result<(PathBuf, FileFingerprint), NodeRuntimeApprovalError> {
+) -> Result<(PathBuf, FileFingerprint), ExecutableIdentityError> {
     check_budget(cancellation, deadline)?;
     if !path.is_absolute() {
-        return Err(NodeRuntimeApprovalError::InvalidExecutable(
+        return Err(ExecutableIdentityError::Invalid(
             "selected executable path must be absolute".to_string(),
         ));
     }
     let canonical = std::fs::canonicalize(path)
-        .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+        .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
     let metadata = std::fs::metadata(&canonical)
-        .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+        .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
     if !metadata.is_file() {
-        return Err(NodeRuntimeApprovalError::InvalidExecutable(
+        return Err(ExecutableIdentityError::Invalid(
             "selected path is not a regular file".to_string(),
         ));
     }
-    if metadata.len() > NODE_RUNTIME_FINGERPRINT_MAX_BYTES {
-        return Err(NodeRuntimeApprovalError::InvalidExecutable(
+    if metadata.len() > EXECUTABLE_FINGERPRINT_MAX_BYTES {
+        return Err(ExecutableIdentityError::Invalid(
             "selected executable exceeds bounded fingerprint size".to_string(),
         ));
     }
     let mut file = File::open(&canonical)
-        .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+        .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
     let opened_metadata = file
         .metadata()
-        .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+        .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
     if !opened_metadata.is_file() {
-        return Err(NodeRuntimeApprovalError::InvalidExecutable(
+        return Err(ExecutableIdentityError::Invalid(
             "opened executable is not a regular file".to_string(),
         ));
     }
-    if opened_metadata.len() > NODE_RUNTIME_FINGERPRINT_MAX_BYTES {
-        return Err(NodeRuntimeApprovalError::InvalidExecutable(
+    if opened_metadata.len() > EXECUTABLE_FINGERPRINT_MAX_BYTES {
+        return Err(ExecutableIdentityError::Invalid(
             "opened executable exceeds bounded fingerprint size".to_string(),
         ));
     }
     if std::fs::canonicalize(path).ok().as_deref() != Some(canonical.as_path()) {
-        return Err(NodeRuntimeApprovalError::ExecutableChanged);
+        return Err(ExecutableIdentityError::Changed);
     }
     let opened_length = opened_metadata.len();
     let mut hasher = Sha256::new();
@@ -406,13 +428,13 @@ fn canonical_regular_file(
         check_budget(cancellation, deadline)?;
         let read = file
             .read(&mut buffer)
-            .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+            .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
         if read == 0 {
             break;
         }
         hashed_bytes = hashed_bytes.saturating_add(read as u64);
-        if hashed_bytes > NODE_RUNTIME_FINGERPRINT_MAX_BYTES {
-            return Err(NodeRuntimeApprovalError::InvalidExecutable(
+        if hashed_bytes > EXECUTABLE_FINGERPRINT_MAX_BYTES {
+            return Err(ExecutableIdentityError::Invalid(
                 "executable grew beyond bounded fingerprint size".to_string(),
             ));
         }
@@ -421,9 +443,9 @@ fn canonical_regular_file(
     check_budget(cancellation, deadline)?;
     let final_metadata = file
         .metadata()
-        .map_err(|error| NodeRuntimeApprovalError::InvalidExecutable(error.to_string()))?;
+        .map_err(|error| ExecutableIdentityError::Invalid(error.to_string()))?;
     if !final_metadata.is_file() || final_metadata.len() != opened_length {
-        return Err(NodeRuntimeApprovalError::ExecutableChanged);
+        return Err(ExecutableIdentityError::Changed);
     }
     let value = hex::encode(hasher.finalize());
     Ok((
@@ -435,25 +457,149 @@ fn canonical_regular_file(
     ))
 }
 
-fn canonical_path_to_string(path: &Path) -> Result<String, NodeRuntimeApprovalError> {
+/// Re-reads the selected path and requires the same canonical path and the
+/// same content fingerprint as the identity captured earlier.
+pub(crate) fn recheck_executable_identity(
+    path: &Path,
+    expected_path: &Path,
+    expected_fingerprint: &FileFingerprint,
+    cancellation: &AtomicBool,
+    deadline: Instant,
+) -> Result<(), ExecutableIdentityError> {
+    check_budget(cancellation, deadline)?;
+    let (observed_path, observed_fingerprint) =
+        canonical_regular_file(path, cancellation, deadline)?;
+    if observed_path != expected_path || &observed_fingerprint != expected_fingerprint {
+        return Err(ExecutableIdentityError::Changed);
+    }
+    Ok(())
+}
+
+/// Renders a canonical path as UTF-8 for the broker request and the child
+/// command, refusing anything that cannot be represented exactly.
+pub(crate) fn canonical_path_to_string(path: &Path) -> Result<String, ExecutableIdentityError> {
     path.to_str().map(str::to_owned).ok_or_else(|| {
-        NodeRuntimeApprovalError::InvalidExecutable(
+        ExecutableIdentityError::Invalid(
             "canonical executable path is not representable as UTF-8".to_string(),
         )
     })
 }
 
-fn check_budget(
+/// Checks the shared cancellation flag and the single finite deadline.
+pub(crate) fn check_budget(
     cancellation: &AtomicBool,
     deadline: Instant,
-) -> Result<(), NodeRuntimeApprovalError> {
+) -> Result<(), ExecutableIdentityError> {
     if cancellation.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err(NodeRuntimeApprovalError::Cancelled);
+        return Err(ExecutableIdentityError::Cancelled);
     }
     if Instant::now() >= deadline {
-        return Err(NodeRuntimeApprovalError::DeadlineExceeded);
+        return Err(ExecutableIdentityError::DeadlineExceeded);
     }
     Ok(())
+}
+
+/// Context handed to capability policies for a local language-tooling binary.
+///
+/// The `lsp.launch` policy branch matches on `lsp_server_binary`, so the
+/// canonical path is supplied there as well as in `command_binary`; both are
+/// the exact canonical path that was fingerprinted.
+pub(crate) fn language_tool_capability_context(command_binary: &str) -> CapabilityRequestContext {
+    CapabilityRequestContext {
+        command_binary: Some(command_binary.to_string()),
+        command_class: Some(CapabilityCommandClass::LanguageServer),
+        lsp_server_binary: Some(command_binary.to_string()),
+        ..CapabilityRequestContext::default()
+    }
+}
+
+/// Asks the broker for `capability_id` against the canonical target path and
+/// accepts only a granted, non-zero decision for that exact capability.
+///
+/// The error string is a rejection reason built from decision metadata and the
+/// broker's own error text; no process output can reach it.
+pub(crate) fn request_granted_decision(
+    broker: &dyn CapabilityBrokerPort,
+    principal_id: &PrincipalId,
+    capability_id: &CapabilityId,
+    workspace_trust_state: &WorkspaceTrustState,
+    target_path: CanonicalPath,
+    context: CapabilityRequestContext,
+    correlation_id: CorrelationId,
+) -> Result<CapabilityDecisionId, String> {
+    let response = broker
+        .handle(CapabilityRequest::Request {
+            principal_id: principal_id.clone(),
+            capability_id: capability_id.clone(),
+            workspace_trust_state: workspace_trust_state.clone(),
+            target_path: Some(target_path),
+            decision_id: None,
+            context,
+            correlation_id,
+        })
+        .map_err(|error| error.message)?;
+    match response {
+        CapabilityResponse::Decision(decision)
+            if decision.granted
+                && decision.decision_id.0 != 0
+                && &decision.capability == capability_id =>
+        {
+            Ok(decision.decision_id)
+        }
+        CapabilityResponse::Decision(decision) => Err(format!(
+            "decision did not grant requested capability (id={}, granted={}, capability={})",
+            decision.decision_id.0, decision.granted, decision.capability.0
+        )),
+        CapabilityResponse::Granted(grant)
+            if grant.decision_id.0 != 0
+                && &grant.principal_id == principal_id
+                && &grant.capability_id == capability_id =>
+        {
+            Ok(grant.decision_id)
+        }
+        CapabilityResponse::Granted(_) => {
+            Err("grant response did not match principal or capability".to_string())
+        }
+        CapabilityResponse::Denied(denial) => Err(denial.reason),
+    }
+}
+
+/// Runs one bounded child under the remaining shared budget with explicit
+/// stream caps. The argument vector is supplied by the caller; this helper
+/// never adds, rewrites or infers arguments, and never inspects the output.
+pub(crate) fn run_bounded_probe(
+    process: &dyn ProcessService,
+    command: String,
+    args: Vec<String>,
+    stream_limit: usize,
+    deadline: Instant,
+    cancellation: Arc<AtomicBool>,
+) -> Result<ProcessResult, BoundedProbeError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(BoundedProbeError::DeadlineExceeded);
+    }
+    process
+        .execute_bounded(&BoundedProcessRequest::new(
+            ProcessRequest {
+                command,
+                args,
+                cwd: None,
+                env: Vec::new(),
+                stdin: None,
+                timeout: Some(remaining),
+                cancelled: false,
+            },
+            stream_limit,
+            stream_limit,
+            remaining,
+            cancellation,
+        ))
+        .map_err(|error| match error {
+            PlatformError::Cancelled { .. } => BoundedProbeError::Cancelled,
+            PlatformError::Timeout { .. } => BoundedProbeError::DeadlineExceeded,
+            other => BoundedProbeError::Failed(platform_error_message(other)),
+        })
 }
 
 fn platform_error_message(error: PlatformError) -> String {

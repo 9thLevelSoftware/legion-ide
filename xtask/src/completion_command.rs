@@ -104,6 +104,68 @@ pub fn validate_completion(
     Ok(issues)
 }
 
+/// Validate the register structure alone, before a candidate SHA exists.
+///
+/// This is a strict pass-through to
+/// [`validate_register_structure`](crate::completion::structure::validate_register_structure):
+/// no issue is filtered, reordered, deduplicated, downgraded or swallowed
+/// here, and no lenient or partial-register mode exists. Operational
+/// load/IO/JSON failures are returned as Err; invariant failures are returned
+/// as the validator's own sorted issue list.
+///
+/// It is a narrower entry point than [`validate_completion`], never a weaker
+/// one: no evidence, metadata-link, defect, dependency or release-coverage
+/// validator is reachable from it. It establishes no EvidenceRun, no
+/// acceptance status and no implementation status, so a clean result is a
+/// structural lint and never a completion or acceptance verdict.
+pub fn validate_completion_register(root: &Path) -> Result<Vec<String>, String> {
+    validate_register_structure(root)
+}
+
+/// Run the register-only CLI command and return its process exit code.
+pub fn run_verify_completion_register_command(root: &Path) -> i32 {
+    let counts = match completion_status_counts(root) {
+        Ok(counts) => counts,
+        Err(error) => {
+            eprintln!("verify-completion-register failed: {error}");
+            return 1;
+        }
+    };
+    let issues = match validate_completion_register(root) {
+        Ok(issues) => issues,
+        Err(error) => {
+            eprintln!("verify-completion-register failed: {error}");
+            return 1;
+        }
+    };
+
+    // Ordering matters, and mirrors run_verify_completion_command statement for
+    // statement: nothing is written to stdout until the register has loaded and
+    // the validator has returned Ok. An operational failure - a missing or
+    // malformed register - must emit its stderr line and exit nonzero with no
+    // stdout at all, so no reader can scrape progress numbers off a register
+    // that never loaded.
+    println!("implementation status counts:");
+    print_counts(&counts.implementation);
+    println!("acceptance status counts:");
+    print_counts(&counts.acceptance);
+    if issues.is_empty() {
+        println!(
+            "verify-completion-register passed: register structure only, no evidence or acceptance was assessed"
+        );
+        0
+    } else {
+        eprintln!(
+            "verify-completion-register found {} structural issue(s):",
+            issues.len()
+        );
+        for issue in issues {
+            eprintln!("- {issue}");
+        }
+        1
+    }
+}
+
 /// Count implementation and acceptance statuses independently.
 pub fn completion_status_counts(root: &Path) -> Result<CompletionStatusCounts, String> {
     let requirements: RequirementsDocument = load_json(root, "plans/completion/requirements.json")?;

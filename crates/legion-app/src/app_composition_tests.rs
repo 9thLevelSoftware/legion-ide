@@ -2,6 +2,7 @@
 mod workspace_edit_conflict_tests;
 
 use super::*;
+use legion_protocol::{WorkspaceEditAnnotationTarget, WorkspaceEditChangeAnnotation};
 use std::fs;
 use std::path::PathBuf;
 #[cfg(feature = "ai")]
@@ -65,6 +66,51 @@ fn retryable_search_palette_rows_dispatch_the_existing_run_search_intent() {
             "{status_kind:?}"
         );
     }
+}
+
+#[test]
+fn workspace_edit_change_annotations_project_as_review_warnings() {
+    let payload = ProposalPayload::WorkspaceEdit(WorkspaceEditProposalPayload {
+        workspace_id: WorkspaceId(1),
+        edit_id: uuid::Uuid::from_u128(1),
+        title: "annotated edit".to_string(),
+        source: WorkspaceEditSourceKind::LspRename,
+        target_coverage: ProposalTargetCoverage {
+            coverage_kind: ProposalTargetCoverageKind::Complete,
+            targets: Vec::new(),
+            omitted_target_count: 0,
+            redaction_hints: Vec::new(),
+        },
+        file_edits: Vec::new(),
+        file_operations: Vec::new(),
+        change_annotations: vec![WorkspaceEditChangeAnnotation {
+            id: "rename-default".to_string(),
+            label: "Rename symbol".to_string(),
+            description: Some("Update definition and references".to_string()),
+            needs_confirmation: true,
+            targets: vec![WorkspaceEditAnnotationTarget::TextEdit {
+                file_edit_index: 0,
+                edit_index: 0,
+            }],
+        }],
+        required_capability: CapabilityId("fs.write".to_string()),
+        diagnostics: Vec::new(),
+        schema_version: 1,
+    });
+
+    let warnings = AppProposalCoordinator::preview_warnings(&payload);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].kind,
+        ProposalPreviewWarningKind::ChangeAnnotation
+    );
+    assert_eq!(warnings[0].target_id.as_deref(), Some("rename-default"));
+    assert!(warnings[0].message.contains("Confirmation required"));
+    assert!(
+        warnings[0]
+            .message
+            .contains("Update definition and references")
+    );
 }
 
 #[test]
@@ -755,6 +801,7 @@ fn workspace_edit_payload() -> ProposalPayload {
             redaction_hints: vec![RedactionHint::MetadataOnly],
         },
         file_edits: Vec::new(),
+        change_annotations: Vec::new(),
         file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
             path,
             initial_content_hash: None,
@@ -2418,6 +2465,7 @@ fn proposal_coordinator_denies_duplicate_ambiguous_and_unsupported_targets() {
                 edits: legion_protocol::EditBatch { edits: Vec::new() },
                 preconditions: complete_file_preconditions(),
             }],
+            change_annotations: Vec::new(),
             file_operations: Vec::new(),
             required_capability: CapabilityId("fs.write".to_string()),
             diagnostics: Vec::new(),

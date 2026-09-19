@@ -123,6 +123,7 @@ fn workspace_edit_late_fingerprint_failure_rolls_back_prior_editor_mutation() {
                 preconditions: second_preconditions,
             },
         ],
+        change_annotations: Vec::new(),
         file_operations: Vec::new(),
         required_capability: CapabilityId("editor.write".to_string()),
         diagnostics: Vec::new(),

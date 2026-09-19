@@ -1,0 +1,772 @@
+CMD: sh .superpowers/sdd/2026-09-04-full-product-completion/soak-s1-08a.sh
+CWD: D:/legion-ide-completion
+BEGIN
+=== IDLE ITERATION 1 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.51s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.45s
+
+=== IDLE ITERATION 1 exit=0 ===
+=== IDLE ITERATION 2 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.43s
+
+=== IDLE ITERATION 2 exit=0 ===
+=== IDLE ITERATION 3 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.48s
+
+=== IDLE ITERATION 3 exit=0 ===
+=== IDLE ITERATION 4 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.45s
+
+=== IDLE ITERATION 4 exit=0 ===
+=== IDLE ITERATION 5 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.48s
+
+=== IDLE ITERATION 5 exit=0 ===
+=== IDLE ITERATION 6 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.43s
+
+=== IDLE ITERATION 6 exit=0 ===
+=== IDLE ITERATION 7 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.45s
+
+=== IDLE ITERATION 7 exit=0 ===
+=== IDLE ITERATION 8 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.47s
+
+=== IDLE ITERATION 8 exit=0 ===
+=== IDLE ITERATION 9 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.45s
+
+=== IDLE ITERATION 9 exit=0 ===
+=== IDLE ITERATION 10 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.46s
+
+=== IDLE ITERATION 10 exit=0 ===
+=== IDLE ITERATION 11 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.44s
+
+=== IDLE ITERATION 11 exit=0 ===
+=== IDLE ITERATION 12 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.48s
+
+=== IDLE ITERATION 12 exit=0 ===
+=== IDLE ITERATION 13 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.45s
+
+=== IDLE ITERATION 13 exit=0 ===
+=== IDLE ITERATION 14 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.46s
+
+=== IDLE ITERATION 14 exit=0 ===
+=== IDLE ITERATION 15 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.48s
+
+=== IDLE ITERATION 15 exit=0 ===
+=== IDLE ITERATION 16 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.44s
+
+=== IDLE ITERATION 16 exit=0 ===
+=== IDLE ITERATION 17 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.46s
+
+=== IDLE ITERATION 17 exit=0 ===
+=== IDLE ITERATION 18 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.44s
+
+=== IDLE ITERATION 18 exit=0 ===
+=== IDLE ITERATION 19 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.46s
+
+=== IDLE ITERATION 19 exit=0 ===
+=== IDLE ITERATION 20 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.43s
+
+=== IDLE ITERATION 20 exit=0 ===
+IDLE SUMMARY: pass=20 fail=0 of 20
+=== STARTING LOAD GENERATORS (12 busy shells) ===
+load pid 91871
+load pid 91872
+load pid 91873
+load pid 91874
+load pid 91875
+load pid 91876
+load pid 91877
+load pid 91878
+load pid 91879
+load pid 91880
+load pid 91881
+load pid 91882
+=== LOADED ITERATION 1 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.54s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.53s
+
+=== LOADED ITERATION 1 exit=0 ===
+=== LOADED ITERATION 2 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.54s
+
+=== LOADED ITERATION 2 exit=0 ===
+=== LOADED ITERATION 3 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.46s
+
+=== LOADED ITERATION 3 exit=0 ===
+=== LOADED ITERATION 4 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.49s
+
+=== LOADED ITERATION 4 exit=0 ===
+=== LOADED ITERATION 5 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.49s
+
+=== LOADED ITERATION 5 exit=0 ===
+=== LOADED ITERATION 6 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.50s
+
+=== LOADED ITERATION 6 exit=0 ===
+=== LOADED ITERATION 7 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.50s
+
+=== LOADED ITERATION 7 exit=0 ===
+=== LOADED ITERATION 8 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.48s
+
+=== LOADED ITERATION 8 exit=0 ===
+=== LOADED ITERATION 9 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.49s
+
+=== LOADED ITERATION 9 exit=0 ===
+=== LOADED ITERATION 10 ===
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo fix --lib -p epaint` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running unittests src\lib.rs (target\debug\deps\legion_desktop-be9e0f879def0a50.exe)
+
+running 4 tests
+test view::streamed_layout::worker::tests::terminal_worker_result_is_published_once_and_releases_source ... ok
+test view::streamed_layout::worker::tests::dropping_scheduler_releases_queued_sources_with_live_handles ... ok
+test view::streamed_layout::worker::tests::worker_advances_without_ui_pump_and_emits_bounded_scan ... ok
+test view::streamed_layout::worker::tests::worker_admission_is_bounded_and_cancel_rejects_late_output ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 239 filtered out; finished in 0.49s
+
+=== LOADED ITERATION 10 exit=0 ===
+=== STOPPING LOAD GENERATORS ===
+LOADED SUMMARY: pass=10 fail=0 of 10
+TOTAL: idle_pass=20 idle_fail=0 loaded_pass=10 loaded_fail=0
+END
+EXIT=0

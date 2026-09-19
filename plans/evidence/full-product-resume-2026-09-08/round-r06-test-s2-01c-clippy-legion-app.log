@@ -1,0 +1,30 @@
+CMD: cargo clippy -p legion-app --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking legion-security v0.1.0 (D:\legion-ide-completion\crates\legion-security)
+    Checking legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+    Checking legion-storage v0.1.0 (D:\legion-ide-completion\crates\legion-storage)
+    Checking legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Checking legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Checking legion-ai v0.1.0 (D:\legion-ide-completion\crates\legion-ai)
+    Checking legion-index v0.1.0 (D:\legion-ide-completion\crates\legion-index)
+    Checking legion-tracker v0.1.0 (D:\legion-ide-completion\crates\legion-tracker)
+    Checking legion-remote-transport v0.1.0 (D:\legion-ide-completion\crates\legion-remote-transport)
+    Checking legion-debug v0.1.0 (D:\legion-ide-completion\crates\legion-debug)
+    Checking legion-agent v0.1.0 (D:\legion-ide-completion\crates\legion-agent)
+    Checking legion-remote v0.1.0 (D:\legion-ide-completion\crates\legion-remote)
+    Checking legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+    Checking legion-plugin v0.1.0 (D:\legion-ide-completion\crates\legion-plugin)
+    Checking legion-ai-providers v0.1.0 (D:\legion-ide-completion\crates\legion-ai-providers)
+    Checking legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+    Checking legion-terminal v0.1.0 (D:\legion-ide-completion\crates\legion-terminal)
+    Checking legion-memory v0.1.0 (D:\legion-ide-completion\crates\legion-memory)
+    Checking legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+    Checking legion-sandbox v0.1.0 (D:\legion-ide-completion\crates\legion-sandbox)
+    Checking legion-ui v0.1.0 (D:\legion-ide-completion\crates\legion-ui)
+    Checking legion-collaboration v0.1.0 (D:\legion-ide-completion\crates\legion-collaboration)
+    Checking legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 59.48s
+END
+EXIT=0

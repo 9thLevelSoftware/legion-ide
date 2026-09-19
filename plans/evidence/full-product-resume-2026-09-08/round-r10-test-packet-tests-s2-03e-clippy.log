@@ -1,0 +1,8 @@
+CMD: cargo clippy -p legion-app --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+    Checking legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.71s
+END
+EXIT=0
