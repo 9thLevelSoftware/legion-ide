@@ -20730,6 +20730,13 @@ impl AppComposition {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
+                if self.active_documents.active_workspace_trust
+                    != Some(WorkspaceTrustState::Trusted)
+                {
+                    return Err(AppCompositionError::WorkspaceNotTrusted(
+                        "branch switch denied: workspace is untrusted".to_string(),
+                    ));
+                }
                 switch_git_branch(Path::new(root_path), &branch)
                     .map_err(git_inspection_protocol_error)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
@@ -20738,6 +20745,13 @@ impl AppComposition {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
                     return Err(AppCompositionError::WorkspaceNotOpen);
                 };
+                if self.active_documents.active_workspace_trust
+                    != Some(WorkspaceTrustState::Trusted)
+                {
+                    return Err(AppCompositionError::WorkspaceNotTrusted(
+                        "branch creation denied: workspace is untrusted".to_string(),
+                    ));
+                }
                 create_git_branch(Path::new(root_path), &branch)
                     .map_err(git_inspection_protocol_error)?;
                 Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
