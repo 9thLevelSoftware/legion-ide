@@ -321,13 +321,14 @@ impl GitRemoteOperation {
 /// Where a configured git remote points, as far as network policy is concerned.
 ///
 /// Git remotes are not URLs in the usual sense: a remote may be a plain
-/// filesystem path (`/srv/mirror.git`, `C:\repos\mirror.git`), a `file://` URL,
+/// filesystem path (`/srv/mirror.git`, `C:\repos\mirror.git`), a local
+/// `file:///` URL,
 /// an scp-style SSH address (`git@github.com:org/repo.git`), or a conventional
-/// URL. Only the last two can leave the machine, so they are the only ones that
-/// are subject to allowlist/air-gap checks.
+/// URL. Host-qualified file URLs can resolve to network shares, so they are
+/// subject to the same allowlist/air-gap checks as other network endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GitRemoteTarget {
-    /// A filesystem path or `file://` URL — no egress is possible.
+    /// A filesystem path or hostless `file:///` URL — no egress is possible.
     Local,
     /// A network endpoint, reduced to the host that policy matches against.
     Host {
@@ -361,10 +362,21 @@ pub fn classify_git_remote_url(remote_url: &str) -> GitRemoteTarget {
         return GitRemoteTarget::Local;
     }
 
-    // Explicit `file://` is local by definition.
+    // A hostless `file:///path` URL is local. A non-empty authority can name a
+    // network share (notably on Windows), so keep it on the checked host path.
     if let Some(rest) = strip_scheme_prefix(trimmed, "file") {
-        let _ = rest;
-        return GitRemoteTarget::Local;
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        return match host_from_authority(authority) {
+            Some(host) => GitRemoteTarget::Host {
+                host,
+                scheme: "file".to_string(),
+            },
+            None if authority.is_empty() => GitRemoteTarget::Local,
+            None => GitRemoteTarget::Host {
+                host: String::new(),
+                scheme: "file".to_string(),
+            },
+        };
     }
 
     // Conventional `scheme://[user@]host[:port]/path` remotes.
