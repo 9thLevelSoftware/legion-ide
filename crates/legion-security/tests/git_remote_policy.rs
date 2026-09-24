@@ -58,6 +58,15 @@ fn remote_urls_are_classified_into_local_and_host_targets() {
             scheme: "ssh".to_string(),
         }
     );
+    // A file URL with an authority may resolve to a network share and must go
+    // through network policy rather than inheriting the hostless exemption.
+    assert_eq!(
+        classify_git_remote_url("file://Attacker.Example/share/repo.git"),
+        GitRemoteTarget::Host {
+            host: "attacker.example".to_string(),
+            scheme: "file".to_string(),
+        }
+    );
 
     // Negative side: none of these can egress, so none may be classified as a host.
     for local in [
@@ -74,6 +83,33 @@ fn remote_urls_are_classified_into_local_and_host_targets() {
             "`{local}` must classify as a local target"
         );
     }
+}
+
+#[test]
+fn air_gap_denies_a_host_qualified_file_remote() {
+    let decision = decide_git_remote_operation(
+        &SecurityPolicy::default(),
+        TrustState::Trusted,
+        GitRemoteOperation::Fetch,
+        "origin",
+        Some("file://attacker.example/share/repo.git"),
+    );
+
+    assert!(!decision.is_allowed());
+    assert_eq!(
+        decision.target,
+        GitRemoteTarget::Host {
+            host: "attacker.example".to_string(),
+            scheme: "file".to_string(),
+        }
+    );
+    let row = decision.audit_row();
+    assert!(
+        row.contains("target=file://attacker.example")
+            && row.contains("decision=deny")
+            && row.contains("air-gap"),
+        "audit row must record the checked file host and denial; got: {row}"
+    );
 }
 
 #[test]
