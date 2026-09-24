@@ -27,7 +27,14 @@ Treat the labels as the product source of truth for the current profile and plat
 | Completion popup | Accept selected item | `Tab` / `Enter` | Insert the selected label through editor authority. |
 | Completion popup | Dismiss | `Esc` | Close the popup without inserting. |
 | Hover tooltip | Dismiss | `Esc` | Close the hover tooltip (re-opens only when new hover data arrives). |
-| Editor | Go to definition | Command palette → `GoToDefinition` | Navigate to the definition site for the symbol under the cursor. |
+| Editor | Go to definition | `F12` | Navigate to the definition site for the symbol under the cursor. |
+| App command palette | Workspace search | `Ctrl+Shift+F` | Opens the search palette scoped to the workspace. |
+| Editor | Rename symbol | `F2` | Opens the language rename command; enter the replacement name and review the proposal before applying. |
+| Editor | Format document | `Shift+Alt+F` | Opens the formatting proposal preview for the active buffer. |
+| Editor | Organize imports | `Ctrl+Shift+O` | Opens the organize-imports proposal preview for the active buffer. |
+| Editor | Add cursor above | `Ctrl+Alt+↑` | Adds a cursor one line above each existing one. A cursor on the first line adds nothing rather than stacking a duplicate. |
+| Editor | Add cursor below | `Ctrl+Alt+↓` | Adds a cursor one line below each existing one. Columns are clamped per line, so a cursor in a long line lands at a short line's end. |
+| Editor | Collapse to one cursor | `Esc` | Only while more than one cursor is active; otherwise `Esc` is left for the completion popup, hover tooltip, and Vim mode exit. |
 
 ## SCM diff review navigation
 
@@ -37,8 +44,28 @@ Treat the labels as the product source of truth for the current profile and plat
 | SCM diff panel | Previous Hunk | `[h` | Move focus to the previous changed hunk. Projected from `GitNavPrevHunk` intent. |
 | SCM diff panel | Next File | `]f` | Move focus to the next changed file. Projected from `GitNavNextFile` intent. |
 | SCM diff panel | Previous File | `[f` | Move focus to the previous changed file. Projected from `GitNavPrevFile` intent. |
+| SCM diff panel | Stage Focused Hunk | `Ctrl+Shift+G` | Stage the focused unstaged hunk through the existing `StageGitHunk` intent; the same action is available from the command palette as `Git: Stage Focused Hunk`. |
 
 Navigation state (`focused_hunk_id`) is owned by the application layer and reflected in `GitProjection`; the desktop shell is projection-only.
+
+## Product command coverage
+
+The command palette registry currently exposes the core file, settings, Git lifecycle/remote,
+and language-server commands exercised by the app projection, including `Git: Push`, `Git: Fetch`,
+`Git: Pull`, `Git: Stage Focused Hunk`, `Git: Commit Staged Changes`, `Language Server: Start`,
+and `Language Server: Restart`. Git hunk *navigation*, test discovery/run, and terminal launch
+remain typed shell commands rather than default key bindings:
+
+- `:git-nav-next-hunk`, `:git-nav-prev-hunk`, `:git-nav-next-file`, and `:git-nav-prev-file`
+  emit projection-only Git navigation intents. Staging the focused hunk is `Ctrl+Shift+G`.
+- `:git-stage-hunk <hunk-id>` remains the operand form when the hunk id is typed explicitly.
+- `:test-refresh`, `:test-run <item-id>`, and `:test-run-group <label>` emit worker-backed test intents.
+- `:term-launch <command>` launches a trusted terminal; it is not a default keymap.
+- `:format`, `:rename <position>,<name>`, `:organize-imports`, and `:code-action <id>` emit
+  proposal-mediated language intents. Format/rename/organize also have default keymap entries.
+
+Problems navigation uses `F8` / `Shift+F8` in the default keymap. Debug stack-frame navigation
+uses Alt+ArrowUp/Down. Those chords are part of the default map.
 
 ## Mode controls
 

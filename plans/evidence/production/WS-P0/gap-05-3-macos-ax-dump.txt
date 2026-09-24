@@ -1,0 +1,10 @@
+PROCESS_FOUND: legion-desktop
+WINDOW_COUNT=1
+[1] window name='Legion IDE Smoke'
+  [2] AXButton name='missing value'
+  [2] AXButton name='missing value'
+  [2] AXButton name='missing value'
+  [2] AXStaticText name='Legion IDE Smoke'
+DESCENDANTS_ENUMERATED: 5
+AX_WALK_OK
+

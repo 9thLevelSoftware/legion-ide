@@ -487,6 +487,9 @@ fn perf_harness_skeleton_measurement_serializes_stably() {
         budget_millis: 250,
         status: SkeletonStatus::Passed,
         message: "ok".to_string(),
+        measured: true,
+        bytes_value: 0,
+        synthetic_stand_in: true,
     };
     let text = toml::to_string_pretty(&measurement).expect("serialize");
     assert!(
@@ -528,6 +531,9 @@ fn perf_harness_skeleton_kind_serializes_stable_snake_case() {
             budget_millis: 0,
             status: SkeletonStatus::Skipped,
             message: "kind serialization test".to_string(),
+            measured: false,
+            bytes_value: 0,
+            synthetic_stand_in: false,
         };
         let serialized = toml::to_string(&measurement).expect("serialize skeleton measurement");
         assert!(
@@ -553,36 +559,48 @@ fn manual_renderer_measurement(status: SkeletonStatus) -> SkeletonMeasurement {
         budget_millis: 32,
         status,
         message: "Manual renderer measurement exceeded budget".to_string(),
+        measured: true,
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
-/// The renderer-backed Manual measurement is derived from the desktop
-/// manual-perf report rather than a SkeletonDescriptor, so it must apply the
-/// LEGION_PERF_FAIL_ON_BUDGET_MS semantics itself: an override of `0`
-/// reclassifies a budget failure as report-only (Skipped) while preserving
-/// the measured numbers (hosted CI runs report-only; a 0.6% p95 overage on a
-/// shared runner must not fail the gate step).
+/// GAP-09.2: renderer-backed paint rows ignore `LEGION_PERF_FAIL_ON_BUDGET_MS=0`.
+/// A budget miss stays Failed so the hosted gate can go red.
 #[test]
-fn perf_harness_zero_override_reclassifies_manual_renderer_failure_as_report_only() {
+fn perf_harness_zero_override_does_not_disarm_renderer_paint_rows() {
     let mut measurement = manual_renderer_measurement(SkeletonStatus::Failed);
     apply_fail_on_budget_value_to_manual_measurement(&mut measurement, "0");
-    assert_eq!(measurement.status, SkeletonStatus::Skipped);
-    assert_eq!(measurement.budget_millis, 0);
+    assert_eq!(measurement.status, SkeletonStatus::Failed);
+    assert_eq!(measurement.budget_millis, 32);
     assert_eq!(measurement.p95_micros, 32205, "numbers preserved");
-    assert!(measurement.message.contains("report-only"));
 }
 
-/// A non-zero override re-gates the manual renderer measurement against the
-/// override budget in milliseconds (both directions).
+/// A non-zero override also leaves renderer paint rows on the desktop report's
+/// own verdict (same as product workloads ignoring the skeleton override).
 #[test]
-fn perf_harness_nonzero_override_regates_manual_renderer_measurement() {
-    let mut relaxed = manual_renderer_measurement(SkeletonStatus::Failed);
-    apply_fail_on_budget_value_to_manual_measurement(&mut relaxed, "40");
-    assert_eq!(relaxed.status, SkeletonStatus::Passed, "32.2ms within 40ms");
+fn perf_harness_nonzero_override_does_not_regate_renderer_paint_rows() {
+    let mut failed = manual_renderer_measurement(SkeletonStatus::Failed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut failed, "40");
+    assert_eq!(failed.status, SkeletonStatus::Failed);
+    assert_eq!(failed.budget_millis, 32);
 
-    let mut tightened = manual_renderer_measurement(SkeletonStatus::Passed);
-    apply_fail_on_budget_value_to_manual_measurement(&mut tightened, "10");
-    assert_eq!(tightened.status, SkeletonStatus::Failed, "32.2ms over 10ms");
+    let mut passed = manual_renderer_measurement(SkeletonStatus::Passed);
+    apply_fail_on_budget_value_to_manual_measurement(&mut passed, "10");
+    assert_eq!(passed.status, SkeletonStatus::Passed);
+    assert_eq!(passed.budget_millis, 32);
+}
+
+#[test]
+fn perf_harness_zero_override_does_not_zero_large_file_paint_descriptor() {
+    let mut skeleton = SkeletonDescriptor::m9_large_file_100mb();
+    let original = skeleton.budget_millis;
+    assert!(original > 0, "m9 ships with a paint budget");
+    apply_fail_on_budget_value(&mut skeleton, "0");
+    assert_eq!(
+        skeleton.budget_millis, original,
+        "GAP-09.2: hosted report-only override must not disarm m9"
+    );
 }
 
 /// A non-numeric override value leaves the measurement untouched (parity

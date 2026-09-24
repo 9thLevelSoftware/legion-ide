@@ -43,3 +43,38 @@ fn redact_model_bound_output_scrubs_new_context_scanning_markers() {
     assert!(!redacted.redacted_text.contains("retained_context"));
     assert!(!redacted.redacted_text.contains("ejected_context"));
 }
+
+/// Re-exported rather than re-implemented: four crates grew their own
+/// copy of this generator, each with a different seed, so none was
+/// authoritative. See `legion_security::synthetic_credentials`.
+use legion_security::synthetic_credentials::synthetic_access_key_id;
+
+#[test]
+fn redact_model_bound_output_scrubs_credentials_with_no_marker_or_prefix() {
+    // The marker pass knows `sk-`, `xoxb-`, `ghp_`, `gho_`, and three assignment
+    // keywords. An AWS access key id matches none of them, so before the shared
+    // ruleset was wired in this payload reached the provider verbatim.
+    let key_id = synthetic_access_key_id();
+    let output = format!("sts call failed for {key_id} during fetch");
+
+    let redacted = redact_model_bound_output(&output, 256);
+
+    assert!(redacted.redacted);
+    assert!(!redacted.redacted_text.contains(key_id.as_str()));
+    assert!(redacted.redacted_text.contains("[redacted]"));
+    assert!(redacted.redacted_text.starts_with("sts call failed for "));
+}
+
+#[test]
+fn redact_model_bound_output_leaves_digests_and_identifiers_intact() {
+    // Egress posture still must not shred ordinary tool output. Every string
+    // here is the shape of something this workspace produces constantly.
+    let output = "content_hash=9f2c4a7b1e6d3058af1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071 \
+                  causality_id=018f0000-0000-7000-8000-300000000005 \
+                  manifest:cbf29ce484222325";
+
+    let redacted = redact_model_bound_output(output, 512);
+
+    assert_eq!(redacted.redacted_text, output);
+    assert!(!redacted.redacted);
+}

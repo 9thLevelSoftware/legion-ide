@@ -89,7 +89,7 @@ function Read-MsiProductVersion([string]$Path) {
             $database = $windowsInstaller.OpenDatabase($Path, 0)
             $query = 'SELECT `Value` FROM `Property` WHERE `Property` = ''ProductVersion'''
             $view = $database.OpenView($query)
-            $view.Execute()
+            [void]$view.Execute()
             $record = $view.Fetch()
         } catch {
             Fail "Unable to query MSI Property table for ProductVersion via WindowsInstaller.Installer: $($_.Exception.Message)"
@@ -97,10 +97,15 @@ function Read-MsiProductVersion([string]$Path) {
         if ($null -eq $record) {
             Fail "MSI Property table does not contain ProductVersion"
         }
-        return $record.StringData(1)
+        # PowerShell emits every uncaptured value in a function body, so an
+        # uncaptured COM call here turns this return into an array that the
+        # caller interpolates space-joined ("expected 0.0.2, found  0.0.2").
+        # The `[void]` casts above and below prevent that; the trim normalises
+        # whitespace in the Property value itself.
+        return $record.StringData(1).Trim()
     } finally {
         if ($null -ne $view) {
-            try { $view.Close() } catch {}
+            try { [void]$view.Close() } catch {}
         }
         foreach ($comObject in @($record, $view, $database, $windowsInstaller)) {
             if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
@@ -165,7 +170,9 @@ try {
     # version defect is reported cheaply and deterministically.
     $productVersion = Read-MsiProductVersion $msiPath
     if ($productVersion -cne $ReleaseVersion) {
-        Fail "MSI ProductVersion mismatch: expected $ReleaseVersion, found $productVersion"
+        # Quoted on both sides so the next whitespace-shaped defect is legible
+        # in the log instead of reading as "expected X, found X".
+        Fail "MSI ProductVersion mismatch: expected '$ReleaseVersion', found '$productVersion'"
     }
     $packageVersionStatus = "passed"
     Add-Content -LiteralPath $evidencePath -Value "package_version=passed version=$productVersion"

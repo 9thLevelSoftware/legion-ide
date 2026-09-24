@@ -22,6 +22,11 @@ icons = [
   "__PACKAGING_DIR__/icons/legion-16.png",
 ]
 formats = ["__FORMAT__"]
+resources = [
+  "__REPO_ROOT__/LICENSE",
+  "__REPO_ROOT__/docs/PRIVACY.md",
+  "__REPO_ROOT__/THIRD_PARTY_NOTICES.md",
+]
 
 [windows]
 allow-downgrades = false
@@ -34,7 +39,7 @@ generate-desktop-entry = false
 
 [deb]
 section = "devel"
-files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png" }
+files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png", "__REPO_ROOT__/LICENSE" = "usr/share/doc/legion-desktop/LICENSE", "__REPO_ROOT__/docs/PRIVACY.md" = "usr/share/doc/legion-desktop/PRIVACY.md", "__REPO_ROOT__/THIRD_PARTY_NOTICES.md" = "usr/share/doc/legion-desktop/THIRD_PARTY_NOTICES.md" }
 
 [appimage]
-files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion-desktop.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png" }
+files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion-desktop.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png", "__REPO_ROOT__/LICENSE" = "usr/share/doc/legion-desktop/LICENSE", "__REPO_ROOT__/docs/PRIVACY.md" = "usr/share/doc/legion-desktop/PRIVACY.md", "__REPO_ROOT__/THIRD_PARTY_NOTICES.md" = "usr/share/doc/legion-desktop/THIRD_PARTY_NOTICES.md" }

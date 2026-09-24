@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: QUAL.11 taxonomy
+    url: https://github.com/9thLevelSoftware/legion-ide/blob/main/plans/qual-11-release-blocker-taxonomy.md
+    about: How to file a release blocker (not a generic bug).

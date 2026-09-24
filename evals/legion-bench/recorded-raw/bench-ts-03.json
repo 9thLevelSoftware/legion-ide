@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-03",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:19462c10c43e527f",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n[\n  {\n    \"name\": \"read\",\n    \"arguments\": {\n      \"path\": \"src/money.js\"\n    }\n  },\n  {\n    \"name\": \"edit-as-proposal\",\n    \"arguments\": {\n      \"path\": \"src/money.js\",\n      \"replacement\": \"const formatCents = (cents) => {\\n  return `$${(cents / 100).toFixed(2)}`;\\n};\\n\\nmodule.exports = {\\n  parseAmount,\\n  formatCents\\n};\",\n      \"proposal_title\": \"Add formatCents to src/money.js\",\n      \"proposal_reason\": \"Deduplicating the formatCents helper function into the money module.\"\n    }\n  },\n  {\n    \"name\": \"read\",\n    \"arguments\": {\n      \"path\": \"src/report.js\"\n    }\n  },\n  {\n    \"name\": \"edit-as-proposal\",\n    \"arguments\": {\n      \"path\": \"src/report.js\",\n      \"replacement\": \"const { parseAmount, formatCents } = require('./money');\",\n      \"start_line\": 1,\n      \"end_line\": 1,\n      \"proposal_title\": \"Remove local formatCents and require from src/money.js in src/report.js\",\n      \"proposal_reason\": \"Deduplicating the formatCents helper function into the money module.\"\n    }\n  },\n  {\n    \"name\": \"read\",\n    \"arguments\": {\n      \"path\": \"src/cli.js\"\n    }\n  },\n  {\n    \"name\": \"edit-as-proposal\",\n    \"arguments\": {\n      \"path\": \"src/cli.js\",\n      \"replacement\": \"const { parseAmount, formatCents } = require('./money');\",\n      \"start_line\": 1,\n      \"end_line\": 1,\n      \"proposal_title\": \"Remove local formatCents and require from src/money.js in src/cli.js\",\n      \"proposal_reason\": \"Deduplicating the formatCents helper function into the money module.\"\n    }\n  }\n]\n```\n\nend_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119965,
+        "id": "chatcmpl-997",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 436,
+          "prompt_tokens": 634,
+          "total_tokens": 1070
+        }
+      }
+    }
+  ]
+}

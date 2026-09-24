@@ -1,0 +1,8 @@
+CMD: cargo run -p xtask -- docs-hygiene
+CWD: /d/legion-ide-completion
+BEGIN
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running `target\debug\xtask.exe docs-hygiene`
+documentation hygiene checks passed
+END
+EXIT=0

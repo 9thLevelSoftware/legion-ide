@@ -8,10 +8,12 @@
 //! This module does **not** contain capture logic; see
 //! [`legion_observability::crash_capture`] for the panic-hook installation.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use legion_observability::export::{DiagnosticsBundle, DiagnosticsExportBuilder, ExportError};
-use legion_protocol::WorkbenchTelemetryConsent;
+use legion_protocol::{ProtocolError, WorkbenchTelemetryConsent};
+
+use crate::{AppComposition, AppCompositionError};
 
 /// Metadata row returned by [`SupportBundleAssembler::list_crash_reports`].
 #[derive(Debug, Clone)]
@@ -83,6 +85,161 @@ impl SupportBundleAssembler {
         DiagnosticsExportBuilder::new(self.bundle_dir.clone(), self.consent.clone())
             .with_include_raw(true)
             .build()
+    }
+}
+
+/// Metadata header composed by [`AppComposition`] for the Help/About export.
+pub struct SupportBundleHeader {
+    /// Crate version of the composition root.
+    pub app_version: String,
+    /// Active product mode label (Manual / Assist / Delegate / Automate).
+    pub product_mode: String,
+    /// Telemetry consent label (`local-only` or `crash-reports`).
+    pub telemetry_label: String,
+    /// Whether crash-report consent is enabled.
+    pub crash_reports_enabled: bool,
+    /// Always false on the Help/About path.
+    pub raw_source_allowed: bool,
+    /// Open tab count from app-owned tab state.
+    pub open_tab_count: usize,
+}
+
+/// Render a metadata-only support-bundle markdown document.
+///
+/// Crash rows come from [`SupportBundleAssembler::list_crash_reports`]. The
+/// document must not include editor text, secrets, or raw crash bodies.
+#[must_use]
+pub fn render_metadata_support_bundle(
+    header: &SupportBundleHeader,
+    crash_rows: &[CrashReportRow],
+) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Legion Support Bundle\n\n");
+    markdown.push_str("schema_version: 1\n");
+    markdown.push_str("metadata_only: true\n");
+    markdown.push_str("signer_status: unsigned-beta\n");
+    markdown.push_str(&format!("app_version: {}\n", header.app_version));
+    markdown.push_str(&format!("product_mode: {}\n", header.product_mode));
+    markdown.push_str(&format!("telemetry_label: {}\n", header.telemetry_label));
+    markdown.push_str(&format!(
+        "crash_reports_enabled: {}\n",
+        header.crash_reports_enabled
+    ));
+    markdown.push_str(&format!(
+        "raw_source_allowed: {}\n",
+        header.raw_source_allowed
+    ));
+    markdown.push_str(&format!("open_tab_count: {}\n", header.open_tab_count));
+    markdown.push_str(&format!("crash_report_count: {}\n\n", crash_rows.len()));
+    markdown.push_str("## Crash reports\n\n");
+    if crash_rows.is_empty() {
+        markdown.push_str("none\n\n");
+    } else {
+        for row in crash_rows {
+            markdown.push_str(&format!(
+                "- crash_id: {} timestamp: {} os: {}\n",
+                row.crash_id, row.timestamp, row.os
+            ));
+        }
+        markdown.push('\n');
+    }
+    markdown.push_str("## Privacy\n\n");
+    markdown.push_str(
+        "- This bundle is metadata-only. It does not include editor text, dirty buffers, search queries, terminal payloads, prompts, API keys, or raw crash bodies.\n",
+    );
+    markdown.push_str(
+        "- Help/About export never sets include_raw. Product consent keeps raw_source_allowed false.\n",
+    );
+    markdown.push_str(
+        "- Manual mode is zero-egress for product features. AI modes are opt-in. There is no phone-home.\n",
+    );
+    markdown
+}
+
+fn support_bundle_error(code: &str, message: impl Into<String>) -> AppCompositionError {
+    AppCompositionError::Protocol(ProtocolError {
+        code: code.to_string(),
+        message: message.into(),
+    })
+}
+
+fn write_support_bundle_markdown(path: &Path, contents: &str) -> std::io::Result<()> {
+    if let Ok(metadata) = std::fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("support bundle path is a symlink: {}", path.display()),
+        ));
+    }
+    std::fs::write(path, contents)
+}
+
+impl AppComposition {
+    /// Export a metadata-only support bundle via [`SupportBundleAssembler`].
+    ///
+    /// Destination is `<workspace>/.legion/support-bundle.md`. Crash summaries
+    /// are read from `<workspace>/.legion/crash-reports`. This path never
+    /// requests raw source.
+    pub(crate) fn export_support_bundle(&self) -> Result<String, AppCompositionError> {
+        let root_path = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        let root = Path::new(root_path);
+
+        let crash_dir = super::create_workspace_state_dir(root, &[".legion", "crash-reports"])
+            .map_err(|error| {
+                support_bundle_error(
+                    "support_bundle.dir_create_failed",
+                    format!("cannot create crash-reports directory: {error}"),
+                )
+            })?;
+        let legion_dir =
+            super::create_workspace_state_dir(root, &[".legion"]).map_err(|error| {
+                support_bundle_error(
+                    "support_bundle.dir_create_failed",
+                    format!("cannot create .legion directory: {error}"),
+                )
+            })?;
+
+        let assembler = SupportBundleAssembler::new(crash_dir, self.settings.telemetry.clone());
+        let bundle = assembler.build_metadata_bundle().map_err(|error| {
+            support_bundle_error(
+                "support_bundle.export_failed",
+                format!("metadata bundle failed: {error}"),
+            )
+        })?;
+        if !bundle.metadata_only
+            || bundle
+                .entries
+                .iter()
+                .any(|entry| !entry.raw_paths.is_empty())
+        {
+            return Err(support_bundle_error(
+                "support_bundle.raw_refused",
+                "Help/About export produced raw paths; refusing to write",
+            ));
+        }
+
+        let header = SupportBundleHeader {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            product_mode: format!("{:?}", self.product_mode),
+            telemetry_label: self.settings.telemetry.consent_label.clone(),
+            crash_reports_enabled: self.settings.telemetry.crash_reports_enabled,
+            raw_source_allowed: self.settings.telemetry.raw_source_allowed,
+            open_tab_count: self.active_documents.open_tabs.len(),
+        };
+        let markdown = render_metadata_support_bundle(&header, &assembler.list_crash_reports());
+        let dest = legion_dir.join("support-bundle.md");
+        write_support_bundle_markdown(&dest, &markdown).map_err(|error| {
+            support_bundle_error(
+                "support_bundle.write_failed",
+                format!("cannot write {}: {error}", dest.display()),
+            )
+        })?;
+        Ok(dest.to_string_lossy().into_owned())
     }
 }
 
@@ -220,5 +377,27 @@ mod tests {
         let result = assembler.build_raw_bundle();
 
         assert!(result.is_err(), "should error without raw consent");
+    }
+
+    #[test]
+    fn rendered_support_bundle_is_metadata_only() {
+        let header = SupportBundleHeader {
+            app_version: "0.1.0".to_string(),
+            product_mode: "Manual".to_string(),
+            telemetry_label: "local-only".to_string(),
+            crash_reports_enabled: false,
+            raw_source_allowed: false,
+            open_tab_count: 1,
+        };
+        let rows = [CrashReportRow {
+            crash_id: "crash-aaa".to_string(),
+            timestamp: "1700000000".to_string(),
+            os: "windows".to_string(),
+        }];
+        let markdown = render_metadata_support_bundle(&header, &rows);
+        assert!(markdown.contains("metadata_only: true"));
+        assert!(markdown.contains("crash_id: crash-aaa"));
+        assert!(!markdown.contains("SECRET"));
+        assert!(!markdown.contains("panic.txt"));
     }
 }

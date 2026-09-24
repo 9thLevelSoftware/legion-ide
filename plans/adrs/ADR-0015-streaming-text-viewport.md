@@ -115,3 +115,25 @@ The ADR is satisfied only when the Phase 1 implementation can demonstrate that v
 - **Positive**: Existing proposal-mediated save conflict behavior remains intact during the streaming substrate transition.
 - **Negative**: Phase 1 saves may still require full-payload compatibility materialization at the save workflow boundary, so very large degraded files may need typed save limitations until later proposal and streaming-write workstreams.
 - **Negative**: Consumers must tolerate stale, clipped, or omitted metadata and must implement resynchronization rather than relying on blocking event delivery.
+
+## 2026-09-06 implementation note
+
+The current editor implementation provides `OwnedSnapshotLease` records through
+the app UI facade. Lease reads remain descriptor- and line-chunk-authorized,
+with a 96 KiB maximum read, and do not expose a full source body. Release is
+linearized with reads; `EditorEngine` drop revokes the shared lease state so
+clones fail closed after engine shutdown. The focused editor cases are
+`owned_snapshot_lease_is_send_sync_and_reads_from_worker`,
+`owned_snapshot_lease_keeps_old_version_after_edit_without_full_cache`,
+`releasing_owned_snapshot_lease_revokes_all_clones`,
+`owned_snapshot_lease_rejects_expiry_and_oversize_reads`, and
+`dropping_editor_engine_revokes_owned_snapshot_clones` (run with
+`cargo test -p legion-editor --lib owned_snapshot_lease` and
+`cargo test -p legion-editor --lib dropping_editor_engine_revokes_owned_snapshot_clones`).
+The desktop suite
+contains the persistent-source cases
+`owned_source_reuses_exact_lease_across_same_snapshot_frames` and
+`owned_source_releases_old_lease_when_editor_snapshot_changes` (run with
+`cargo test -p legion-desktop --lib owned_source_`). These focused tests refine
+the Phase 1 contract and do not
+activate LSP, semantic, or other future consumers.

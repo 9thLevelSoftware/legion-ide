@@ -21,15 +21,75 @@ use legion_protocol::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Credential-shaped strings for tests, generated rather than written down.
+///
+/// Behind the `test-helpers` feature because `#[cfg(test)]` items are not
+/// visible across crate boundaries, and four crates need these: without a
+/// shared home the generator gets copy-pasted, which is what happened —
+/// `legion-agent`, `legion-ai`, `legion-retention` and `legion-terminal` each
+/// grew their own with a different seed constant, so a reviewer reading all
+/// four had to work out which was authoritative. None of them was.
+///
+/// The generated-not-literal property is the point. A test that needs a
+/// credential-shaped string must not contain one: GitGuardian scans every
+/// push, and a literal that matches a live provider pattern is a finding
+/// whatever the surrounding comment says.
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod synthetic_credentials {
+    /// One step of a linear congruential generator.
+    ///
+    /// Deterministic on purpose: a fixture that differs between runs turns a
+    /// detector regression into a flake.
+    fn next_state(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    /// An uppercase-alphanumeric body — the AWS access-key-id charset.
+    pub fn upper_alnum_body(len: usize, seed: u64) -> String {
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| ALPHABET[next_state(&mut state) as usize % ALPHABET.len()] as char)
+            .collect()
+    }
+
+    /// An AWS-access-key-id-shaped value, without committing one.
+    ///
+    /// The seed is fixed so the same string comes back every run; callers that
+    /// need two distinguishable values should use [`upper_alnum_body`] with
+    /// seeds of their own rather than reaching for a literal.
+    pub fn synthetic_access_key_id() -> String {
+        format!("AKIA{}", upper_alnum_body(16, 0x5eed_1234_9abc_def1))
+    }
+}
+
 /// Deterministic approval-risk evaluation helpers.
 pub mod policy;
 pub use policy::{
-    BatchRuntimeApplyPolicy, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy,
-    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, ProposalApplyGate,
-    ProposalAutoApprovalPolicy, approval_level_audit_metadata, classify_git_remote_url,
-    decide_git_remote_operation, derive_approval_level,
+    BatchRuntimeApplyPolicy, BudgetCapPolicy, BundleDecision, BundleEnforcementPolicy,
+    BundleRequest, DEBUG_ADAPTER_LAUNCH_CAPABILITY, DebugAdapterLaunchPolicy, Ed25519VerifyFailure,
+    GitRemoteDecision, GitRemoteOperation, GitRemoteTarget, McpToolAllowlistPolicy,
+    POLICY_BUNDLE_SCHEMA_VERSION, POLICY_BUNDLE_SIGNATURE_ALGORITHM, PluginQuotaCeiling,
+    PluginQuotaClamp, PluginQuotaGrant, PolicyBundleError, PolicyKeyring, PolicySigningKey,
+    PolicySurface, ProposalApplyGate, ProposalAutoApprovalPolicy, ProviderAllowlistPolicy,
+    RetentionExportPolicy, SignedPolicyBundle, VerifiedPolicyBundle, approval_level_audit_metadata,
+    classify_git_remote_url, decide_git_remote_operation, derive_approval_level,
+    ed25519_verifying_key, policy_bundle_verifying_key_b64, sign_ed25519_detached,
+    sign_policy_bundle, verify_ed25519_signature,
 };
 pub mod risk;
+
+/// Regex + entropy secret detection for proposal, terminal, and retained text.
+pub mod secrets;
+pub use secrets::{
+    ProposalSecretScan, ProposalSecretSite, RedactedText, ScanPosture, SecretConfidence,
+    SecretFinding, SecretRuleId, SecretScanReport, SecretSeverity, SecretSpan,
+    redact_secrets_in_text, scan_proposal_for_secrets, scan_proposal_payload_for_secrets,
+    scan_text_for_secrets,
+};
 
 /// Trust state accepted by policy for workspace-sensitive decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +375,21 @@ impl RedactionScanReport {
 }
 
 /// Conservatively scans trace, diff, or log text for raw payload and secret markers.
+///
+/// Two independent detectors run here and both contribute findings:
+///
+/// 1. The structural marker list below, which catches DTO field names that must
+///    never appear in a metadata-only record (`proposal_content`, `source_body`,
+///    ...). These are schema violations, not credentials.
+/// 2. [`secrets::scan_text_for_secrets`], which catches actual credentials by
+///    provider shape, credential-named assignment, and entropy.
+///
+/// The marker list alone cannot see an AWS key or a JWT, and the secret ruleset
+/// alone cannot see a raw-payload schema violation, so neither replaces the other.
+///
+/// This entry point is the pre-retention and pre-export boundary, so it evaluates
+/// secret findings under [`ScanPosture::EgressRecall`]: a leak past this point is
+/// unrecoverable, which makes over-redaction the cheaper error.
 pub fn scan_payload_for_sensitive_markers(
     payload_kind: RedactionPayloadKind,
     payload: &str,
@@ -360,6 +435,17 @@ pub fn scan_payload_for_sensitive_markers(
                 byte_offset,
             });
         }
+    }
+
+    // EgressRecall posture: every confidence tier, including the entropy
+    // heuristic, contributes a finding at this boundary.
+    let secret_report = scan_text_for_secrets(payload);
+    for finding in &secret_report.findings {
+        findings.push(RedactionScanFinding {
+            payload_kind,
+            marker_label: finding.rule_id.stable_id().to_string(),
+            byte_offset: finding.span.start,
+        });
     }
 
     RedactionScanReport {
@@ -939,6 +1025,18 @@ pub struct SecurityPolicy {
     /// Proposal auto-approval envelope policy.
     #[serde(default)]
     pub proposal_auto_approval_policy: ProposalAutoApprovalPolicy,
+    /// Signed org policy bundle enforcement: provider allowlist, MCP/tool
+    /// allowlist, budget caps, and retention/export rules (P9.F2.T3).
+    ///
+    /// These live inside `SecurityPolicy` rather than only on the bundle so that
+    /// every holder of a [`DenyByDefaultBroker`] enforces them. Under P5.F1.T2
+    /// every tool call is routed through the broker, and crates that are
+    /// forbidden from depending on `legion-security` (notably `legion-agent`)
+    /// reach policy only through the injected
+    /// [`CapabilityBrokerPort`](legion_protocol::CapabilityBrokerPort) trait
+    /// object — putting the rules anywhere else would leave those callers out.
+    #[serde(default)]
+    pub bundle_enforcement: BundleEnforcementPolicy,
 }
 
 /// Signed, versioned org policy bundle for admin distribution.
@@ -1318,10 +1416,11 @@ impl DenyByDefaultBroker {
     }
 
     fn is_loopback_host(host: &str) -> bool {
-        matches!(
-            host.to_ascii_lowercase().as_str(),
-            "localhost" | "127.0.0.1" | "::1"
-        )
+        // Delegates to the crate's single definition. Two copies of this
+        // predicate disagreed with the product AI descriptor's third, and a
+        // loopback address one accepted and another rejected denied every
+        // request to a server that was running.
+        crate::policy::is_loopback_host(host)
     }
 
     fn host_matches_configured(pattern: &str, host: &str) -> bool {
@@ -1941,6 +2040,17 @@ impl DenyByDefaultBroker {
             return SecurityDecision::deny(format!(
                 "capability {capability} denied: principal is required"
             ));
+        }
+
+        // Signed org policy bundle rules (P9.F2.T3) are evaluated before any
+        // per-family dispatch below, so they apply to every capability rather
+        // than only to the families whose `if` arm happens to consult them. A
+        // capability family added later inherits the bundle for free; one that
+        // returns early further down cannot escape it.
+        if let Some((surface, reason)) =
+            self.policy.bundle_enforcement.refusal(&capability, context)
+        {
+            return SecurityDecision::deny(format!("[{}] {reason}", surface.stable_id()));
         }
 
         if capability.starts_with("ai.")

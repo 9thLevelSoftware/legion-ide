@@ -31,6 +31,7 @@ fn make_launch_request(
         },
         command: command.into(),
         args,
+        cwd: None,
         env: None,
     }
 }
@@ -55,6 +56,7 @@ fn make_launch_request_with_env(
         },
         command: command.into(),
         args,
+        cwd: None,
         env: Some(env),
     }
 }

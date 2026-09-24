@@ -117,6 +117,15 @@ fn enterprise_policy_bundle_enforces_provider_budget_and_retention_rules() {
     let bundle = enterprise_bundle();
     let principal = PrincipalId("enterprise-user".to_string());
 
+    // P9.F2.T3 added a provider allowlist and a budget cap to this profile, so
+    // a permitted invocation now has to name an allowlisted provider and declare
+    // a cost inside the cap. Both operands are required — omitting either is a
+    // denial, which `policy_bundle_surfaces.rs` covers directly.
+    let allowlisted_local_provider = CapabilityRequestContext {
+        ai_provider_id: Some("ollama".to_string()),
+        budget_request_cost_cents: Some(5),
+        ..localhost_https_context()
+    };
     assert_eq!(
         bundle.decide_with_request_context(
             ProductMode::Manual,
@@ -124,7 +133,7 @@ fn enterprise_policy_bundle_enforces_provider_budget_and_retention_rules() {
             principal.clone(),
             CapabilityId("ai.provider.invoke".to_string()),
             None,
-            localhost_https_context(),
+            allowlisted_local_provider,
         ),
         SecurityDecision::Allow
     );
@@ -135,6 +144,8 @@ fn enterprise_policy_bundle_enforces_provider_budget_and_retention_rules() {
             host: "example.com".to_string(),
             port: Some(443),
         }),
+        ai_provider_id: Some("ollama".to_string()),
+        budget_request_cost_cents: Some(5),
         ..CapabilityRequestContext::default()
     };
     assert!(matches!(
@@ -158,7 +169,9 @@ fn enterprise_policy_bundle_enforces_provider_budget_and_retention_rules() {
         cloud_lane_scope_visible_to_user: true,
         cloud_lane_task_packet_validated: true,
         cloud_lane_hard_cap_enforced: true,
-        cloud_lane_estimated_cost_cents: Some(200),
+        // Inside both the cloud-lane cap (250) and the bundle's per-request
+        // budget cap (25) that P9.F2.T3 now also applies to this field.
+        cloud_lane_estimated_cost_cents: Some(20),
         cloud_lane_upload_bytes: Some(1024),
         ..CapabilityRequestContext::default()
     };

@@ -190,3 +190,101 @@ and consumed by `legion-app` through protocol DTOs and projections.
   `crates/legion-lsp/tests/`)
 - WS-03 evidence under `plans/evidence/production/m1/` once the LSP
   runtime productizes (out of scope for this M0 ratification).
+
+## 2026-09-06 implementation status note
+
+The generic TypeScript/JavaScript path remains an app-owned, real-server
+projection: provisioning and runtime identity must be project-aware and
+versioned, document synchronization must use buffer/snapshot/version freshness,
+and LSP-proposed workspace edits continue through proposal authority. Ordinary
+typing remains editor-owned. Registry declarations or local
+contract tests do not establish the packaged native language journey required
+by S2-06. The current native TypeScript startup evidence is the
+`explicit_typescript_startup_is_lazy_live_and_restart_preserves_dirty_text`
+test (`LEGION_TEST_NODE_RUNTIME=<approved-local-node> cargo test -p legion-app
+--test typescript_app_startup -- --ignored --nocapture`, 1 passed in 16.23s).
+The run requires the retained pinned TypeScript archives and an explicit local
+Node runtime; it is implementation evidence for the lazy/live/restart seam,
+not packaged completion evidence, and makes no packaged completion claim.
+
+## 2026-09-06 S2 projection evidence
+
+The current explicit TypeScript projection also covers global rename preview,
+cancel, approve, apply, and save, plus formatting through the same save path;
+an external-overwrite conflict rejects the operation without partial apply.
+Code-action candidates use exact selection and bounded resolve (64 candidates
+and 256 KiB). All proposed workspace writes retain authoritative buffer,
+snapshot, version, and fresh workspace-fingerprint preconditions, with no more
+than 32 admitted write IDs and a shared bounded synchronization queue. The
+focused write/action/desktop results (16/15/3 tests) were recorded before the
+latest generalized queue and are scoped implementation evidence. Command
+execution and app-owned LSP `applyEdit` remain in progress. Initial
+command/mixed queue admission and backpressure, together with CAS callback
+coverage, are now exercised by the app unit suite. The latest component root
+evidence is `s2-app-lib-root-r20.log` (418 passed, 0 failed, 0.55s after
+20.68s compilation) and `s2-lsp-composition-root-r2.log` (22 passed, 0 failed).
+The real TypeScript missing-import test passes in
+`s2-typescript-codeaction-root-r1.log`. The native matrix in
+`s2-typescript-native-root-r23.log` reports 5 passed, 0 failed, 18.13s after
+36.23s compilation. The earlier r22 4-of-5 result is
+historical; the missing rename edit was repaired with an actual workspace
+synchronization barrier, with the native fixture unchanged and no completion
+warmup. The deterministic once-issued UI rename ordering regression is
+included. Per-attempt cancellation, retry, the 32-write cap, and
+resolved-mixed-action tests now pass. The Organize Imports command branch
+remains incomplete, and native GUI qualification is unverified. These results
+support component contracts and implementation seams only; full product
+qualification remains unestablished.
+
+## 2026-09-06 user-requested checkpoint
+
+The final checkpoint passed 424 app unit tests, 6 cross-file integration tests,
+and formatting. The opt-in real-server run passed 5/6 TypeScript and 1/4 Python
+scenarios. New failures are preserved: TypeScript organize-imports retained an
+unused import; Python annotated WorkspaceEdit translation is unsupported; the
+Python diagnostic test incorrectly matches redacted message text. These results
+supersede earlier checkpoint counts without promoting product readiness.
+See [the committed handoff](../../docs/superpowers/handoffs/2026-09-06-full-product-completion-handoff.md)
+and `plans/evidence/full-product-checkpoint-2026-09-06/` for exact resume steps
+and raw logs. Work stopped at the user's request; full completion is unproved.
+
+## 2026-09-07 resume evidence
+
+Resume r3 evidence covers the advertised TypeScript server command with
+normalized Windows path handling, synchronization before callback-owned
+proposals, and CAS arbitration. Fabricated local rename tokens and empty
+formatting, Organize Imports, and code-action proposals were removed; server
+responses retain their bounded advertised operation and review identity.
+Python coverage retains bounded annotations and strict indices, uses the exact
+retained Pyright artifact, and verifies metadata-only diagnostic projection.
+Source anchors are `crates/legion-app/src/language/lsp_reads.rs`,
+`crates/legion-app/src/language/local_proposals.rs`,
+`crates/legion-app/src/language/translate/change_annotations.rs`, and
+`crates/legion-app/src/language/apply_edit_decision.rs`; the run log is
+`plans/evidence/full-product-resume-2026-09-07/resume-native-r3.log`.
+
+The exact runtime command and classification are recorded in
+[`full-product-resume-2026-09-07`](../evidence/full-product-resume-2026-09-07/README.md).
+This is app/server integration evidence, not native GUI or full-product
+qualification. The Python formatter and normal interpreter settings gap
+remains open, and no unrun gate or readiness row is promoted.
+
+The durable resume evidence records 439 app and 16/16 language-tooling passes
+after placeholder removal, workspace all-targets clippy with `-D warnings`
+exit 0, 243 desktop unit/rendering passes, and a targeted renderer rerun of
+1/1. The full workspace test run was interrupted during build at the user’s
+request and has no suite outcome; see
+`plans/evidence/full-product-resume-2026-09-07/resume-workspace-tests-r1-interrupted.log`.
+No pass claim is made for it or for full product qualification.
+
+The terminal-focused checkpoint passed 6/6 with exit 0; format, dependency,
+docs-hygiene, claim-audit, and extract-before-modify checkpoint logs are
+retained under `plans/evidence/full-product-resume-2026-09-07/`.
+
+The current durable packet records 439 app and 16/16 language-tooling passes
+after placeholder removal, with stale fake-proposal fixtures migrated. The
+bounded-stdin specification is planning-only in commit `7cbbbf9`; its
+implementation and real backpressure/cancellation tests remain next work. The
+full-workspace run was stopped during build at the user’s request and has no
+suite result. See the
+[2026-09-08 handoff](../../docs/superpowers/handoffs/2026-09-08-full-product-resume-handoff.md).

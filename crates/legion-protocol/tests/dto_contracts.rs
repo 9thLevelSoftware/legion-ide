@@ -551,6 +551,7 @@ fn workspace_edit_payload(source: WorkspaceEditSourceKind) -> WorkspaceEditPropo
             },
             preconditions: preconditions(),
         }],
+        change_annotations: Vec::new(),
         file_operations: vec![
             WorkspaceFileOperation::Create {
                 path: CanonicalPath("C:/repo/src/new.rs".to_string()),
@@ -640,6 +641,60 @@ fn lsp_diagnostic_summary() -> LspDiagnosticSummary {
         redaction_hints: vec![RedactionHint::MetadataOnly],
         schema_version: 1,
     }
+}
+
+#[test]
+fn lsp_annotations_retain_review_metadata_and_reject_invalid_associations() {
+    let mut input = lsp_edit_conversion_input(WorkspaceEditSourceKind::LspRename);
+    input.workspace_edit.change_annotations = vec![WorkspaceEditChangeAnnotation {
+        id: "rename".into(),
+        label: "Rename references".into(),
+        description: Some("Includes strings".into()),
+        needs_confirmation: true,
+        targets: vec![WorkspaceEditAnnotationTarget::TextEdit {
+            file_edit_index: 0,
+            edit_index: 0,
+        }],
+    }];
+    let proposal = convert_lsp_edit_to_workspace_proposal(input.clone()).unwrap();
+    let ProposalPayload::WorkspaceEdit(edit) = proposal.payload else {
+        panic!("workspace edit")
+    };
+    assert_eq!(
+        edit.change_annotations,
+        input.workspace_edit.change_annotations
+    );
+    assert_eq!(
+        edit.file_edits[0].preconditions.snapshot_id,
+        input.workspace_edit.file_edits[0].preconditions.snapshot_id
+    );
+    let mut invalid = input.clone();
+    invalid.workspace_edit.change_annotations[0].targets[0] =
+        WorkspaceEditAnnotationTarget::TextEdit {
+            file_edit_index: 0,
+            edit_index: u32::MAX,
+        };
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&invalid),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
+    let mut duplicate = input.clone();
+    duplicate
+        .workspace_edit
+        .change_annotations
+        .push(input.workspace_edit.change_annotations[0].clone());
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&duplicate),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
+    let mut conflicting = input.clone();
+    let mut other = input.workspace_edit.change_annotations[0].clone();
+    other.id = "other".into();
+    conflicting.workspace_edit.change_annotations.push(other);
+    assert_eq!(
+        validate_lsp_edit_proposal_contract(&conflicting),
+        Err(LspContractValidationError::InvalidChangeAnnotations)
+    );
 }
 
 fn lsp_edit_conversion_input(source: WorkspaceEditSourceKind) -> LspEditProposalConversionInput {
@@ -808,6 +863,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             utf16_offset: Some(10),
         },
         cursors: Vec::new(),
+        cursor_affinities: Vec::new(),
         scroll: ViewportScroll {
             top_line: 120,
             left_column: 4,
@@ -839,6 +895,8 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
         line_metrics: vec![ViewportLineMetric {
             byte_length: 8192,
             utf16_length: 8192,
+            line_start_byte_offset: Some(4096),
+            line_start_utf16_offset: Some(4096),
             line_ending_width: 1,
             exact: false,
         }],
@@ -877,6 +935,7 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
         ],
         "cursor": {"line": 1, "character": 4, "byte_offset": 12, "utf16_offset": 10},
         "cursors": [],
+        "cursor_affinities": [],
         "scroll": {"top_line": 120, "left_column": 4},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "viewport",
@@ -902,6 +961,8 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
             {
                 "byte_length": 8192,
                 "utf16_length": 8192,
+                "line_start_byte_offset": 4096,
+                "line_start_utf16_offset": 4096,
                 "line_ending_width": 1,
                 "exact": false
             }
@@ -966,12 +1027,39 @@ fn dto_contracts_viewport_projection_golden_and_required_fields() {
     );
     assert_eq!(legacy_roundtrip.wrap_column, None);
     assert!(legacy_roundtrip.large_file_status.is_none());
+    assert!(legacy_roundtrip.cursor_affinities.is_empty());
 
     let mut missing_workspace = value.clone();
     remove_required_field::<ViewportProjection>(&mut missing_workspace, "workspace_id");
 
     let mut missing_schema = value;
     remove_required_field::<ViewportProjection>(&mut missing_schema, "schema_version");
+}
+
+#[test]
+fn viewport_line_metric_origins_are_optional_for_legacy_payloads() {
+    let legacy = json!({
+        "byte_length": 8,
+        "utf16_length": 5,
+        "line_ending_width": 2,
+        "exact": true
+    });
+    let decoded: ViewportLineMetric = serde_json::from_value(legacy).expect("legacy metric");
+    assert_eq!(decoded.line_start_byte_offset, None);
+    assert_eq!(decoded.line_start_utf16_offset, None);
+
+    let current = ViewportLineMetric {
+        byte_length: 8,
+        utf16_length: 5,
+        line_start_byte_offset: Some(13),
+        line_start_utf16_offset: Some(9),
+        line_ending_width: 2,
+        exact: true,
+    };
+    let roundtrip: ViewportLineMetric =
+        serde_json::from_value(serde_json::to_value(current).expect("serialize current metric"))
+            .expect("deserialize current metric");
+    assert_eq!(roundtrip, current);
 }
 
 #[test]
@@ -3974,6 +4062,8 @@ fn dto_contracts_session_record_schema_golden() {
             ratio: 0.5,
         }],
         explorer_expansion: vec![CanonicalPath("C:/repo/src".to_string())],
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: true,
             side_visible: true,
@@ -3994,6 +4084,7 @@ fn dto_contracts_session_record_schema_golden() {
             schema_version: 1,
         }],
         workbench_settings: WorkbenchSettingsRecord::default(),
+        language_toolchain_settings: LanguageToolchainSettingsRecord::default(),
         memory_snapshot_json: None,
         dirty_indicators: vec![SessionDirtyIndicator {
             buffer_id: BufferId(22),
@@ -4035,6 +4126,8 @@ fn dto_contracts_session_record_schema_golden() {
             "ratio": 0.5
         }],
         "explorer_expansion": ["C:/repo/src"],
+        "canvas_nodes": [],
+        "canvas_edges": [],
         "panel_state": {
             "bottom_visible": true,
             "side_visible": true,
@@ -4082,6 +4175,10 @@ fn dto_contracts_session_record_schema_golden() {
             },
             "schema_version": 1
         },
+        "language_toolchain_settings": {
+            "schema_version": 1,
+            "typescript": null
+        },
         "dirty_indicators": [{
             "buffer_id": 22,
             "file_id": 33,
@@ -4095,6 +4192,56 @@ fn dto_contracts_session_record_schema_golden() {
 
     let mut missing = value;
     remove_required_field::<WorkspaceSessionRecord>(&mut missing, "schema_version");
+}
+
+#[test]
+fn dto_contracts_session_record_without_canvas_fields_still_loads() {
+    // A session written before the canvas existed has no `canvas_nodes` or
+    // `canvas_edges` key at all. Both carry `#[serde(default)]` so that such a
+    // record still loads — anyone upgrading keeps their open tabs, their
+    // explorer expansion and their panel layout, and simply starts with an
+    // empty canvas.
+    //
+    // Worth pinning rather than trusting: dropping the attribute makes both
+    // fields required, and the failure mode is not a compile error. It is every
+    // existing session on disk failing to deserialize on the next launch, which
+    // presents as a workspace that has forgotten everything.
+    let json = serde_json::json!({
+        "session_id": "workspace-session:1",
+        "last_workspace": null,
+        "last_workspace_path": null,
+        "open_tabs": [],
+        "active_tab": null,
+        "active_buffer": null,
+        "tab_groups": [],
+        "layout_splits": [],
+        "explorer_expansion": ["C:/repo/src"],
+        "panel_state": {
+            "bottom_visible": true,
+            "side_visible": true,
+            "active_panel": "explorer",
+            "schema_version": 1
+        },
+        "dirty_indicators": [],
+        "saved_at": 5000,
+        "schema_version": 1
+    });
+
+    let record: WorkspaceSessionRecord = match serde_json::from_value(json) {
+        Ok(record) => record,
+        Err(error) => {
+            panic!("a session record predating the canvas must still deserialize, got {error}")
+        }
+    };
+    assert_eq!(
+        record.explorer_expansion,
+        vec![CanonicalPath("C:/repo/src".to_string())],
+        "the rest of the record must survive the upgrade"
+    );
+    assert!(
+        record.canvas_nodes.is_empty() && record.canvas_edges.is_empty(),
+        "an upgraded session starts with an empty canvas, not a broken one"
+    );
 }
 
 #[test]
@@ -4480,6 +4627,16 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
             cloud_lane_forbidden_upload_count: 0,
             cloud_lane_task_packet_validated: true,
             cloud_lane_hard_cap_enforced: true,
+            // Signed org policy bundle operands (P9.F2.T3). Present in the
+            // golden so the wire shape of every surface's operand is pinned.
+            ai_provider_id: Some("ollama".to_string()),
+            mcp_server_id: Some("legion-internal".to_string()),
+            mcp_tool_name: Some("search_docs".to_string()),
+            budget_request_cost_cents: Some(12),
+            budget_request_tokens: Some(2048),
+            budget_session_spent_cents: Some(120),
+            retention_requested_days: Some(7),
+            export_destination: Some("org-siem".to_string()),
         },
         correlation_id: CorrelationId(91),
     };
@@ -4520,7 +4677,15 @@ fn dto_contracts_capability_request_context_golden_and_required_fields() {
                 "cloud_lane_scope_visible_to_user": true,
                 "cloud_lane_forbidden_upload_count": 0,
                 "cloud_lane_task_packet_validated": true,
-                "cloud_lane_hard_cap_enforced": true
+                "cloud_lane_hard_cap_enforced": true,
+                "ai_provider_id": "ollama",
+                "mcp_server_id": "legion-internal",
+                "mcp_tool_name": "search_docs",
+                "budget_request_cost_cents": 12,
+                "budget_request_tokens": 2048,
+                "budget_session_spent_cents": 120,
+                "retention_requested_days": 7,
+                "export_destination": "org-siem"
             },
             "correlation_id": 91
         }
@@ -4716,6 +4881,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
             utf16_offset: Some(18),
         },
         cursors: Vec::new(),
+        cursor_affinities: Vec::new(),
         scroll: ViewportScroll {
             top_line: 1,
             left_column: 0,
@@ -4753,6 +4919,7 @@ fn dto_contracts_text_coordinate_and_viewport_projection_golden() {
         }],
         "cursor": {"line": 2, "character": 4, "byte_offset": 20, "utf16_offset": 18},
         "cursors": [],
+        "cursor_affinities": [],
         "scroll": {"top_line": 1, "left_column": 0},
         "dimensions": {"width_px": 1280, "height_px": 720},
         "line_wrapping_policy": "off",
@@ -9097,6 +9264,7 @@ fn dto_contracts_phase4_runtime_surfaces_are_protocol_mediated() {
 #[test]
 fn language_terminal_projection_roundtrips_language_surface() {
     let projection = LanguageToolingProjection {
+        typescript_toolchain: TypeScriptToolchainProjection::default(),
         workspace_id: Some(WorkspaceId(11)),
         buffer_id: Some(BufferId(22)),
         file_id: Some(FileId(33)),
@@ -9123,6 +9291,19 @@ fn language_terminal_projection_roundtrips_language_surface() {
             source_label: Some("lexical-index".to_string()),
             proposal_id: Some(ProposalId(700)),
             redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }],
+        code_action_candidates: vec![LanguageCodeActionProjection {
+            response_id: "response-1".to_string(),
+            action_id: "code-action:response-1:0".to_string(),
+            title: "Add missing import".to_string(),
+            kind: Some("quickfix".to_string()),
+            is_preferred: true,
+            disabled_reason: None,
+            has_edit: true,
+            has_command: false,
+            buffer_id: Some(BufferId(22)),
+            snapshot_id: Some(SnapshotId(44)),
             schema_version: 1,
         }],
         breadcrumbs: vec![LanguageBreadcrumbProjection {
@@ -9195,6 +9376,9 @@ fn language_terminal_projection_roundtrips_language_surface() {
             schema_version: 1,
         }],
         references: Vec::new(),
+        call_hierarchy: Vec::new(),
+        call_hierarchy_direction: None,
+        call_hierarchy_awaiting: false,
         outline: vec![LanguageOutlineSymbolProjection {
             symbol_id: "outline-1".to_string(),
             label: "main".to_string(),
@@ -9321,6 +9505,26 @@ fn language_terminal_projection_default_surfaces_are_inert() {
     assert!(terminal.active_session_id.is_none());
     assert!(terminal.output_rows.is_empty());
     assert_eq!(terminal.redaction_hints, vec![RedactionHint::MetadataOnly]);
+}
+
+#[test]
+fn language_code_action_projection_deserializes_without_optional_fields() {
+    let parsed: LanguageCodeActionProjection = serde_json::from_str(
+        r#"{
+            "response_id": "response-1",
+            "action_id": "action-1",
+            "title": "Add missing import",
+            "is_preferred": false,
+            "has_edit": true,
+            "has_command": false,
+            "schema_version": 1
+        }"#,
+    )
+    .expect("optional code-action fields default when omitted");
+    assert_eq!(parsed.kind, None);
+    assert_eq!(parsed.disabled_reason, None);
+    assert_eq!(parsed.buffer_id, None);
+    assert_eq!(parsed.snapshot_id, None);
 }
 
 #[test]

@@ -1,0 +1,5 @@
+CMD= cargo clippy -p legion-platform --all-targets -j 1 -- -D warnings
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.24s
+EXIT=0

@@ -88,6 +88,8 @@ fn drain_one(
                 buffer_id,
                 kind,
                 snapshot_id: issued_snapshot,
+                operation_id: None,
+                operation_context: None,
             },
         })
         .expect("send result");

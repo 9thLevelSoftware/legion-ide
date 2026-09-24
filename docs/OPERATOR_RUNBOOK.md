@@ -32,6 +32,70 @@ If any command fails, save exact output under `plans/evidence/legion-e2e/` befor
 
 Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly smoke remain the primary GP evidence sources. See `plans/evidence/production/WS-P0/T0-D-smoke-promotion-criteria.md`.
 
+## Windowed GUI E2E (GAP-01.2)
+
+`.github/workflows/legion-windowed-gui.yml` runs `cargo run -p xtask -- windowed-gui-e2e` on ubuntu, windows, and macos (`workflow_dispatch` and weekly Mondays 08:00 UTC). Linux wraps the step in `xvfb-run` so `eframe::run_native` still creates a window. The GUI step is hard-fail: no `continue-on-error`, no `|| true`.
+
+This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **independent**: failures do **not** block PR merges. The four-green-run clock plus owner sign-off is recorded in `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-clock-signoff.md`. Completing that clock is not the same as adding a required check; windowed-gui is not on `protect-main` and is not folded into `legion-gates.yml`.
+
+## Release-blocker queue (QUAL.11)
+
+File gaps that forbid a named release claim with `.github/ISSUE_TEMPLATE/release-blocker.yml` (labels `qual-11` and `release-blocker`). Do not use Bug report for that queue. Taxonomy: `plans/qual-11-release-blocker-taxonomy.md`.
+
+GAP-02.1 (`EXT-CERT-*`) issues, none closed (credentials are not in the org secret store):
+
+| Id | Issue |
+| --- | --- |
+| `EXT-CERT-MAC` | [#211](https://github.com/9thLevelSoftware/legion-ide/issues/211) |
+| `EXT-CERT-LIN` | [#212](https://github.com/9thLevelSoftware/legion-ide/issues/212) |
+| `EXT-CERT-WIN` | [#213](https://github.com/9thLevelSoftware/legion-ide/issues/213) |
+
+## Protected `main` (GAP-07.3)
+
+Ruleset `protect-main` (id `21950476`) is active on `refs/heads/main`: pull requests only, no force-push, no deletion, and required checks `Standing gates` (ubuntu/windows/macos), `cargo-deny`, and `Legion bench recorded`. Evidence: `plans/evidence/production/WS-P0/gap-07-3-main-ruleset.md`. Direct pushes to `origin/main` fail. Independent review is **not** required yet (single owner).
+
+## Deferred surfaces and what unfreezing costs
+
+Three readiness gates are deferred: **PR-VSC-002** (isolated extension host),
+**PR-ENT-001** (remote development UX), and **PR-ENT-002** (collaboration and
+admin controls).
+
+Until 2026-08-21 they were held there by ADR-0046, the surface-expansion freeze,
+which gated them on PR-UI-001 reaching "product workflow validated". That ADR is
+now retired. **Nothing about their status changed** — they are still deferred,
+now for the reason that was always the substantive one: none of them has product
+evidence or tests behind a rendered surface.
+
+The rule (roadmap P9.F3.T4) is unchanged: each surface needs **its own ADR,
+policy, tests, and product evidence** before its readiness status changes.
+
+```text
+cargo run -p xtask -- deferred-surfaces
+```
+
+The gate exists because the rule was otherwise enforceable only by whoever
+reviewed the diff. The readiness ledger is a markdown table: a surface could be
+promoted from "Deferred" to "Product workflow validated" by editing one cell,
+and the four artifacts would still be missing while the row read as though they
+were not.
+
+Two properties are worth knowing:
+
+- **Two conditions, and the artifacts are the scarce one.** All three surfaces
+  already have their own ADRs — remote has four — so having an ADR was never
+  what held them. Promotion still also waits on PR-UI-001 reaching "product
+  workflow validated"; that precondition survived ADR-0046's retirement on
+  purpose, because retiring a rule against *new* surfaces says nothing about
+  whether these three are ready.
+- **Deleting a row is not a way out.** A configured surface with no ledger row
+  fails the gate, because removing the row is a louder version of the edit the
+  gate exists to prevent.
+
+To promote one of these surfaces: get PR-UI-001 to "product workflow
+validated", produce the four artifacts, then change the status. In that order —
+the gate reads the row, and a row that claims more than it can show is exactly
+what it fails.
+
 ## GUI packaging and support artifacts
 
 The current package-and-support path is intentionally explicit so release notes and issue triage can point at concrete files instead of assumptions.
@@ -43,6 +107,13 @@ The current package-and-support path is intentionally explicit so release notes 
 - GUI smoke dry-run: `sh scripts/gui-smoke.sh --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -DryRun`
 - GUI beta dry-run: `sh scripts/gui-smoke.sh --beta --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Beta -DryRun`
 - GUI Phase 8 dry-run: `sh scripts/gui-smoke.sh --phase-8 --dry-run` or `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/gui-smoke.ps1 -Phase8 -DryRun`
+
+A live `--smoke` run exits non-zero when the report it writes says `failed` or
+`blocked`, and zero only on `passed`. The evidence markdown is written first in
+every case, so a non-zero exit still leaves a readable report at the `--evidence`
+path. Until 2026-08-20 the run exited 0 regardless of status, which meant
+`scripts/gui-smoke.sh` (run under `set -e`) and any operator reading the exit
+code were told a failed smoke had passed.
 
 ### Native installer release (manual)
 
@@ -61,6 +132,8 @@ gh run list --workflow legion-release.yml
 A `verify-only` run exercises the complete package-and-verify pipeline but can never create a tag, GitHub Release, or release asset. In `publish` mode the workflow selects the next unused `v0.0.N` tag, beginning with `v0.0.1`; it creates the GitHub tag and prerelease and publishes the native assets. It passes the corresponding numeric version (for example, `0.0.1`) to the package scripts; the script examples use `0.0.1` only as a placeholder and the workflow substitutes its computed version. This beta release number is independent of the workspace version in `Cargo.toml`.
 
 Package verification is performed by two version-controlled entry points rather than inline workflow YAML: `scripts/verify-native-package.sh` (DEB, AppImage, DMG) and `scripts/verify-native-package.ps1` (MSI). Each verifier checks artifact existence, SHA-256, release metadata (including `signer_status`), install/extract structure, installer version (the DEB verifier additionally requires a non-empty Debian `Maintainer:` field), and runs the extracted/installed binary headlessly with `--beta-smoke`; a non-zero smoke exit is a hard failure. The beta smoke workspace is always `target/release-smoke/<platform>-<arch>-<format>/workspace` under the checked-out workspace, because the application rejects beta workspaces outside `<workspace>/target`. Every verifier prints its complete `PACKAGE-EVIDENCE.txt` report to the job log on success and on failure, and the package jobs upload the evidence artifacts even when verification fails, so no failure detail is visible only inside a runner temporary directory. Contract tests for the verifiers run with `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-native-package-verifiers.ps1` (pwsh works too).
+
+A third version-controlled entry point, `scripts/stage-native-acceptance-package.ps1`, exists only as a test instrument: it copies the product payload that `verify-native-package.ps1` extracted with `msiexec /a` into `target/native-input-acceptance/package/`, which is where `xtask native-product-acceptance` looks for a packaged product. It is not part of the release path and no workflow references it. Before copying anything it recomputes the MSI's SHA-256 from the file and compares it against the `.sha256` sidecar, requires exactly one `legion-desktop.exe` in the extraction tree, and refuses a source path that lies under a cargo build directory. That refusal is a guard over the resolved path with a stated scope, not a proof of provenance: it rejects a `debug` or `release` path segment whose parent segment name ends in `target` — which covers `target/debug`, `target/release`, and the packager's own `target/native-package/cargo-target/release`, the directory `scripts/package-native.ps1` builds into after it redirects `CARGO_TARGET_DIR` — and it rejects any `debug` or `release` ancestor directory carrying cargo's `.fingerprint` marker, which catches a build directory under some other name. It matches whole path segments, so the verifier's own `target/release-smoke/...` extraction directory still stages. It stops the convenient mistakes — handing the harness the development build, or the release build the packaging run leaves behind — but a build copied elsewhere first would pass it, so what actually ties a staged payload to a known artifact is the MSI hash check and the hashes written into `STAGING-EVIDENCE.toml`. It copies the whole payload directory rather than the bare executable, replaces the destination on every run so a second run over the same inputs produces the same contents, and writes `STAGING-EVIDENCE.toml` recording the source MSI and its hash, the `release_version` and `signer_status` copied verbatim from `RELEASE-METADATA.toml`, the staged executable's own hash, and an explicit `signed = false` with the signing prerequisite an actual signed artifact would need. It builds nothing, signs nothing, publishes nothing, and runs no acceptance harness. Its own contract tests are in `scripts/test-native-package-verifiers.ps1` alongside the verifier tests and run against synthetic fixtures with no real installer.
 
 Each verifier also writes a machine-readable `VALIDATION-SUMMARY.toml` beside its installer. The `publish` job parses all five summaries with Python's `tomllib` before any tag or release mutation and refuses to publish unless every summary reports the expected candidate tag, source SHA, format, and architecture with `result = "passed"` and `smoke_exit = 0`; a missing or malformed summary is likewise a publication failure.
 
@@ -176,7 +249,7 @@ cargo install cargo-deny --locked
 cargo deny --version
 ```
 
-GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring; live provider calls are a future M13 scope), and `.github/workflows/legion-smoke.yml` (GP-1 through GP-4 golden-path smokes and the update-drill, completing the 21 standing gates on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
+GitHub Actions runs `.github/workflows/legion-gates.yml` (standing gate set on ubuntu/windows/macos for every push to main and every PR; perf-harness in report-only mode, pytest excluded), `.github/workflows/legion-bench.yml` (recorded-mode legion-bench on every push to main and every PR: real fixture execution with model responses replayed from committed cassettes, gated against a committed per-task baseline; live provider runs are confined to the opt-in, scheduled, `continue-on-error` `.github/workflows/legion-bench-live.yml` and can never gate a merge), `.github/workflows/legion-smoke.yml` (GP-1 through GP-4 golden-path smokes and the update-drill, completing the 21 standing gates on dispatch and weekly, 3-OS matrix, independent — not a PR merge blocker), and `.github/workflows/legion-windowed-gui.yml` (GAP-01 windowed `eframe::run_native` E2E on dispatch and weekly, 3-OS matrix, independent — GUI step hard-fail, not a PR merge blocker). The update-drill exercises deterministic update/rollback with an ephemeral Ed25519 keypair; it is zero-egress. Local developer machines must still install the CLI before running the full verification suite, which remains the primary verification source until the hosted gate history is proven stable.
 
 ## Evidence naming
 

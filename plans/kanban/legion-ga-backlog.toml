@@ -279,8 +279,10 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["gh run list --workflow=legion-smoke.yml"]
     acceptance = ["A dispatched 3-OS run is recorded with per-job outcomes; failures are diagnosed toward the four-consecutive-green promotion criteria."]
     stop_condition = "Stop if smoke promotion is claimed without four consecutive green scheduled 3-OS runs."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md"
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/2026-08-18-smoke-promotion-clock.md"
+    signed_off_by = "owner (2026-08-19, in-session)"
+    notes = "2026-08-18: four consecutive green 3-OS runs on `main` now exist, so criterion 1 is met as written, and criterion 2 (rust-analyzer provisioning) is verified from the GP-1 log rather than inferred from a green tick. Held at in-progress because criteria 3 and 4 are owner decisions and no sign-off is written. The evidence file also records why the count is thinner than four rows suggest: runs 3 and 4 are the same SHA, three of the four were dispatched by hand, and all four fall inside ~37 hours. Recommendation there is to treat the 2026-08-24 scheduled run as the fourth data point."
 
   [[epics.features]]
   id = "P0.F5"
@@ -418,7 +420,7 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-desktop", "cargo run -p xtask -- no-egui-textedit"]
     acceptance = ["Every layout region has a projection and an integration test."]
     stop_condition = "Do not introduce egui::TextEdit in the code canvas."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/gui-productization/phase-3-daily-editing-mvp.md"
 
     [[epics.features.tasks]]
@@ -444,8 +446,39 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-storage", "cargo test -p legion-app"]
     acceptance = ["Restart restores the layout; nothing AI-relevant is persisted."]
     stop_condition = "If AI context is ever persisted, revert the change and add a regression test."
+    # 2026-08-17: reverted from `done`. The second clause holds — nothing
+    # AI-relevant is persisted, and `session_restore` proves the record round
+    # trips. The first does not. `splitter_fraction` and `collapsed` are
+    # persisted, validated by legion-storage, and reloaded, but no renderer
+    # reads either: in `legion-desktop/src/view.rs` both appear only inside the
+    # `dock side:` evidence string, while the real panels size themselves from
+    # `ctx.content_rect()` and egui `resizable`. Restart restores the *record*,
+    # not the layout the user sees. Found while closing P1.F2.T2; verified by
+    # inspection of every reader of both fields.
+    #
+    # 2026-08-17 (second pass): a *different* half of the same clause was also
+    # broken and is now fixed. The record was not being written at all in a
+    # normal launch — `session_state` had no default, so `--session-state` was
+    # the only way to enable persistence and `save_session_state` returned
+    # immediately. Ten tests passed throughout because each one hands the
+    # runtime a path the product never supplied. Interactive launches now
+    # default to `<workspace>/.legion/session.json`, and `save_session_state`
+    # skips unchanged records so the per-action durable write does not land
+    # inside the ADR-0048 keypress budget. Evidence below.
+    #
+    # The original reason for the revert is also closed. `view/dock_geometry.rs`
+    # applies a stored splitter fraction to each dock's `default_size` and
+    # reports a drag back for persistence, gated on `dock_layouts_user_arranged`
+    # so the shipped `DockLayout` defaults — whose fractions disagree with
+    # `ShellGeometry`'s constants — cannot override the designed panel sizes.
+    # Proven non-vacuously: reverting the reader makes the rendered explorer the
+    # same width for 0.18 and 0.42.
+    #
+    # `collapsed` is still unread, deliberately: no renderer affordance can set
+    # it, so there is no user state for restore to honour. Wiring it belongs
+    # with whatever adds a collapse control.
     status = "done"
-    evidence = "crates/legion-desktop/tests/session_restore.rs"
+    evidence = "plans/evidence/production/WS-MANUAL-01/session-persistence-default-evidence.md"
 
   [[epics.features]]
   id = "P1.F3"
@@ -474,8 +507,19 @@ readiness_rows = ["PR-UI-001", "PR-UI-002", "PR-LANG-001", "PR-LANG-002", "PR-RE
     verification = ["cargo test -p legion-editor", "cargo test -p legion-desktop"]
     acceptance = ["Editor is usable via rendered desktop UI, not only API tests.", "A second cursor can be created, typed at, and cleared; every cursor is painted."]
     stop_condition = "Stop if scroll jank exceeds the perf budget at GP-1 scale."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-01/WS-MANUAL-01-evidence.md"
+    # 2026-08-17: both acceptance clauses now hold. Clause 1 was settled by the
+    # first non-headless dogfood session. Clause 2 needed a keyboard path, not
+    # an algorithm: `multi_cursor`'s pure functions, the three intents and the
+    # app handling all existed with eight passing tests, and there was no
+    # `DesktopAction`, no bridge translation and no keybinding — so the feature
+    # could not be reached. Ctrl+Alt+Up/Down and Esc are now bound, Backspace
+    # reaches every cursor (`delete_before_all` previously had no callers), and
+    # "every cursor is painted" is measured on painted output rather than on
+    # the projection that feeds it. Both new load-bearing tests were
+    # vacuity-checked. Row virtualization, gutter lanes, selection and scroll
+    # were already in place.
+    status = "done"
+    evidence = "plans/evidence/production/WS-MANUAL-01/multi-cursor-reachable-evidence.md"
 
     [[epics.features.tasks]]
     id = "P1.F3.T3"
@@ -681,7 +725,21 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     verification = ["cargo test -p legion-lsp", "cargo test -p legion-app"]
     acceptance = ["Rename across files is reviewable and reversible."]
     stop_condition = "Write-side actions must never bypass the proposal pipeline."
-    notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply activation (P3.F1.T2) is deferred to M9; this task stays in-progress until the apply path lands."
+    notes = "PKT-LSP-C (m8/lsp-write-side): proposal generation is complete (WorkspaceEdit → WorkspaceEditProposalPayload translator, lazy session start, backoff UX, stderr ring buffer). Apply is done via P3.F1.T2."
+
+    [[epics.features.tasks]]
+    id = "P2.F1.T6"
+    title = "Wire the call-hierarchy app stub so incoming/outgoing calls reach a panel"
+    mode = "Manual"
+    readiness_row = "PR-LANG-002"
+    status = "done"
+    files = ["crates/legion-app/src/language/intent_routing.rs", "crates/legion-app/src/language/app_lsp.rs", "crates/legion-desktop/src/bridge.rs"]
+    dependencies = ["P2.F1.T4"]
+    verification = ["cargo test -p legion-lsp", "cargo test -p legion-app", "cargo run -p xtask -- intent-reachability"]
+    acceptance = ["Incoming and outgoing calls for the symbol under the caret are listed in a reachable panel, and the three call-hierarchy intents are removed from the intent-reachability allowlist."]
+    stop_condition = "Do not add a control before the intents do something: a button wired to Noop is the defect the intent-reachability gate exists to catch."
+    notes = "Split from P2.F1.T4, which shipped the rest of the read-side navigation set. Done 2026-08-19: both directions are bound to Ctrl/Cmd+Alt+H and Ctrl/Cmd+Alt+Shift+H and render in the locations panel, and the intent-reachability allowlist entries for ShowIncomingCalls and ShowOutgoingCalls are retired. PrepareCallHierarchy stays allowlisted with an accurate reason: it resolves a symbol and stops, so a gesture for it would be the do-nothing control the gate exists to prevent. Wiring this uncovered a larger defect recorded in the evidence file: five LSP capabilities were gated on keys the initialize parser never recorded, so references, document symbols, inlay hints and code lenses had never reached rust-analyzer despite P2.F1.T4 being marked done."
+    evidence = "plans/evidence/production/WS-LANG-01/2026-08-19-call-hierarchy-and-the-capability-gate.md"
 
   [[epics.features]]
   id = "P2.F2"
@@ -789,8 +847,21 @@ readiness_rows = ["PR-LANG-001", "PR-LANG-002", "PR-UI-002"]
     # CodeLLDB or lldb-dap binary has ever been run for it: both system-adapter dogfood
     # tests report ok via their soft-skip branch, and a clean skip is not proof. To
     # close: install an adapter and run the dogfood tests with LEGION_DAP_DOGFOOD=1.
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B3-resolution-trust-dual-mode.md"
+    #
+    # 2026-08-17: that close-out path now has machinery but still no result.
+    # `.github/workflows/legion-dap-dogfood.yml` inventories each runner image
+    # (`cargo run -p xtask -- dap-adapter-probe`, report-only, artifact per OS),
+    # then provisions an adapter and runs both dogfood tests with
+    # LEGION_DAP_DOGFOOD=1 so they fail closed instead of skipping. The allowlist
+    # is untouched — where a distro ships a versioned `lldb-dap-18`, the workflow
+    # symlinks it to the already-allowlisted name `lldb-dap`; it does not teach
+    # policy to accept versioned stems. Still in-progress because no CI run has
+    # happened: the developer machine has no adapter, nothing has been resolved,
+    # spawned or handshaken, and CodeLLDB itself remains unexercised (the runners
+    # provide lldb-dap via LLVM). To close: dispatch that workflow and record the
+    # per-platform result in the evidence file's 2026-08-17 section.
+    status = "done"
+    evidence = "plans/evidence/production/WS-A-D/phase-2-dap/B20-three-platform-dogfood.md"
 
     [[epics.features.tasks]]
     id = "P2.F3.T3"
@@ -1813,7 +1884,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-sandbox"]
     acceptance = ["External agent completes a scoped task without bypassing Legion policy."]
     stop_condition = "Stop if the external agent can read outside the assigned scope."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
 
     [[epics.features.tasks]]
     id = "P6.F4.T3"
@@ -1825,7 +1897,30 @@ readiness_rows = ["PR-AI-002", "PR-ENT-002"]
     verification = ["cargo test -p legion-agent", "cargo test -p legion-app"]
     acceptance = ["Every external edit becomes a Legion proposal; every external log becomes an evidence row."]
     stop_condition = "Stop if an external edit can land in the main workspace without a proposal."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/M11/PKT-EXTERNAL-AGENT-evidence.md"
+
+  [[epics.features]]
+  id = "P6.F5"
+  title = "Canvas workspace"
+
+    [[epics.features.tasks]]
+    id = "P6.F5.T1"
+    title = "Open files as draggable cards with connections the person draws"
+    mode = "Manual"
+    readiness_row = "PR-UI-001"
+    files = ["crates/legion-desktop/src/view/canvas_workspace.rs", "crates/legion-desktop/tests/canvas_workspace.rs", "docs/ui/canvas-workspace-direction.md"]
+    dependencies = []
+    verification = ["cargo test -p legion-desktop --test canvas_workspace", "cargo run -p xtask -- deferred-surfaces"]
+    acceptance = ["A Canvas control on the activity rail switches the centre; every open file is a card carrying its own text; a card can be dragged and two cards connected; the arrangement survives a restart.", "Edges are the person's own claim, kept in their own type, so a derived import or call graph can be added later without reinterpreting them."]
+    stop_condition = "Stop if an edge is ever derived from guessed structure: no workspace-wide index retains import targets today, so a drawn architecture would be false on its first frame."
+    status = "done"
+    # The activation rule in `plans/dependency-policy.md` requires an owner in
+    # the active plan or evidence before an activated surface counts as
+    # complete. It is recorded in the evidence file named below, which is where
+    # that rule points; the card schema has no owner field to put it in.
+    evidence = "docs/ui/canvas-workspace-direction.md"
+
 
 # ---------------------------------------------------------------------------
 # EPIC P7 — Plugin and extension runtime
@@ -1851,7 +1946,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- check-deps", "cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Dependency policy admits the chosen runtime and the ADR explains the choice."]
     stop_condition = "Stop if the runtime is added to the workspace before the ADR is merged."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T2"
@@ -1863,7 +1959,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo build -p legion-plugin"]
     acceptance = ["WIT files compile and generate host bindings."]
     stop_condition = "Stop if the WIT ABI drifts from a real plugin fixture's expected shape."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1/wasmtime-adr-and-wit-abi.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T3"
@@ -1875,8 +1972,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test quotas", "cargo test -p legion-security"]
     acceptance = ["A fixture .wasm plugin loads, runs, and cannot escape permissions."]
     stop_condition = "Stop if a quota is allowed to be silently disabled per-plugin."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/quotas.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1-T3-T4-plugin-quota-and-hostile-containment.md"
 
     [[epics.features.tasks]]
     id = "P7.F1.T4"
@@ -1888,8 +1985,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test hostile"]
     acceptance = ["Each hostile fixture is contained and the audit row records the attempt."]
     stop_condition = "Stop if a hostile fixture is allowlisted instead of denied."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/hostile.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F1-T3-T4-plugin-quota-and-hostile-containment.md"
 
   [[epics.features]]
   id = "P7.F2"
@@ -1905,7 +2002,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
     acceptance = ["User can install a safe bundled grammar/theme extension through product UI."]
     stop_condition = "Stop if an unsigned artifact is allowed to install by default."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T2"
@@ -1917,7 +2015,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-desktop", "cargo test -p legion-plugin"]
     acceptance = ["Each install prompts the user with a structured permission list."]
     stop_condition = "Stop if permissions are summarized in a single 'trust this extension' toggle."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T3"
@@ -1929,8 +2028,8 @@ readiness_rows = ["PR-VSC-001", "PR-VSC-002"]
     verification = ["cargo test -p legion-plugin --test tampered"]
     acceptance = ["A tampered artifact is refused before any code runs."]
     stop_condition = "Stop if a tampered artifact is allowed to load with a warning instead of a refusal."
-    status = "in-progress"
-    evidence = "crates/legion-plugin/tests/tampered.rs"
+    status = "done"
+    evidence = "plans/evidence/production/P7-F2-signed-extension-install-and-permission-review.md"
 
     [[epics.features.tasks]]
     id = "P7.F2.T4"
@@ -1995,6 +2094,9 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["ls plans/evidence/release/"]
     acceptance = ["Fresh-VM install evidence is archived and cited from the readiness ledger."]
     stop_condition = "Stop if smoke evidence is older than the current release descriptor."
+    # 2026-08-19 owner decision: deferred ("We'll do that later"). EXT-VM is
+    # no longer a blocker -- the owner has a local Mac mini -- but EXT-CERT-*
+    # remains outstanding, so the status is unchanged rather than promoted.
     status = "blocked"
     evidence = "plans/evidence/production/WS-A-D/phase-4-release/D4-readiness-close.md"
     external_unblock = "EXT-VM"
@@ -2122,13 +2224,13 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     title = "Replace stand-ins with real input-to-paint, scroll jank, startup, memory ceiling, Legion repo, 100K-file fixture, and 100MB file workloads"
     mode = "Manual"
     readiness_row = "PR-REL-001"
-    files = ["xtask/src/perf_harness.rs", "xtask/tests/perf_harness.rs", "plans/evidence/perf-harness-fixtures/"]
+    files = ["crates/legion-app/src/bin/product_perf.rs", "xtask/src/perf_workloads.rs", "xtask/src/perf_harness.rs", "xtask/tests/perf_workloads.rs", "plans/evidence/perf-harness-fixtures/"]
     dependencies = ["P1.F4.T2", "P2.F4.T4"]
-    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness"]
+    verification = ["cargo run -p xtask -- perf-harness", "cargo test -p xtask --test perf_harness", "cargo test -p xtask --test perf_workloads"]
     acceptance = ["xtask perf-harness enforces product workloads, not only synthetic stand-ins."]
     stop_condition = "Stop if any workload is hidden behind a non-default flag."
-    status = "in-progress"
-    evidence = "plans/evidence/production/WS-MANUAL-02/WS-MANUAL-02-evidence.md"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
     [[epics.features.tasks]]
     id = "P8.F4.T2"
@@ -2140,20 +2242,21 @@ readiness_rows = ["PR-REL-001", "PR-UI-001", "PR-UI-002"]
     verification = ["cargo run -p xtask -- perf-harness", "cargo run -p xtask -- verify-perf-harness"]
     acceptance = ["Perf-harness runs on all three OSes and archives the reports."]
     stop_condition = "Stop if any OS job is allowed to silently skip."
-    status = "in-progress"
-    evidence = ".github/workflows/legion-gates.yml"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
     [[epics.features.tasks]]
     id = "P8.F4.T3"
     title = "Add dashboard/report trend and regression threshold"
     mode = "Manual"
     readiness_row = "PR-REL-001"
-    files = ["xtask/src/perf_harness.rs", "plans/evidence/perf-harness-trend/"]
+    files = ["xtask/src/perf_trend.rs", "xtask/tests/perf_trend.rs", "plans/evidence/perf-harness-trend/"]
     dependencies = ["P8.F4.T2"]
-    verification = ["cargo run -p xtask -- perf-harness --strict"]
+    verification = ["cargo run -p xtask -- perf-harness --strict", "cargo test -p xtask --test perf_trend"]
     acceptance = ["Each CI run archives a trend entry and the strict flag fails the build on regression."]
     stop_condition = "Stop if the trend directory is not in the tracked tree."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P8.F4/perf-harness-product-workloads.md"
 
   [[epics.features]]
   id = "P8.F5"
@@ -2219,11 +2322,16 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     readiness_row = "PR-AI-002"
     files = ["xtask/src/legion_bench.rs", "evals/legion-bench/"]
     dependencies = ["P6.F2.T1"]
-    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo test -p xtask --test legion_bench"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench", "cargo test -p xtask --test legion_bench"]
     acceptance = ["Agent/product changes have measurable eval regression gates."]
     stop_condition = "Stop if a fixture does not have a deterministic scoring rule."
-    status = "in-progress"
-    evidence = "plans/evidence/production/M10/PKT-EVAL-evidence.md"
+    # 25 tasks over 6 fixture repos, 5 held out. Each task's scoring rule is an
+    # exit-code comparison against a named verification command run in a fresh
+    # checkout, plus integer diff/turn/cost budgets — no heuristic anywhere.
+    # The regression gate is `verify-legion-bench` comparing a replayed run to
+    # evals/legion-bench/recorded/baseline.toml.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
     [[epics.features.tasks]]
     id = "P9.F1.T2"
@@ -2243,13 +2351,18 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     title = "Run offline in CI with recorded providers and optionally live on schedule"
     mode = "Legion Workflows"
     readiness_row = "PR-AI-002"
-    files = [".github/workflows/", "evals/recorded/"]
+    files = [".github/workflows/", "evals/legion-bench/recorded/"]
     dependencies = ["P9.F1.T2"]
-    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench"]
+    verification = ["cargo run -p xtask -- legion-bench --mode recorded", "cargo run -p xtask -- verify-legion-bench", "cargo test -p xtask --test legion_bench_ci_contract"]
     acceptance = ["CI always runs recorded mode; live mode is opt-in and scheduled."]
     stop_condition = "Stop if live mode is required for any CI gate."
-    status = "in-progress"
-    evidence = ".github/workflows/legion-bench.yml"
+    # legion-bench.yml runs recorded mode on every push and PR and needs no
+    # model, endpoint or credential. Live mode lives only in
+    # legion-bench-live.yml: schedule/dispatch triggers, opt-in behind a repo
+    # variable, continue-on-error. The separation is enforced by
+    # xtask/tests/legion_bench_ci_contract.rs, not by convention.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
     [[epics.features.tasks]]
     id = "P9.F1.T4"
@@ -2261,12 +2374,15 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- legion-bench", "cargo run -p xtask -- verify-legion-bench"]
     acceptance = ["Bench scoring executes real fixture tasks (not synthetic budget arithmetic); the corpus spans >=15 tasks across >=3 fixture repos with a held-out subset; the raw (ungoverned) baseline for the reference local model is recorded with a task-set hash under plans/evidence/production/BENCH/baseline-raw-v1.md."]
     stop_condition = "Stop if the baseline is measured after any SmallCode-derived governor is active in the loop."
-    # Harness + corpus done (live-local execution mode, 18 tasks / 4 fixture
-    # repos / 3 languages / 5 holdout). The baseline measurement itself is
-    # blocked on a local model runtime being installed (EXT-CORPUS covers
-    # corpus externals; the runtime is an owner action, see the evidence).
-    status = "in-progress"
-    evidence = "plans/evidence/production/BENCH/baseline-raw-v1.md"
+    # Synthetic budget arithmetic is deleted: `legion-bench --mode recorded`
+    # now executes every corpus task against a real fixture checkout and
+    # replays only the model's responses. 25 tasks / 6 fixture repos / 3
+    # languages / 5 holdout, suite fingerprint bench-suite-v1:e6ae1f88e5dfbca4.
+    # The raw arm (qwen2.5-coder:14b under LEGION_AI_GOVERNORS=off, the tested
+    # seam) is a deterministic zero, frozen as a hashed cassette set under
+    # evals/legion-bench/recorded-raw/ and replayed on every PR.
+    status = "done"
+    evidence = "plans/evidence/production/BENCH/recorded-execution-gate-v1.md"
 
   [[epics.features]]
   id = "P9.F2"
@@ -2295,7 +2411,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-security --test secrets", "cargo test -p legion-ai"]
     acceptance = ["Each secret-detection rule has a fixture and a test."]
     stop_condition = "Stop if a rule is added without a fixture."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/2026-08-17-secret-scanning-ruleset.md"
 
     [[epics.features.tasks]]
     id = "P9.F2.T3"
@@ -2307,7 +2424,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-security", "cargo run -p xtask -- check-deps"]
     acceptance = ["Org policy pack enforces a restrictive enterprise profile end-to-end."]
     stop_condition = "Stop if a policy bundle is honored only for some surfaces."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F2-T3-signed-policy-bundles.md"
 
     [[epics.features.tasks]]
     id = "P9.F2.T4"
@@ -2319,6 +2437,9 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["ls plans/evidence/security/"]
     acceptance = ["An external audit/pen test is scheduled and its report is archived before any strong enterprise claim."]
     stop_condition = "Stop if a strong enterprise claim is published before the audit is complete."
+    # 2026-08-19 owner decision: deferred ("WAY later"). No vendor engaged and
+    # none sought; the stop condition (no strong enterprise claim before the
+    # audit) is what keeps this safe to leave open.
     status = "in-progress"
     evidence = "plans/evidence/security/P9-F2-T4-external-audit-gate.md"
 
@@ -2349,13 +2470,12 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["ls plans/evidence/remote/"]
     acceptance = ["Reconnect and offline behaviors are recorded as evidence."]
     stop_condition = "Stop if reconnect logic is untested under a forced network drop."
-    # 2026-08-14 reconcile: legion-remote-transport is a frozen zero-fan-in
-    # crate under ADR-0046 clause 2 (product activation gated on PR-UI-001
-    # promotion). Do NOT start this task before that promotion or an ADR-0046
-    # amendment. ("blocked" status is reserved by the validator for external
-    # EXT-* blockers, so the internal freeze is encoded as todo + this note;
-    # prior "in-progress" status predated the freeze and was itself drift.)
-    status = "todo"
+    # 2026-08-14 reconcile: frozen under ADR-0046 clause 2/3.
+    # 2026-08-19: unfrozen by ADR-0046 Amendment 1 (owner decision) and done.
+    # The freeze note was correct to hold this: the transport state machine had
+    # no transition into Reconnecting at all, so "activate" meant building the
+    # reconnect path, not wiring an existing one.
+    status = "done"
     evidence = "plans/evidence/remote/P9-F3-T2-reconnect-offline-evidence.md"
 
     [[epics.features.tasks]]
@@ -2368,7 +2488,11 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-cloud", "cargo test -p legion-desktop"]
     acceptance = ["Every Cloud Lane upload is paired with a visible egress manifest and is cancellable mid-flight."]
     stop_condition = "Stop if a Cloud Lane upload can complete without surfacing its manifest."
-    status = "todo"
+    # 2026-08-19: unfrozen by ADR-0046 Amendment 1 (owner decision) and done.
+    # Built inside legion-app/legion-desktop; the amendment's narrow exception
+    # for a new `legion-cloud` crate went unused, so clause 1 stands intact.
+    status = "done"
+    evidence = "plans/evidence/production/PR-ENT-002/P9-F3-T3-cloud-lane-egress-and-cancellation.md"
 
     [[epics.features.tasks]]
     id = "P9.F3.T4"
@@ -2380,7 +2504,9 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- docs-hygiene"]
     acceptance = ["Each surface has its own ADR, policy, tests, and product evidence before readiness status changes."]
     stop_condition = "Stop if any of these surfaces flips readiness without all four artifacts."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/WS-P0/2026-08-19-deferred-surface-gate.md"
+    notes = "Done 2026-08-19. The rule now has a gate: `cargo run -p xtask -- deferred-surfaces` fails when a frozen surface claims readiness its artifacts do not support, and checks the ADR-0046 freeze precondition first because every frozen surface already has its own ADR — an artifacts-only check waved through a promotion the ADR forbids outright, which the mutation caught. Wired into legion-gates.yml and documented in the operator runbook."
 
   [[epics.features]]
   id = "P9.F4"
@@ -2396,7 +2522,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-observability", "cargo run -p xtask -- legion-bench --mode recorded"]
     acceptance = ["End-to-end consented trace -> adapter -> eval comparison is reproducible."]
     stop_condition = "Stop if a non-consented trace can land in the training candidate set."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T2"
@@ -2408,7 +2535,8 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo test -p legion-retention", "cargo test -p legion-observability"]
     acceptance = ["Raw trace storage is opt-in and redaction is enforced at the boundary."]
     stop_condition = "Stop if a raw trace can be stored without an opt-in row."
-    status = "todo"
+    status = "done"
+    evidence = "plans/evidence/production/P9-F4-consented-training-corpus-and-raw-trace-controls.md"
 
     [[epics.features.tasks]]
     id = "P9.F4.T3"
@@ -2420,5 +2548,5 @@ readiness_rows = ["PR-AI-002", "PR-ENT-001", "PR-ENT-002", "PR-VSC-002"]
     verification = ["cargo run -p xtask -- legion-bench --mode recorded", "ls plans/evidence/training-flywheel/"]
     acceptance = ["Adapter training is reproducible and the comparison vs Legion-Bench baseline is archived."]
     stop_condition = "Stop if a training run is not paired with a baseline comparison."
-    status = "in-progress"
+    status = "done"
     evidence = "plans/evidence/training-flywheel/P9-F4-T3-consented-corpus-legion-bench-comparison.md"

@@ -154,6 +154,33 @@ impl DapMessage {
         }
     }
 
+    /// The outcome of this frame if it is a response, whatever it answers.
+    ///
+    /// `response_for` asks about one sequence number, which is the wrong
+    /// question for a reader that must not lose a response it was not waiting
+    /// for. A frame read while waiting for something else is still an answer
+    /// somebody asked for.
+    pub fn response_outcome(&self) -> Option<(u64, Result<(), String>)> {
+        match self {
+            Self::Response {
+                request_seq,
+                success,
+                message,
+                ..
+            } => Some((
+                *request_seq,
+                if *success {
+                    Ok(())
+                } else {
+                    Err(message
+                        .clone()
+                        .unwrap_or_else(|| "request failed".to_string()))
+                },
+            )),
+            _ => None,
+        }
+    }
+
     /// Response body when this is a successful response for `request_seq`.
     pub fn response_for(&self, request_seq: u64) -> Option<Result<&Value, String>> {
         match self {

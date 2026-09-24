@@ -1,0 +1,1933 @@
+{
+  "schema_version": 1,
+  "packages": [
+    {
+      "package_id": "S0-01",
+      "requirement_ids": [
+        "COMP-P0-F3-T1-1",
+        "COMP-P0-F3-T2-1",
+        "COMP-P0-F3-T3-1"
+      ],
+      "milestones": [
+        {
+          "id": "S0-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-01-account-for-every-requirement-and-preserve-source-history"
+          ]
+        },
+        {
+          "id": "S0-01:accepted",
+          "depends_on": [
+            "S0-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-01-account-for-every-requirement-and-preserve-source-history"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "S0-02",
+      "requirement_ids": [
+        "COMP-SCOPE-FAMILY-15-01",
+        "COMP-REMOTE-001",
+        "COMP-COLLAB-001",
+        "COMP-TRAIN-001",
+        "COMP-PLAT-001",
+        "COMP-DIST-001"
+      ],
+      "milestones": [
+        {
+          "id": "S0-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-02-pin-compatibility-workloads-and-success-thresholds"
+          ]
+        },
+        {
+          "id": "S0-02:accepted",
+          "depends_on": [
+            "S0-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-02-pin-compatibility-workloads-and-success-thresholds"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-approved exact toolchain, language-server, adapter and runtime versions plus repository commits or tags and a lockfile and network policy for every declared language cell.",
+        "macOS and Linux reference hardware and exact OS images for the declared target cells."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "S0-05",
+      "requirement_ids": [
+        "COMP-P0-F4-T1-1",
+        "COMP-P0-F4-T2-1",
+        "COMP-P0-F4-T3-1",
+        "COMP-P0-F4-T4-1",
+        "COMP-P0-F4-T6-1",
+        "COMP-P0-F4-T5-1"
+      ],
+      "milestones": [
+        {
+          "id": "S0-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-05-observe-the-real-baseline-and-turn-failures-into-repair-work"
+          ]
+        },
+        {
+          "id": "S0-05:accepted",
+          "depends_on": [
+            "S0-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-05-observe-the-real-baseline-and-turn-failures-into-repair-work"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "S0-06",
+      "requirement_ids": [
+        "COMP-P0-F1-T1-1",
+        "COMP-P0-F1-T2-1",
+        "COMP-P0-F1-T3-1",
+        "COMP-P0-F1-T4-1",
+        "COMP-P0-F2-T1-1",
+        "COMP-P0-F2-T2-1",
+        "COMP-P0-F2-T3-1",
+        "COMP-P0-F2-T4-1",
+        "COMP-P0-F5-T1-1",
+        "COMP-P0-F5-T2-1",
+        "COMP-P0-F5-T3-1",
+        "COMP-SCOPE-GAP-07",
+        "COMP-SCOPE-GAP-08"
+      ],
+      "milestones": [
+        {
+          "id": "S0-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-06-reconcile-governing-documents-and-freeze-execution-dependencies"
+          ]
+        },
+        {
+          "id": "S0-06:accepted",
+          "depends_on": [
+            "S0-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-full-product-completion.md#s0-06-reconcile-governing-documents-and-freeze-execution-dependencies"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "S1-02",
+      "requirement_ids": [
+        "COMP-P1-F1-T1-1",
+        "COMP-P1-F1-T2-1",
+        "COMP-P1-F1-T3-1",
+        "COMP-P1-F1-T4-1",
+        "COMP-PLAT-002"
+      ],
+      "milestones": [
+        {
+          "id": "S1-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-02-specify-and-implement-the-native-input-acceptance-boundary"
+          ]
+        },
+        {
+          "id": "S1-02:accepted",
+          "depends_on": [
+            "S1-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-02-specify-and-implement-the-native-input-acceptance-boundary"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-03",
+      "requirement_ids": [
+        "COMP-P1-F2-T1-1",
+        "COMP-P1-F2-T2-1",
+        "COMP-P1-F2-T3-1",
+        "COMP-P1-F2-T4-1",
+        "COMP-WB-001",
+        "COMP-WB-002",
+        "COMP-WB-003",
+        "COMP-WB-004",
+        "COMP-WB-005",
+        "COMP-WB-006",
+        "COMP-WB-007"
+      ],
+      "milestones": [
+        {
+          "id": "S1-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-03-complete-the-existing-read-only-canvas-arrangement-and-workbench-layout-contract"
+          ]
+        },
+        {
+          "id": "S1-03:accepted",
+          "depends_on": [
+            "S1-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-03-complete-the-existing-read-only-canvas-arrangement-and-workbench-layout-contract"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-03C",
+      "requirement_ids": [
+        "COMP-P6-F5-T1-1",
+        "COMP-P6-F5-T1-1-02",
+        "COMP-CAN-001",
+        "COMP-CAN-002",
+        "COMP-CAN-003",
+        "COMP-CAN-004",
+        "COMP-CAN-005",
+        "COMP-CAN-006",
+        "COMP-CAN-007",
+        "COMP-CAN-008",
+        "COMP-CAN-009",
+        "COMP-CAN-010"
+      ],
+      "milestones": [
+        {
+          "id": "S1-03C:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-03c-implement-and-qualify-every-stage-1-comp-canvas--outcome-accepted-by-the-canvas-contract"
+          ]
+        },
+        {
+          "id": "S1-03C:accepted",
+          "depends_on": [
+            "S1-03C:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-03c-implement-and-qualify-every-stage-1-comp-canvas--outcome-accepted-by-the-canvas-contract"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-04",
+      "requirement_ids": [
+        "COMP-P1-F3-T1-1",
+        "COMP-P1-F3-T2-1",
+        "COMP-P1-F3-T2-1-02",
+        "COMP-P1-F3-T3-1",
+        "COMP-P1-F3-T4-1",
+        "COMP-P1-F3-T5-1",
+        "COMP-EDIT-001",
+        "COMP-EDIT-002",
+        "COMP-EDIT-003",
+        "COMP-EDIT-004",
+        "COMP-EDIT-005",
+        "COMP-EDIT-006",
+        "COMP-EDIT-007",
+        "COMP-EDIT-008",
+        "COMP-EDIT-009",
+        "COMP-EDIT-010",
+        "COMP-EDIT-011",
+        "COMP-EDIT-012",
+        "COMP-EDIT-013",
+        "COMP-WB-008",
+        "COMP-PRES-007",
+        "COMP-PRES-010"
+      ],
+      "milestones": [
+        {
+          "id": "S1-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-04-finish-editing-semantics-input-methods-keymaps-and-settings"
+          ]
+        },
+        {
+          "id": "S1-04:accepted",
+          "depends_on": [
+            "S1-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-04-finish-editing-semantics-input-methods-keymaps-and-settings"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-05",
+      "requirement_ids": [
+        "COMP-P2-F4-T1-1",
+        "COMP-P2-F4-T2-1",
+        "COMP-P2-F4-T3-1",
+        "COMP-P2-F4-T4-1",
+        "COMP-WB-010",
+        "COMP-WB-011",
+        "COMP-WB-012",
+        "COMP-WB-013",
+        "COMP-NAV-001",
+        "COMP-NAV-002",
+        "COMP-NAV-003",
+        "COMP-NAV-004",
+        "COMP-NAV-005",
+        "COMP-NAV-006",
+        "COMP-NAV-007",
+        "COMP-NAV-008",
+        "COMP-NAV-009",
+        "COMP-NAV-010",
+        "COMP-NAV-011",
+        "COMP-NAV-012",
+        "COMP-NAV-013",
+        "COMP-PRES-001",
+        "COMP-PRES-002",
+        "COMP-PRES-008",
+        "COMP-PRES-009"
+      ],
+      "milestones": [
+        {
+          "id": "S1-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-05-file-operations-navigation-search-and-reviewable-replacement"
+          ]
+        },
+        {
+          "id": "S1-05:accepted",
+          "depends_on": [
+            "S1-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-05-file-operations-navigation-search-and-reviewable-replacement"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-06",
+      "requirement_ids": [
+        "COMP-P2-F2-T1-1",
+        "COMP-P2-F2-T2-1",
+        "COMP-P2-F2-T3-1",
+        "COMP-P2-F2-T4-1",
+        "COMP-P2-F2-T5-1",
+        "COMP-TERM-001",
+        "COMP-TERM-002",
+        "COMP-TERM-004",
+        "COMP-TERM-005",
+        "COMP-TERM-006",
+        "COMP-TERM-007",
+        "COMP-TERM-008",
+        "COMP-TERM-009",
+        "COMP-TERM-010",
+        "COMP-TERM-011",
+        "COMP-TERM-012",
+        "COMP-TERM-013",
+        "COMP-TERM-014",
+        "COMP-TERM-015",
+        "COMP-PRES-012",
+        "COMP-TERM-016"
+      ],
+      "milestones": [
+        {
+          "id": "S1-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-06-make-terminal-execution-and-interactive-tui-behavior-real"
+          ]
+        },
+        {
+          "id": "S1-06:accepted",
+          "depends_on": [
+            "S1-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-06-make-terminal-execution-and-interactive-tui-behavior-real"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A Linux or macOS host with this workspace checked out and a Rust toolchain able to run \"cargo test -p legion-platform --test bounded_process\"."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-07",
+      "requirement_ids": [
+        "COMP-P2-F5-T1-1",
+        "COMP-P2-F5-T2-1",
+        "COMP-P2-F5-T3-1",
+        "COMP-P2-F5-T4-1",
+        "COMP-SCM-001",
+        "COMP-SCM-002",
+        "COMP-SCM-003",
+        "COMP-SCM-004",
+        "COMP-SCM-005",
+        "COMP-SCM-006",
+        "COMP-SCM-007",
+        "COMP-SCM-008",
+        "COMP-SCM-009",
+        "COMP-SCM-010",
+        "COMP-PRES-005",
+        "COMP-PRES-006"
+      ],
+      "milestones": [
+        {
+          "id": "S1-07:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-07-complete-git-review-surface-and-local-history-recovery"
+          ]
+        },
+        {
+          "id": "S1-07:accepted",
+          "depends_on": [
+            "S1-07:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-07-complete-git-review-surface-and-local-history-recovery"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S1-08",
+      "requirement_ids": [
+        "COMP-P1-F4-T1-1",
+        "COMP-P1-F4-T2-1",
+        "COMP-P1-F4-T3-1",
+        "COMP-P1-F4-T4-1",
+        "COMP-P1-F4-T5-1",
+        "COMP-WB-009",
+        "COMP-PRES-003",
+        "COMP-PRES-004",
+        "COMP-PRES-011",
+        "COMP-PLAT-004",
+        "COMP-PLAT-007",
+        "COMP-PLAT-008"
+      ],
+      "milestones": [
+        {
+          "id": "S1-08:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-08-close-manual-accessibility-window-lifecycle-large-file-and-workload-evidence"
+          ]
+        },
+        {
+          "id": "S1-08:accepted",
+          "depends_on": [
+            "S1-08:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s1-08-close-manual-accessibility-window-lifecycle-large-file-and-workload-evidence"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "S2-01",
+      "requirement_ids": [
+        "COMP-LANG-001",
+        "COMP-LANG-003"
+      ],
+      "milestones": [
+        {
+          "id": "S2-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-01-ratify-the-three-language-support-contract-and-representative-projects"
+          ]
+        },
+        {
+          "id": "S2-01:accepted",
+          "depends_on": [
+            "S2-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-01-ratify-the-three-language-support-contract-and-representative-projects"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-approved exact toolchain, language-server, adapter and runtime versions plus repository commits or tags and a lockfile and network policy for every declared language cell."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S2-02",
+      "requirement_ids": [
+        "COMP-P2-F1-T1-1",
+        "COMP-P2-F1-T2-1",
+        "COMP-LANG-002",
+        "COMP-LANG-004",
+        "COMP-LANG-008",
+        "COMP-LANG-009",
+        "COMP-LANG-010"
+      ],
+      "milestones": [
+        {
+          "id": "S2-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-02-generalize-language-server-provisioning-discovery-and-lifecycle"
+          ]
+        },
+        {
+          "id": "S2-02:accepted",
+          "depends_on": [
+            "S2-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-02-generalize-language-server-provisioning-discovery-and-lifecycle"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A real TypeScript and JavaScript language-server, browser and debug-adapter setup with owner-selected releases.",
+        "The pinned Pyright 1.1.400 archive materialized on the target host, either by letting the policy://lsp-download/pyright gate reach https://registry.npmjs.org/pyright/-/pyright-1.1.400.tgz or by provisioning that exact archive locally, together with a Node runtime of at least 14.0.0; until it is materialized the registry entry resolves to ArtifactNotMaterialized rather than to a launchable server.",
+        "A Python interpreter, an isolated virtual environment and a debugpy release installed on the target host."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S2-03",
+      "requirement_ids": [
+        "COMP-P2-F1-T3-1",
+        "COMP-P2-F1-T4-1",
+        "COMP-P2-F1-T5-1",
+        "COMP-P2-F1-T6-1",
+        "COMP-LANG-005",
+        "COMP-LANG-006",
+        "COMP-LANG-007"
+      ],
+      "milestones": [
+        {
+          "id": "S2-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-03-deliver-real-navigation-formatting-code-actions-and-refactoring-through-reviewable-workspace-edits"
+          ]
+        },
+        {
+          "id": "S2-03:accepted",
+          "depends_on": [
+            "S2-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-03-deliver-real-navigation-formatting-code-actions-and-refactoring-through-reviewable-workspace-edits"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S2-04",
+      "requirement_ids": [
+        "COMP-P2-F3-T4-1",
+        "COMP-P2-F3-T5-1",
+        "COMP-LANG-011",
+        "COMP-BTD-001",
+        "COMP-BTD-002",
+        "COMP-BTD-003",
+        "COMP-BTD-004",
+        "COMP-BTD-005"
+      ],
+      "milestones": [
+        {
+          "id": "S2-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-04-build-and-test-workflow-adapters-for-all-three-language-groups"
+          ]
+        },
+        {
+          "id": "S2-04:accepted",
+          "depends_on": [
+            "S2-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-04-build-and-test-workflow-adapters-for-all-three-language-groups"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S2-05",
+      "requirement_ids": [
+        "COMP-P2-F3-T1-1",
+        "COMP-P2-F3-T2-1",
+        "COMP-P2-F3-T3-1",
+        "COMP-LANG-012",
+        "COMP-BTD-006",
+        "COMP-BTD-007",
+        "COMP-BTD-008",
+        "COMP-PRES-013"
+      ],
+      "milestones": [
+        {
+          "id": "S2-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-05-design-and-deliver-real-debug-adapter-support-for-each-supported-language"
+          ]
+        },
+        {
+          "id": "S2-05:accepted",
+          "depends_on": [
+            "S2-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-05-design-and-deliver-real-debug-adapter-support-for-each-supported-language"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-selected Rust, JavaScript and Python debug-adapter binaries; no adapter executable was found in the checked local locations.",
+        "A real TypeScript and JavaScript language-server, browser and debug-adapter setup with owner-selected releases.",
+        "A Python interpreter, an isolated virtual environment and a debugpy release installed on the target host."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S2-06",
+      "requirement_ids": [
+        "COMP-LANG-013",
+        "COMP-BTD-009"
+      ],
+      "milestones": [
+        {
+          "id": "S2-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-06-full-native-language-journeys-and-regression-gate"
+          ]
+        },
+        {
+          "id": "S2-06:accepted",
+          "depends_on": [
+            "S2-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-manual-language-completion.md#s2-06-full-native-language-journeys-and-regression-gate"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S2",
+      "acceptance_stage": "S2"
+    },
+    {
+      "package_id": "S3-01",
+      "requirement_ids": [
+        "COMP-P3-F1-T1-1",
+        "COMP-P3-F1-T2-1",
+        "COMP-P3-F1-T3-1",
+        "COMP-P3-F1-T4-1",
+        "COMP-P3-F4-T1-1",
+        "COMP-P3-F4-T2-1",
+        "COMP-P3-F4-T3-1",
+        "COMP-P3-F4-T4-1",
+        "COMP-PROV-004",
+        "COMP-TRUST-001",
+        "COMP-TRUST-002",
+        "COMP-TRUST-003",
+        "COMP-TRUST-004",
+        "COMP-TRUST-005"
+      ],
+      "milestones": [
+        {
+          "id": "S3-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-01-ratify-the-provider-managed-runtime-context-and-ai-session-contract"
+          ]
+        },
+        {
+          "id": "S3-01:accepted",
+          "depends_on": [
+            "S3-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-01-ratify-the-provider-managed-runtime-context-and-ai-session-contract"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-02",
+      "requirement_ids": [
+        "COMP-P4-F1-T1-1",
+        "COMP-P4-F1-T2-1",
+        "COMP-P4-F1-T3-1",
+        "COMP-P4-F1-T4-1",
+        "COMP-PROV-001",
+        "COMP-PROV-002",
+        "COMP-PROV-003",
+        "COMP-PROV-005",
+        "COMP-PROV-006"
+      ],
+      "milestones": [
+        {
+          "id": "S3-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-02-deliver-real-provider-setup-and-credential-lifecycle"
+          ]
+        },
+        {
+          "id": "S3-02:accepted",
+          "depends_on": [
+            "S3-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-02-deliver-real-provider-setup-and-credential-lifecycle"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Named external endpoints and their credentials for the remote, provider, collaboration and enterprise claims; none is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-03",
+      "requirement_ids": [
+        "COMP-PROV-007",
+        "COMP-PROV-008",
+        "COMP-PROV-009",
+        "COMP-PROV-010"
+      ],
+      "milestones": [
+        {
+          "id": "S3-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-03-add-the-managed-local-model-runtime"
+          ]
+        },
+        {
+          "id": "S3-03:accepted",
+          "depends_on": [
+            "S3-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-03-add-the-managed-local-model-runtime"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-04",
+      "requirement_ids": [
+        "COMP-P4-F2-T1-1",
+        "COMP-P4-F2-T2-1",
+        "COMP-P4-F2-T3-1",
+        "COMP-P4-F2-T4-1",
+        "COMP-P9-F2-T2-1",
+        "COMP-CTX-001",
+        "COMP-CTX-002",
+        "COMP-CTX-003",
+        "COMP-CTX-004",
+        "COMP-CTX-005",
+        "COMP-CTX-006",
+        "COMP-CTX-007",
+        "COMP-CTX-008",
+        "COMP-CTX-009"
+      ],
+      "milestones": [
+        {
+          "id": "S3-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-04-make-context-selection-fresh-inspectable-bounded-and-private"
+          ]
+        },
+        {
+          "id": "S3-04:accepted",
+          "depends_on": [
+            "S3-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-04-make-context-selection-fresh-inspectable-bounded-and-private"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-05",
+      "requirement_ids": [
+        "COMP-P3-F2-T1-1",
+        "COMP-P3-F2-T2-1",
+        "COMP-P3-F2-T3-1",
+        "COMP-P3-F2-T4-1",
+        "COMP-P4-F3-T1-1",
+        "COMP-P4-F3-T2-1",
+        "COMP-P4-F3-T3-1",
+        "COMP-P4-F3-T4-1",
+        "COMP-P4-F4-T1-1",
+        "COMP-P4-F4-T2-1",
+        "COMP-P4-F4-T3-1",
+        "COMP-SCOPE-FAMILY-12-04",
+        "COMP-SCOPE-FAMILY-12-05",
+        "COMP-SCOPE-FAMILY-12-06",
+        "COMP-SCOPE-FAMILY-12-07",
+        "COMP-SCOPE-FAMILY-12-08",
+        "COMP-SCOPE-FAMILY-12-09",
+        "COMP-SCOPE-FAMILY-12-10",
+        "COMP-SCOPE-FAMILY-12-11"
+      ],
+      "milestones": [
+        {
+          "id": "S3-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-05-complete-the-real-assist-workflow"
+          ]
+        },
+        {
+          "id": "S3-05:accepted",
+          "depends_on": [
+            "S3-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-05-complete-the-real-assist-workflow"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-06",
+      "requirement_ids": [
+        "COMP-P3-F3-T1-1",
+        "COMP-P3-F3-T2-1",
+        "COMP-P3-F3-T3-1",
+        "COMP-P3-F3-T4-1",
+        "COMP-P5-F1-T1-1",
+        "COMP-P5-F1-T2-1",
+        "COMP-P5-F1-T3-1",
+        "COMP-P5-F1-T4-1",
+        "COMP-P5-F4-T1-1",
+        "COMP-P5-F4-T2-1",
+        "COMP-P5-F4-T3-1",
+        "COMP-P5-F2-T1-1",
+        "COMP-P5-F2-T2-1",
+        "COMP-P5-F2-T3-1",
+        "COMP-P5-F2-T4-1",
+        "COMP-P5-F3-T1-1",
+        "COMP-P5-F3-T2-1",
+        "COMP-P5-F3-T3-1",
+        "COMP-P5-F3-T4-1",
+        "COMP-SCOPE-FAMILY-13-01",
+        "COMP-SCOPE-FAMILY-13-02",
+        "COMP-SCOPE-FAMILY-13-03",
+        "COMP-SCOPE-FAMILY-13-04",
+        "COMP-SCOPE-FAMILY-13-05",
+        "COMP-SCOPE-FAMILY-13-06",
+        "COMP-SCOPE-FAMILY-13-07",
+        "COMP-SCOPE-FAMILY-13-08",
+        "COMP-SCOPE-FAMILY-13-09",
+        "COMP-SCOPE-FAMILY-13-10"
+      ],
+      "milestones": [
+        {
+          "id": "S3-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-06-complete-delegate-as-a-durable-bounded-task-loop"
+          ]
+        },
+        {
+          "id": "S3-06:accepted",
+          "depends_on": [
+            "S3-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-06-complete-delegate-as-a-durable-bounded-task-loop"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S3-07",
+      "requirement_ids": [
+        "COMP-P9-F1-T1-1",
+        "COMP-P9-F1-T2-1",
+        "COMP-P9-F1-T3-1",
+        "COMP-P9-F1-T4-1",
+        "COMP-PROV-011",
+        "COMP-CTX-010",
+        "COMP-SCOPE-FAMILY-12-13",
+        "COMP-SCOPE-FAMILY-13-11",
+        "COMP-TRUST-006"
+      ],
+      "milestones": [
+        {
+          "id": "S3-07:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-07-add-the-stage-3-native-acceptance-gate"
+          ]
+        },
+        {
+          "id": "S3-07:accepted",
+          "depends_on": [
+            "S3-07:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s3-07-add-the-stage-3-native-acceptance-gate"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S3",
+      "acceptance_stage": "S3"
+    },
+    {
+      "package_id": "S4-02",
+      "requirement_ids": [
+        "COMP-P6-F2-T1-1",
+        "COMP-P6-F2-T2-1",
+        "COMP-P6-F2-T3-1",
+        "COMP-P6-F2-T4-1",
+        "COMP-SCOPE-FAMILY-14-01",
+        "COMP-SCOPE-FAMILY-14-02",
+        "COMP-SCOPE-FAMILY-14-03",
+        "COMP-SCOPE-FAMILY-14-04",
+        "COMP-SCOPE-FAMILY-14-05",
+        "COMP-SCOPE-FAMILY-14-06",
+        "COMP-SCOPE-FAMILY-14-08"
+      ],
+      "milestones": [
+        {
+          "id": "S4-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-02-persist-and-recover-real-dependency-driven-multi-agent-execution"
+          ]
+        },
+        {
+          "id": "S4-02:accepted",
+          "depends_on": [
+            "S4-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-02-persist-and-recover-real-dependency-driven-multi-agent-execution"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "sol_engineer",
+      "implementation_stage": "S4",
+      "acceptance_stage": "S4"
+    },
+    {
+      "package_id": "S4-03",
+      "requirement_ids": [
+        "COMP-P6-F1-T1-1",
+        "COMP-P6-F1-T2-1",
+        "COMP-P6-F1-T3-1",
+        "COMP-P6-F3-T1-1",
+        "COMP-P6-F3-T2-1",
+        "COMP-P6-F3-T3-1",
+        "COMP-P6-F3-T4-1",
+        "COMP-SCOPE-FAMILY-14-07",
+        "COMP-SCOPE-FAMILY-14-09"
+      ],
+      "milestones": [
+        {
+          "id": "S4-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-03-complete-the-fleetplandecision-user-workflow"
+          ]
+        },
+        {
+          "id": "S4-03:accepted",
+          "depends_on": [
+            "S4-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-03-complete-the-fleetplandecision-user-workflow"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S4",
+      "acceptance_stage": "S4"
+    },
+    {
+      "package_id": "S4-04",
+      "requirement_ids": [
+        "COMP-P6-F4-T1-1",
+        "COMP-SCOPE-FAMILY-14-10",
+        "COMP-SCOPE-FAMILY-15-02",
+        "COMP-SCOPE-FAMILY-15-03"
+      ],
+      "milestones": [
+        {
+          "id": "S4-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-04-implement-legion-as-a-production-mcp-client"
+          ]
+        },
+        {
+          "id": "S4-04:accepted",
+          "depends_on": [
+            "S4-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-04-implement-legion-as-a-production-mcp-client"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "sol_engineer",
+      "implementation_stage": "S4",
+      "acceptance_stage": "S4"
+    },
+    {
+      "package_id": "S4-05",
+      "requirement_ids": [
+        "COMP-P6-F4-T2-1",
+        "COMP-P6-F4-T3-1",
+        "COMP-SCOPE-FAMILY-14-11",
+        "COMP-SCOPE-FAMILY-15-04",
+        "COMP-SCOPE-FAMILY-15-05"
+      ],
+      "milestones": [
+        {
+          "id": "S4-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-05-implement-real-acp-interoperability-and-external-agent-containment"
+          ]
+        },
+        {
+          "id": "S4-05:accepted",
+          "depends_on": [
+            "S4-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-05-implement-real-acp-interoperability-and-external-agent-containment"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "sol_engineer",
+      "implementation_stage": "S4",
+      "acceptance_stage": "S4"
+    },
+    {
+      "package_id": "S4-06",
+      "requirement_ids": [
+        "COMP-SCOPE-FAMILY-14-12"
+      ],
+      "milestones": [
+        {
+          "id": "S4-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-06-qualify-multi-agent-mcp-and-acp-through-the-packaged-app"
+          ]
+        },
+        {
+          "id": "S4-06:accepted",
+          "depends_on": [
+            "S4-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s4-06-qualify-multi-agent-mcp-and-acp-through-the-packaged-app"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "terra_worker",
+      "implementation_stage": "S4",
+      "acceptance_stage": "S4"
+    },
+    {
+      "package_id": "S5-01",
+      "requirement_ids": [
+        "COMP-P7-F1-T1-1",
+        "COMP-SCOPE-FAMILY-17-01",
+        "COMP-SCOPE-FAMILY-17-03"
+      ],
+      "milestones": [
+        {
+          "id": "S5-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-01-ratify-the-full-extension-host-compatibility-and-storage-contract"
+          ]
+        },
+        {
+          "id": "S5-01:accepted",
+          "depends_on": [
+            "S5-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-01-ratify-the-full-extension-host-compatibility-and-storage-contract"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-02",
+      "requirement_ids": [
+        "COMP-P7-F1-T2-1",
+        "COMP-P7-F1-T3-1",
+        "COMP-P7-F1-T4-1",
+        "COMP-P7-F2-T1-1",
+        "COMP-P7-F2-T2-1",
+        "COMP-P7-F2-T3-1",
+        "COMP-SCOPE-FAMILY-17-02",
+        "COMP-SCOPE-FAMILY-17-04",
+        "COMP-SCOPE-FAMILY-17-05",
+        "COMP-SCOPE-FAMILY-17-06"
+      ],
+      "milestones": [
+        {
+          "id": "S5-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-02-productize-signed-wasm-extensions-and-extension-storage"
+          ]
+        },
+        {
+          "id": "S5-02:accepted",
+          "depends_on": [
+            "S5-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-02-productize-signed-wasm-extensions-and-extension-storage"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-03",
+      "requirement_ids": [
+        "COMP-P7-F2-T4-1",
+        "COMP-SCOPE-FAMILY-17-07"
+      ],
+      "milestones": [
+        {
+          "id": "S5-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-03-implement-the-required-vs-code-node-and-web-worker-hosts"
+          ]
+        },
+        {
+          "id": "S5-03:accepted",
+          "depends_on": [
+            "S5-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-03-implement-the-required-vs-code-node-and-web-worker-hosts"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-04",
+      "requirement_ids": [
+        "COMP-SCOPE-FAMILY-17-08",
+        "COMP-SCOPE-FAMILY-17-09",
+        "COMP-SCOPE-FAMILY-17-10"
+      ],
+      "milestones": [
+        {
+          "id": "S5-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-04-implement-webviews-notebooks-and-custom-editors"
+          ]
+        },
+        {
+          "id": "S5-04:accepted",
+          "depends_on": [
+            "S5-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-04-implement-webviews-notebooks-and-custom-editors"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-05",
+      "requirement_ids": [
+        "COMP-REMOTE-004"
+      ],
+      "milestones": [
+        {
+          "id": "S5-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-05-ratify-remote-workspace-authority"
+          ]
+        },
+        {
+          "id": "S5-05:accepted",
+          "depends_on": [
+            "S5-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-05-ratify-remote-workspace-authority"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-06",
+      "requirement_ids": [
+        "COMP-REMOTE-011",
+        "COMP-REMOTE-013",
+        "COMP-REMOTE-014",
+        "COMP-REMOTE-015"
+      ],
+      "milestones": [
+        {
+          "id": "S5-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-06-implement-and-supervise-the-remote-workspace-agent"
+          ]
+        },
+        {
+          "id": "S5-06:accepted",
+          "depends_on": [
+            "S5-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-06-implement-and-supervise-the-remote-workspace-agent"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-07",
+      "requirement_ids": [
+        "COMP-REMOTE-002",
+        "COMP-REMOTE-003",
+        "COMP-REMOTE-005",
+        "COMP-REMOTE-006",
+        "COMP-REMOTE-007",
+        "COMP-REMOTE-008",
+        "COMP-REMOTE-009",
+        "COMP-REMOTE-010",
+        "COMP-REMOTE-012",
+        "COMP-REMOTE-016",
+        "COMP-REMOTE-018"
+      ],
+      "milestones": [
+        {
+          "id": "S5-07:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-07-complete-ssh-and-container-remote-development"
+          ]
+        },
+        {
+          "id": "S5-07:accepted",
+          "depends_on": [
+            "S5-07:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-07-complete-ssh-and-container-remote-development"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Named external endpoints and their credentials for the remote, provider, collaboration and enterprise claims; none is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-08",
+      "requirement_ids": [
+        "COMP-COLLAB-002"
+      ],
+      "milestones": [
+        {
+          "id": "S5-08:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-08-ratify-collaboration-and-enterprise-identitypolicy-contracts"
+          ]
+        },
+        {
+          "id": "S5-08:accepted",
+          "depends_on": [
+            "S5-08:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-08-ratify-collaboration-and-enterprise-identitypolicy-contracts"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-09",
+      "requirement_ids": [
+        "COMP-P9-F3-T1-1",
+        "COMP-P9-F3-T2-1",
+        "COMP-COLLAB-003",
+        "COMP-COLLAB-004"
+      ],
+      "milestones": [
+        {
+          "id": "S5-09:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-09-implement-the-collaboration-transport-and-control-plane"
+          ]
+        },
+        {
+          "id": "S5-09:accepted",
+          "depends_on": [
+            "S5-09:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-09-implement-the-collaboration-transport-and-control-plane"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Named external endpoints and their credentials for the remote, provider, collaboration and enterprise claims; none is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-10",
+      "requirement_ids": [
+        "COMP-P9-F3-T3-1",
+        "COMP-COLLAB-005",
+        "COMP-COLLAB-006"
+      ],
+      "milestones": [
+        {
+          "id": "S5-10:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-10-implement-concurrent-collaboration-and-shared-proposals"
+          ]
+        },
+        {
+          "id": "S5-10:accepted",
+          "depends_on": [
+            "S5-10:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-10-implement-concurrent-collaboration-and-shared-proposals"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-11",
+      "requirement_ids": [
+        "COMP-P9-F2-T1-1",
+        "COMP-P9-F2-T3-1",
+        "COMP-P9-F3-T4-1",
+        "COMP-ENT-001",
+        "COMP-ENT-002",
+        "COMP-ENT-003",
+        "COMP-ENT-004"
+      ],
+      "milestones": [
+        {
+          "id": "S5-11:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-11-implement-sso-scim-enterprise-policy-audit-and-retention"
+          ]
+        },
+        {
+          "id": "S5-11:accepted",
+          "depends_on": [
+            "S5-11:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-11-implement-sso-scim-enterprise-policy-audit-and-retention"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Named external endpoints and their credentials for the remote, provider, collaboration and enterprise claims; none is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-12",
+      "requirement_ids": [
+        "COMP-P9-F4-T1-1",
+        "COMP-P9-F4-T2-1",
+        "COMP-TRAIN-002",
+        "COMP-TRAIN-003",
+        "COMP-TRAIN-004",
+        "COMP-TRAIN-005",
+        "COMP-TRAIN-006",
+        "COMP-TRAIN-010"
+      ],
+      "milestones": [
+        {
+          "id": "S5-12:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-12-complete-explicit-opt-in-telemetry-and-training-data-control"
+          ]
+        },
+        {
+          "id": "S5-12:accepted",
+          "depends_on": [
+            "S5-12:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-12-complete-explicit-opt-in-telemetry-and-training-data-control"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-13",
+      "requirement_ids": [
+        "COMP-P9-F4-T3-1",
+        "COMP-TRAIN-007",
+        "COMP-TRAIN-008"
+      ],
+      "milestones": [
+        {
+          "id": "S5-13:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-13-run-consent-gated-qlora-training-and-compare-the-adapter-with-legion-bench"
+          ]
+        },
+        {
+          "id": "S5-13:accepted",
+          "depends_on": [
+            "S5-13:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-13-run-consent-gated-qlora-training-and-compare-the-adapter-with-legion-bench"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-14",
+      "requirement_ids": [
+        "COMP-ENT-005"
+      ],
+      "milestones": [
+        {
+          "id": "S5-14:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-14-package-and-operate-the-collaborationenterprise-service"
+          ]
+        },
+        {
+          "id": "S5-14:accepted",
+          "depends_on": [
+            "S5-14:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-14-package-and-operate-the-collaborationenterprise-service"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Named external endpoints and their credentials for the remote, provider, collaboration and enterprise claims; none is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S5-15",
+      "requirement_ids": [
+        "COMP-SCOPE-FAMILY-17-11",
+        "COMP-REMOTE-017",
+        "COMP-ENT-006",
+        "COMP-TRAIN-009"
+      ],
+      "milestones": [
+        {
+          "id": "S5-15:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-15-add-the-stage-5-full-product-acceptance-gate"
+          ]
+        },
+        {
+          "id": "S5-15:accepted",
+          "depends_on": [
+            "S5-15:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-ai-team-completion.md#s5-15-add-the-stage-5-full-product-acceptance-gate"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S5",
+      "acceptance_stage": "S5"
+    },
+    {
+      "package_id": "S6-01",
+      "requirement_ids": [],
+      "milestones": [
+        {
+          "id": "S6-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-s6-01-final-candidate-qualification-ten-owner-days-and-two-independent-usability-sessions"
+          ]
+        },
+        {
+          "id": "S6-01:accepted",
+          "depends_on": [
+            "S6-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-s6-01-final-candidate-qualification-ten-owner-days-and-two-independent-usability-sessions"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-supplied signing, notarization and update-feed infrastructure; no signing credential, certificate, key, notarization tool, provider or feed is available in the retained facts.",
+        "A clean virtual machine for each supported OS with no prior Legion installation.",
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S6",
+      "acceptance_stage": "S6"
+    },
+    {
+      "package_id": "XQ-01",
+      "requirement_ids": [
+        "COMP-DIST-002"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-01:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-01-add-production-qualification-rows-to-the-canonical-completion-register"
+          ]
+        },
+        {
+          "id": "XQ-01:accepted",
+          "depends_on": [
+            "XQ-01:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-01-add-production-qualification-rows-to-the-canonical-completion-register"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "XQ-02",
+      "requirement_ids": [
+        "COMP-P8-F5-T1-1",
+        "COMP-P8-F5-T2-1",
+        "COMP-P8-F5-T3-1",
+        "COMP-PLAT-003",
+        "COMP-PLAT-009",
+        "COMP-GAP-001",
+        "COMP-SCOPE-GAP-01",
+        "COMP-SCOPE-GAP-05"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-02:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-02-ingest-s1-native-input-and-accessibility-evidence-on-windowsmacoslinux"
+          ]
+        },
+        {
+          "id": "XQ-02:accepted",
+          "depends_on": [
+            "XQ-02:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-02-ingest-s1-native-input-and-accessibility-evidence-on-windowsmacoslinux"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "A live Windows UIA/Narrator, macOS AX/VoiceOver and Linux AT-SPI/Orca provider session against the packaged product.",
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "XQ-03",
+      "requirement_ids": [
+        "COMP-P8-F4-T1-1",
+        "COMP-P8-F4-T2-1",
+        "COMP-P8-F4-T3-1",
+        "COMP-PLAT-005",
+        "COMP-PLAT-006",
+        "COMP-SCOPE-GAP-09"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-03:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-03-calibrated-product-performance-qualification"
+          ]
+        },
+        {
+          "id": "XQ-03:accepted",
+          "depends_on": [
+            "XQ-03:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-03-calibrated-product-performance-qualification"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "XQ-04",
+      "requirement_ids": [
+        "COMP-P8-F2-T1-1",
+        "COMP-P8-F2-T2-1",
+        "COMP-P8-F2-T3-1",
+        "COMP-DIST-005",
+        "COMP-DIST-006",
+        "COMP-SCOPE-GAP-03"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-04:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-04-installed-update-replacement-restart-and-rollback"
+          ]
+        },
+        {
+          "id": "XQ-04:accepted",
+          "depends_on": [
+            "XQ-04:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-04-installed-update-replacement-restart-and-rollback"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-supplied signing, notarization and update-feed infrastructure; no signing credential, certificate, key, notarization tool, provider or feed is available in the retained facts."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "XQ-05",
+      "requirement_ids": [
+        "COMP-P8-F3-T1-1",
+        "COMP-P8-F3-T2-1",
+        "COMP-P8-F3-T3-1",
+        "COMP-DIST-008",
+        "COMP-DIST-009",
+        "COMP-SCOPE-GAP-04",
+        "COMP-SCOPE-GAP-10"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-05:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-05-crash-recovery-diagnostics-privacy-and-deletion"
+          ]
+        },
+        {
+          "id": "XQ-05:accepted",
+          "depends_on": [
+            "XQ-05:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-05-crash-recovery-diagnostics-privacy-and-deletion"
+          ]
+        }
+      ],
+      "external_prerequisites": [],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "XQ-06",
+      "requirement_ids": [
+        "COMP-DIST-004",
+        "COMP-SCOPE-GAP-06"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-06:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-06-separate-manual-artifact-and-os-level-no-egress-evidence"
+          ]
+        },
+        {
+          "id": "XQ-06:accepted",
+          "depends_on": [
+            "XQ-06:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-06-separate-manual-artifact-and-os-level-no-egress-evidence"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "An OS-level per-process DNS, TCP and UDP network capture on each supported OS, applied to the packaged Manual/offline artifact process tree."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S1",
+      "acceptance_stage": "S1"
+    },
+    {
+      "package_id": "XQ-07",
+      "requirement_ids": [
+        "COMP-P8-F1-T1-1",
+        "COMP-P8-F1-T2-1",
+        "COMP-P8-F1-T3-1",
+        "COMP-P8-F1-T4-1",
+        "COMP-P8-F1-T5-1",
+        "COMP-DIST-003",
+        "COMP-DIST-007",
+        "COMP-SCOPE-GAP-02",
+        "COMP-DIST-010"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-07:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-07-signed-installers-and-clean-machine-qualification"
+          ]
+        },
+        {
+          "id": "XQ-07:accepted",
+          "depends_on": [
+            "XQ-07:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-07-signed-installers-and-clean-machine-qualification"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "Owner-supplied signing, notarization and update-feed infrastructure; no signing credential, certificate, key, notarization tool, provider or feed is available in the retained facts.",
+        "A clean virtual machine for each supported OS with no prior Legion installation.",
+        "A macOS host and a Linux host with the packaged native product installed and a real display session, able to run the windowed GUI e2e suite."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    },
+    {
+      "package_id": "XQ-08",
+      "requirement_ids": [
+        "COMP-P9-F2-T4-1"
+      ],
+      "milestones": [
+        {
+          "id": "XQ-08:implemented",
+          "depends_on": [],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-08-independent-securityprivacy-audit-closure"
+          ]
+        },
+        {
+          "id": "XQ-08:accepted",
+          "depends_on": [
+            "XQ-08:implemented"
+          ],
+          "deliverable_refs": [
+            "docs/superpowers/plans/2026-09-04-production-qualification.md#task-xq-08-independent-securityprivacy-audit-closure"
+          ]
+        }
+      ],
+      "external_prerequisites": [
+        "An engaged independent external security and privacy auditor and the archived audit report; the register currently records that report as missing."
+      ],
+      "owner_role": "luna_worker",
+      "implementation_stage": "S0",
+      "acceptance_stage": "S0"
+    }
+  ]
+}

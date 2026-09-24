@@ -511,17 +511,18 @@ fn t7_capability_gated_partial_support() {
         legion_protocol::PrincipalId("test".to_string()),
     )
     .expect("open workspace");
-    app.open_file(src_file.to_string_lossy())
-        .expect("open file");
-    let buffer_id = app.active_buffer_id().expect("active buffer");
 
-    // Only hover is supported; definition and completion are not.
-    let health = health_with_caps(&[
+    // Install the fake live session before opening the file so the production
+    // didOpen path can admit the document to the worker queue. Read requests
+    // require this document-sync readiness in addition to capabilities.
+    app.set_lsp_health_for_test(health_with_caps(&[
         ("hoverProvider", true),
         ("definitionProvider", false),
         ("completionProvider", false),
-    ]);
-    app.set_lsp_health_for_test(health);
+    ]));
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
 
     let pos = legion_protocol::TextCoordinate {
         line: 0,
@@ -622,16 +623,19 @@ fn t4_new_reads_fire_only_for_their_own_advertised_capability() {
         legion_protocol::PrincipalId("test".to_string()),
     )
     .expect("open workspace");
-    app.open_file(src_file.to_string_lossy())
-        .expect("open file");
-    let buffer_id = app.active_buffer_id().expect("active buffer");
 
+    // Install the fake live session before opening the file so the production
+    // didOpen path can admit the document to the worker queue. Read requests
+    // require this document-sync readiness in addition to capabilities.
     app.set_lsp_health_for_test(health_with_caps(&[
         ("referencesProvider", true),
         ("documentSymbolProvider", true),
         ("inlayHintProvider", true),
         ("codeLensProvider", false),
     ]));
+    app.open_file(src_file.to_string_lossy())
+        .expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
 
     let pos = legion_protocol::TextCoordinate {
         line: 0,

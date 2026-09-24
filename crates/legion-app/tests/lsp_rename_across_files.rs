@@ -12,7 +12,7 @@
 //! and looks like it worked.
 
 use legion_app::AppComposition;
-use legion_app::language::{LspReadKind, LspReadOutcome, LspRequestTag, LspWorkerResult};
+use legion_app::language::{LspReadKind, LspReadOutcome, LspWorkerRequest, LspWorkerResult};
 use legion_protocol::{
     BufferId, CausalityId, LspCapabilitySummary, LspResultStatus, LspServerBinaryProvenance,
     LspServerHealthRecord, PrincipalId, ProposalLifecycleAction, ProposalLifecycleCommand,
@@ -20,6 +20,8 @@ use legion_protocol::{
     ProposalResponse, ProposalRollbackReason, TimestampMillis, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::time::Duration;
 
 fn health() -> LspServerHealthRecord {
     LspServerHealthRecord {
@@ -58,6 +60,8 @@ struct Fixture {
     /// rather than the app's resolver.
     lib_uri: String,
     main_uri: String,
+    requests: Receiver<LspWorkerRequest>,
+    results: SyncSender<LspWorkerResult>,
 }
 
 const LIB_BEFORE: &str = "pub fn widget() {}\n";
@@ -82,15 +86,40 @@ fn fixture() -> Fixture {
         PrincipalId("rename-across".to_string()),
     )
     .expect("open workspace");
+    let (requests, results) = app.set_lsp_request_harness_for_test(write_health());
 
     // Both files must be open: the translator resolves each document the edit
     // names, and an unresolvable document is a translation failure rather than
     // a silent partial rename.
     app.open_file(lib_path.to_string_lossy()).expect("open lib");
     let lib_buffer = app.active_buffer_id().expect("lib buffer");
+    match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("lib didOpen")
+    {
+        LspWorkerRequest::DidOpenDeferred { text_rx, .. } => assert!(
+            text_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("lib didOpen text")
+                .is_some()
+        ),
+        _ => panic!("expected deferred lib didOpen"),
+    }
     app.open_file(main_path.to_string_lossy())
         .expect("open main");
     let active_buffer = app.active_buffer_id().expect("active buffer");
+    match requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("main didOpen")
+    {
+        LspWorkerRequest::DidOpenDeferred { text_rx, .. } => assert!(
+            text_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("main didOpen text")
+                .is_some()
+        ),
+        _ => panic!("expected deferred main didOpen"),
+    }
 
     let lib_uri = app
         .document_uri_for_buffer_for_test(lib_buffer)
@@ -108,6 +137,8 @@ fn fixture() -> Fixture {
         lib_buffer,
         lib_uri,
         main_uri,
+        requests,
+        results,
     }
 }
 
@@ -141,25 +172,32 @@ fn rename_edit(lib_uri: &str, main_uri: &str) -> serde_json::Value {
 /// Drive the rename result through the real drain path and return the proposal
 /// it produced.
 fn rename_proposal(fx: &mut Fixture) -> legion_protocol::WorkspaceProposal {
-    let sender = fx.app.inject_lsp_result_sender_for_test(health());
-    let snapshot_id = fx
-        .app
-        .current_snapshot_id_for_test(fx.active_buffer)
-        .expect("snapshot id");
-    sender
+    assert!(fx.app.issue_lsp_rename_request(
+        fx.active_buffer,
+        legion_protocol::TextCoordinate {
+            line: 0,
+            character: 12,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+        "gadget".to_string(),
+    ));
+    let tag = match fx
+        .requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("rename request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected rename request"),
+    };
+    fx.results
         .send(LspWorkerResult::ReadResult {
             outcome: Ok(LspReadOutcome {
                 result: rename_edit(&fx.lib_uri, &fx.main_uri),
-                issued_snapshot: snapshot_id,
+                issued_snapshot: tag.snapshot_id,
                 status: LspResultStatus::Fresh,
             }),
-            tag: LspRequestTag {
-                buffer_id: fx.active_buffer,
-                kind: LspReadKind::Rename {
-                    new_name: "gadget".to_string(),
-                },
-                snapshot_id,
-            },
+            tag,
         })
         .expect("send rename result");
     fx.app.drain_lsp_session();
@@ -365,23 +403,56 @@ fn drain_write_side(
     kind: LspReadKind,
     result: serde_json::Value,
 ) -> legion_protocol::LanguageToolingProjection {
-    let sender = fx.app.inject_lsp_result_sender_for_test(write_health());
-    let snapshot_id = fx
-        .app
-        .current_snapshot_id_for_test(fx.active_buffer)
-        .expect("snapshot id");
-    sender
+    let issued = match kind {
+        LspReadKind::Formatting => fx.app.issue_lsp_formatting_request(fx.active_buffer),
+        LspReadKind::CodeAction { organize_imports } => {
+            if organize_imports {
+                fx.app
+                    .dispatch_ui_intent(CommandDispatchIntent::RequestOrganizeImportsProposal {
+                        buffer_id: fx.active_buffer,
+                    })
+                    .is_ok()
+            } else {
+                fx.app
+                    .dispatch_ui_intent(CommandDispatchIntent::RequestCodeActions {
+                        buffer_id: fx.active_buffer,
+                        range: legion_protocol::ProtocolTextRange {
+                            start: legion_protocol::TextCoordinate {
+                                line: 0,
+                                character: 0,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                            end: legion_protocol::TextCoordinate {
+                                line: 0,
+                                character: 0,
+                                byte_offset: None,
+                                utf16_offset: None,
+                            },
+                        },
+                    })
+                    .is_ok()
+            }
+        }
+        _ => false,
+    };
+    assert!(issued, "write-side request must be admitted");
+    let tag = match fx
+        .requests
+        .recv_timeout(Duration::from_secs(1))
+        .expect("write-side request")
+    {
+        LspWorkerRequest::RequestRead { tag, .. } => tag,
+        _ => panic!("expected write-side read request"),
+    };
+    fx.results
         .send(LspWorkerResult::ReadResult {
             outcome: Ok(LspReadOutcome {
                 result,
-                issued_snapshot: snapshot_id,
+                issued_snapshot: tag.snapshot_id,
                 status: LspResultStatus::Fresh,
             }),
-            tag: LspRequestTag {
-                buffer_id: fx.active_buffer,
-                kind,
-                snapshot_id,
-            },
+            tag,
         })
         .expect("send result");
     fx.app.drain_lsp_session();
@@ -479,14 +550,12 @@ fn an_organize_imports_code_action_becomes_a_reviewable_proposal() {
     );
 }
 
-/// A code action that carries only a command is refused out loud.
+/// A code action that carries only an unadvertised command is refused out loud.
 ///
-/// Running it would need `workspace/executeCommand`, which lets a server mutate
-/// the workspace outside the proposal pipeline — the one thing this task's stop
-/// condition forbids. Producing nothing quietly would look like the action did
-/// not exist.
+/// The fixture does not advertise execute-command authority, so selecting it
+/// must fail visibly rather than silently bypassing the proposal pipeline.
 #[test]
-fn a_command_only_code_action_is_refused_rather_than_executed() {
+fn an_unadvertised_command_only_code_action_is_refused_rather_than_executed() {
     let mut fx = fixture();
     let actions = serde_json::json!([
         {
@@ -495,7 +564,7 @@ fn a_command_only_code_action_is_refused_rather_than_executed() {
             "command": { "title": "fmt", "command": "rust-analyzer.rustfmt" }
         }
     ]);
-    let projection = drain_write_side(
+    let _projection = drain_write_side(
         &mut fx,
         LspReadKind::CodeAction {
             organize_imports: false,
@@ -503,19 +572,40 @@ fn a_command_only_code_action_is_refused_rather_than_executed() {
         actions,
     );
 
+    let candidate = fx
+        .app
+        .language_tooling_projection()
+        .code_action_candidates
+        .first()
+        .cloned()
+        .expect("command-only candidate");
+    fx.app
+        .dispatch_ui_intent(CommandDispatchIntent::SelectCodeAction {
+            response_id: candidate.response_id,
+            action_id: candidate.action_id,
+        })
+        .expect("command-only selection is recorded as refusal");
+    let projection = fx.app.language_tooling_projection();
     let failure = projection
         .operations
         .iter()
-        .find(|op| op.kind == legion_protocol::LanguageToolingOperationKind::CodeActionProposal)
+        .find(|op| {
+            op.kind == legion_protocol::LanguageToolingOperationKind::CodeActionProposal
+                && op.status == legion_protocol::LanguageToolingStatusKind::Failed
+        })
         .expect("the refusal must be recorded as an operation");
     assert!(
         failure.proposal_id.is_none(),
-        "a command-only action must not produce a proposal"
+        "an unadvertised command-only action must not produce a proposal"
     );
     assert!(
-        failure.message.contains("command-only"),
+        failure.message.contains("did not advertise"),
         "the refusal must say why, got {:?}",
         failure.message
+    );
+    assert!(
+        fx.requests.try_recv().is_err(),
+        "an unadvertised command must not queue executeCommand"
     );
 }
 

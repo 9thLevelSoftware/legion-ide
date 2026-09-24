@@ -11,8 +11,8 @@ use legion_desktop::{
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, DesktopWorkflowOutcome},
 };
 use legion_protocol::{
-    CanonicalPath, SessionPanelState, TimestampMillis, WorkbenchSettingsRecord,
-    WorkspaceSessionRecord,
+    CanonicalPath, LanguageToolchainSettingsRecord, SessionPanelState, TimestampMillis,
+    WorkbenchSettingsRecord, WorkspaceSessionRecord,
 };
 use legion_ui::{
     DockLayout, DockMode, DockSide, DockSideLayout, PanelId, ThemePreferenceProjection,
@@ -178,7 +178,7 @@ fn session_restore_saves_metadata_and_restores_tabs_focus_layout_explorer() {
     );
     assert_eq!(
         snapshot.active_buffer_projection.small_buffer_text(),
-        Some("second")
+        Some("secondSECRET_DIRTY_BODY")
     );
     assert!(restored.explorer_path_expanded(&explorer_path));
     assert_eq!(
@@ -517,6 +517,69 @@ fn session_store_save_publishes_validated_temp_and_cleans_intermediates() {
     );
 }
 
+#[test]
+fn session_restore_killed_dirty_session_restores_sidecar_without_writing_disk() {
+    let workspace = TempWorkspace::new("legion_desktop_hot_exit_kill");
+    let file = workspace.write("notes.txt", "clean");
+    let session_state = workspace.path().join("session.json");
+    {
+        let mut runtime = open_runtime(workspace.path(), Some(&file), &session_state);
+        assert_eq!(
+            runtime
+                .handle_action(DesktopAction::InsertText {
+                    text: "DIRTY".to_string(),
+                    at: legion_protocol::TextCoordinate {
+                        line: 0,
+                        character: 5,
+                        byte_offset: Some(5),
+                        utf16_offset: Some(5),
+                    },
+                })
+                .expect("unsaved edit"),
+            DesktopWorkflowOutcome::Edited
+        );
+    }
+
+    assert_eq!(
+        fs::read_to_string(&file).expect("disk after kill"),
+        "clean",
+        "killed session must not write the dirty body to disk"
+    );
+    let json = fs::read_to_string(&session_state).expect("session json after kill");
+    assert!(
+        !json.contains("DIRTY"),
+        "session.json must stay metadata-only"
+    );
+    let sidecar_dir = session_state
+        .parent()
+        .expect("session parent")
+        .join("unsaved");
+    assert!(
+        sidecar_dir.join("manifest.json").is_file(),
+        "hot-exit sidecar manifest should exist next to session.json"
+    );
+
+    let restored = open_runtime(workspace.path(), None, &session_state);
+    let snapshot = restored.projection_snapshot();
+    assert_eq!(
+        snapshot.active_buffer_projection.small_buffer_text(),
+        Some("cleanDIRTY")
+    );
+    assert!(
+        snapshot
+            .status_messages
+            .iter()
+            .any(|status| status.message.contains("unsaved buffer")),
+        "restore should surface a hot-exit status, got {:?}",
+        snapshot.status_messages
+    );
+    assert_eq!(
+        fs::read_to_string(&file).expect("disk after restore"),
+        "clean",
+        "restore must not write disk; durable write stays proposal-mediated"
+    );
+}
+
 fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
     WorkspaceSessionRecord {
         session_id: "workspace-session:test".to_string(),
@@ -528,6 +591,8 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
         tab_groups: Vec::new(),
         layout_splits: Vec::new(),
         explorer_expansion: Vec::new(),
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: false,
             side_visible: true,
@@ -537,9 +602,353 @@ fn minimal_record(root: &Path) -> WorkspaceSessionRecord {
         },
         dock_layouts: Vec::new(),
         workbench_settings: WorkbenchSettingsRecord::default(),
+        language_toolchain_settings: LanguageToolchainSettingsRecord::default(),
         memory_snapshot_json: None,
         dirty_indicators: Vec::new(),
         saved_at: TimestampMillis::now(),
         schema_version: 1,
     }
+}
+
+// --- Default session path -------------------------------------------------
+//
+// Every test above hands the runtime an explicit `session_state` path. That is
+// what let the whole feature pass its tests while doing nothing in the product:
+// `DesktopLaunchConfig` defaulted `session_state` to `None`, so
+// `save_session_state` returned immediately and a normal launch lost its layout
+// on every restart. These tests exercise the path the product actually takes —
+// argument parsing — rather than a path a test constructed.
+
+/// The launch config a bare `legion-desktop <workspace>` produces.
+fn config_from_args(args: &[&str]) -> DesktopLaunchConfig {
+    DesktopLaunchConfig::from_args(args.iter().map(std::ffi::OsString::from))
+        .expect("launch config should parse")
+}
+
+#[test]
+fn an_interactive_launch_persists_its_layout_by_default() {
+    let workspace = TempWorkspace::new("legion_desktop_session_default");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+
+    assert_eq!(
+        config.session_state,
+        Some(workspace.path().join(".legion").join("session.json")),
+        "a normal launch must persist its layout somewhere, or every restart \
+         silently discards the open tabs, the active buffer, the explorer \
+         expansion and the dock layout"
+    );
+}
+
+#[test]
+fn an_explicit_session_path_still_wins() {
+    let workspace = TempWorkspace::new("legion_desktop_session_explicit");
+    let chosen = workspace.path().join("chosen.json");
+    let config = config_from_args(&[
+        workspace.path().to_string_lossy().as_ref(),
+        "--session-state",
+        chosen.to_string_lossy().as_ref(),
+    ]);
+
+    assert_eq!(config.session_state, Some(chosen));
+}
+
+#[test]
+fn measurement_harnesses_do_not_inherit_the_workspace_session_path() {
+    // `--beta-smoke` reads `session_state` directly and substitutes its own
+    // default; defaulting before that branch would redirect beta evidence into
+    // the workspace. Smoke and perf runs are short-lived and write nothing.
+    let workspace = TempWorkspace::new("legion_desktop_session_harness");
+    let root = workspace.path().to_string_lossy().into_owned();
+
+    for args in [
+        vec![root.as_str(), "--smoke"],
+        vec![root.as_str(), "--beta-smoke"],
+        vec![root.as_str(), "--manual-perf"],
+    ] {
+        let config = config_from_args(&args);
+        assert_eq!(
+            config.session_state, None,
+            "{args:?} must not adopt the interactive session path"
+        );
+    }
+}
+
+#[test]
+fn a_default_launch_round_trips_open_tabs_across_a_restart() {
+    // The end-to-end claim P1.F2.T4 actually makes: restart restores the
+    // layout. Driven entirely through the default config — no test-supplied
+    // session path anywhere.
+    let workspace = TempWorkspace::new("legion_desktop_session_roundtrip");
+    let first_file = workspace.write("alpha.txt", "alpha\n");
+    workspace.write("beta.txt", "beta\n");
+
+    let session_path = {
+        let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+        let expected = config
+            .session_state
+            .clone()
+            .expect("interactive launch should default a session path");
+        let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+        runtime
+            .handle_action(DesktopAction::OpenPathText(
+                first_file.to_string_lossy().into_owned(),
+            ))
+            .expect("opening a file should succeed");
+        runtime
+            .save_session_state()
+            .expect("saving the session should succeed");
+        expected
+    };
+
+    assert!(
+        session_path.exists(),
+        "the default launch should have written {}",
+        session_path.display()
+    );
+
+    // Second launch: same arguments, nothing carried over in memory.
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let restored = DesktopRuntime::open(config).expect("runtime should reopen");
+    let titles = tab_titles(&restored);
+    assert!(
+        titles.iter().any(|title| title == "alpha.txt"),
+        "restarting must restore the open tabs, got {titles:?}"
+    );
+}
+
+#[test]
+fn an_unchanged_session_is_not_rewritten() {
+    // `persist_session_if_configured` runs from the catch-all action arm, so
+    // this path is reached by every dispatched action — including each inserted
+    // character. `DesktopSessionStore::save` fsyncs and reads back to validate,
+    // so an unguarded write here would put a durable round-trip inside the
+    // ADR-0048 keypress budget. Proven by file mtime: a second save that
+    // changes nothing must not touch the file.
+    let workspace = TempWorkspace::new("legion_desktop_session_noop");
+    workspace.write("alpha.txt", "alpha\n");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    runtime.save_session_state().expect("first save");
+    let first = fs::metadata(&session_path)
+        .expect("session file should exist")
+        .modified()
+        .expect("mtime should be readable");
+
+    // Coarse filesystem timestamps would make an unchanged mtime meaningless
+    // if both writes landed inside the same tick, so separate them.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    runtime.save_session_state().expect("second save");
+    let second = fs::metadata(&session_path)
+        .expect("session file should still exist")
+        .modified()
+        .expect("mtime should be readable");
+
+    assert_eq!(
+        first, second,
+        "saving an unchanged session must not rewrite the file"
+    );
+}
+
+#[test]
+fn a_changed_session_is_written_again() {
+    // The other half: the guard must not be so eager that a real layout change
+    // is dropped. Without this, "skip when unchanged" could degrade to "skip".
+    let workspace = TempWorkspace::new("legion_desktop_session_changed");
+    let alpha = workspace.write("alpha.txt", "alpha\n");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    runtime.save_session_state().expect("first save");
+    let before = fs::read_to_string(&session_path).expect("session file should exist");
+
+    runtime
+        .handle_action(DesktopAction::OpenPathText(
+            alpha.to_string_lossy().into_owned(),
+        ))
+        .expect("opening a file should succeed");
+    runtime.save_session_state().expect("second save");
+    let after = fs::read_to_string(&session_path).expect("session file should exist");
+
+    assert_ne!(
+        before, after,
+        "opening a tab changes what a restart would restore and must be written"
+    );
+    assert!(
+        after.contains("alpha.txt"),
+        "the newly opened tab should be in the record, got {after}"
+    );
+}
+
+// --- Panel sizes actually come back ---------------------------------------
+//
+// `splitter_fraction` was persisted and reloaded for a long time while no
+// renderer read it, so a restart restored the record rather than the layout the
+// user had arranged. These tests exercise the reader.
+
+#[test]
+fn a_restored_splitter_fraction_sizes_the_panel() {
+    use legion_desktop::view::dock_geometry;
+    use legion_ui::DockSide;
+
+    let layouts = vec![DockLayout {
+        mode: DockMode::Manual,
+        left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), 0.4, false),
+        right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.25, false),
+        bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.3, false),
+    }];
+
+    let stored = dock_geometry::stored_fraction(&layouts, DockMode::Manual, DockSide::Left)
+        .expect("the layout carries a left fraction");
+    assert!((stored - 0.4).abs() < f32::EPSILON, "got {stored}");
+
+    // 40% of a 1600px shell, within the panel's own bounds.
+    assert_eq!(
+        dock_geometry::size_from_fraction(Some(stored), 1_600.0, 248.0, 120.0, 900.0),
+        640.0,
+        "a restored fraction must size the panel, not fall back to the default"
+    );
+}
+
+#[test]
+fn a_resized_panel_is_persisted_and_survives_a_restart() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    let workspace = TempWorkspace::new("legion_desktop_dock_roundtrip");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let before = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    // Stand in for the user dragging the splitter: the renderer observes a new
+    // fraction and hands it back, exactly as `render_app_frame` does.
+    let dragged = if before > 0.5 { 0.25 } else { 0.55 };
+    runtime.persist_dock_fractions(DockFractions {
+        left: Some(dragged),
+        right: None,
+        bottom: None,
+    });
+
+    let stored = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("layout should still exist");
+    assert!(
+        (stored - dragged).abs() < 0.001,
+        "the observed fraction should be stored, got {stored}"
+    );
+
+    let on_disk = fs::read_to_string(&session_path)
+        .expect("persisting a dock resize should have written the session");
+    assert!(
+        on_disk.contains("splitter_fraction"),
+        "the session record should carry splitter fractions"
+    );
+
+    // Restart from the same arguments and confirm the arrangement returns.
+    let restored = DesktopRuntime::open(config_from_args(&[workspace
+        .path()
+        .to_string_lossy()
+        .as_ref()]))
+    .expect("runtime should reopen");
+    let after = restored
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("restored layout should exist");
+    assert!(
+        (after - dragged).abs() < 0.001,
+        "restarting must restore the panel arrangement, got {after} not {dragged}"
+    );
+}
+
+#[test]
+fn an_unmoved_splitter_does_not_write_the_session() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    // The renderer hands back a fraction every frame. Only a real drag may
+    // reach the disk, or the app fsyncs continuously while sitting idle.
+    let workspace = TempWorkspace::new("legion_desktop_dock_idle");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let session_path = config
+        .session_state
+        .clone()
+        .expect("interactive launch should default a session path");
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let current = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.left.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    runtime.persist_dock_fractions(DockFractions {
+        // Sub-pixel wobble, not a drag.
+        left: Some(current + 0.0001),
+        right: None,
+        bottom: None,
+    });
+
+    assert!(
+        !session_path.exists(),
+        "an unmoved splitter must not trigger a durable write"
+    );
+}
+
+#[test]
+fn a_panel_that_was_not_rendered_is_not_recorded_as_collapsed() {
+    use legion_desktop::view::dock_geometry::DockFractions;
+
+    // Manual mode hides the inspector, and compact layouts drop the side docks
+    // entirely. `None` has to mean "not drawn", never "the user dragged it to
+    // nothing" — otherwise briefly shrinking the window would overwrite the
+    // desktop arrangement.
+    let workspace = TempWorkspace::new("legion_desktop_dock_hidden");
+    let config = config_from_args(&[workspace.path().to_string_lossy().as_ref()]);
+    let mut runtime = DesktopRuntime::open(config).expect("runtime should open");
+
+    let mode = runtime.projection_snapshot().product_mode;
+    let before = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.right.splitter_fraction)
+        .expect("the active mode should have a layout");
+
+    runtime.persist_dock_fractions(DockFractions::default());
+
+    let after = runtime
+        .dock_layouts()
+        .iter()
+        .find(|layout| layout.mode == mode)
+        .map(|layout| layout.right.splitter_fraction)
+        .expect("layout should still exist");
+    assert!(
+        (before - after).abs() < f32::EPSILON,
+        "an unrendered panel must leave its stored fraction alone"
+    );
 }

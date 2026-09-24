@@ -1,0 +1,20 @@
+CMD: cargo test -p legion-app --lib language::typescript_organize_tests -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.99s
+     Running unittests src\lib.rs (target\debug\deps\legion_app-ddfc6decd25cc009.exe)
+
+running 6 tests
+test language::typescript_organize_tests::timed_out_organize_rejects_a_late_callback ... ok
+test language::typescript_organize_tests::unadvertised_typescript_command_keeps_generic_request ... ok
+test language::typescript_organize_tests::typescript_organize_uses_file_and_all_mode_without_candidates ... ok
+test language::typescript_organize_tests::foreign_language_with_command_keeps_generic_request ... ok
+test language::typescript_organize_tests::changed_editor_rejects_successful_old_organize_response ... ok
+test language::typescript_organize_tests::organize_callback_preserves_operation_and_requires_review_before_mutation ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 441 filtered out; finished in 0.01s
+
+END
+EXIT=0

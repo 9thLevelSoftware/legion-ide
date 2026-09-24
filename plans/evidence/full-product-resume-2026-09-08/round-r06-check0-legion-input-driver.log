@@ -1,0 +1,26 @@
+CMD: cargo check -p legion-input-driver --all-targets -j 1
+CWD: /d/legion-ide-completion
+BEGIN
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling windows-implement v0.60.2
+   Compiling windows-interface v0.59.3
+    Checking windows-core v0.62.2
+    Checking windows-future v0.3.2
+    Checking windows-numerics v0.3.1
+    Checking windows-collections v0.3.2
+    Checking windows v0.62.2
+    Checking legion-input-driver v0.1.0 (D:\legion-ide-completion\crates\legion-input-driver)
+warning: unused import: `windows_uia::*`
+   --> crates\legion-input-driver\tests\..\src\observe.rs:129:9
+    |
+129 | pub use windows_uia::*;
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `legion-input-driver` (test "driver_contract") generated 1 warning (run `cargo fix --test "driver_contract" -p legion-input-driver` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 9.91s
+END
+EXIT=0

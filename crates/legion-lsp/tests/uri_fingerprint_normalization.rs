@@ -32,6 +32,24 @@ fn windows_drive_designator_forms_hash_equal() {
         fingerprint("file:///c%3A/Users/dev/src/main.rs"),
         "lowercase percent-encoded form (VS Code's canonical form) must match"
     );
+    let escaped = fingerprint("file:///C:/Users/dev/%CE%BB%3F.txt");
+    assert_eq!(
+        escaped,
+        fingerprint("file:///c%3a/Users/dev/%ce%bb%3f.txt"),
+        "percent escape hex casing must not change document identity"
+    );
+}
+
+#[test]
+fn percent_escape_normalization_preserves_path_case_and_literal_percent() {
+    assert_eq!(
+        legion_lsp::normalize_file_uri_percent_escapes("file:///C:/Users/dev/%ce%bb%3f%25.txt"),
+        "file:///C:/Users/dev/%CE%BB%3F%25.txt"
+    );
+    assert_eq!(
+        legion_lsp::normalize_file_uri_percent_escapes("https://example.test/%ce%bb"),
+        "https://example.test/%ce%bb"
+    );
 }
 
 #[test]
@@ -51,6 +69,11 @@ fn unix_file_uris_are_untouched() {
         fingerprint("file:///Tmp/ws/src/main.rs"),
         "a leading path segment that merely looks alphabetic must not be \
          treated as a drive letter"
+    );
+    assert_eq!(
+        fingerprint("file:///tmp/%CE%BB.txt"),
+        fingerprint("file:///tmp/%ce%bb.txt"),
+        "percent escape hex case must normalize on Unix paths"
     );
 }
 

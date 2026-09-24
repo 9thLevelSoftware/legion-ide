@@ -15,6 +15,8 @@ Legion is not yet a general-availability desktop product. The current repo is be
 Use these docs first:
 
 - `AGENTS.md` — concise agent/developer invariants and required gates.
+- `LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
+- `docs/PRIVACY.md` — user-facing privacy policy (Manual zero-egress, opt-in AI, no phone-home).
 - `docs/INDEX.md` — entry point for the canonical documentation set.
 - `docs/USER_GUIDE.md` — end-user guide for the current product paths.
 - `docs/KEYBOARD_REFERENCE.md` — projected shortcut labels that are currently surfaced by the product UI.
@@ -26,6 +28,7 @@ Use these docs first:
 - `docs/OPERATOR_RUNBOOK.md` — operator-oriented gate/runbook notes.
 - `plans/product-readiness-ledger.md` — readiness matrix and remaining product gaps.
 - `plans/legion-production-master-plan-v0.2.md` — the current production master plan (current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, milestones to production utility).
+- `plans/p0-installed-product-sequence-v0.1.md` — sequenced P0 close-out after the 2026-08-31 release-gap full pass (honesty → data safety → windowed proof → signing). Does not promote ledger rows.
 - `plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking the v0.2 rebaseline and product-readiness ledger.
 - `plans/control-first-adaptive-ide-technical-design-v0.1.md` and `plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
 - `.almanac/pages/getting-started.md` — local Almanac wiki entry point, if the wiki is checked out locally.
@@ -87,7 +90,7 @@ cargo deny --version
 
 If `cargo deny --version` is not found immediately after installation, ensure Cargo's binary directory, usually `$HOME/.cargo/bin`, is on `PATH`.
 
-GitHub Actions workflows include `.github/workflows/legion-gates.yml` (standing gate set: xtask gates, fmt/check/test/clippy, cargo-deny, report-only perf-harness, and the real rust-analyzer smoke across Linux, Windows, and macOS runners on every push to main and every pull request), `.github/workflows/legion-bench.yml` (weekly recorded-mode legion-bench fixture scoring), and `.github/workflows/legion-smoke.yml` (GP-1/2/3/4 golden-path smokes plus the update-drill on dispatch and weekly). Live provider calls are not performed; real live mode is a future M13 Legion-Bench scope. Local developer machines must still install the CLI before using `scripts/run-phase-gates.*`; those local gates remain the primary verification source (they additionally run the evals/training pytest suite and strict perf budgets) until the hosted gate history is proven stable.
+GitHub Actions workflows include `.github/workflows/legion-gates.yml` (standing gate set: xtask gates, fmt/check/test/clippy, cargo-deny, report-only perf-harness, and the real rust-analyzer smoke across Linux, Windows, and macOS runners on every push to main and every pull request), `.github/workflows/legion-bench.yml` (recorded-mode legion-bench on every push to main and every pull request: every corpus task really runs against a fixture checkout, with the model's replies replayed from committed cassettes, and the result is gated against a committed per-task baseline), `.github/workflows/legion-smoke.yml` (GP-1/2/3/4 golden-path smokes plus the update-drill on dispatch and weekly), and `.github/workflows/legion-windowed-gui.yml` (GAP-01 windowed GUI E2E on dispatch and weekly; independent, not a PR merge blocker). No gating workflow performs a live provider call; live bench runs live in `.github/workflows/legion-bench-live.yml`, which is opt-in, scheduled, and `continue-on-error`. Local developer machines must still install the CLI before using `scripts/run-phase-gates.*`; those local gates remain the primary verification source (they additionally run the evals/training pytest suite and strict perf budgets) until the hosted gate history is proven stable.
 
 ## CLI Proof
 

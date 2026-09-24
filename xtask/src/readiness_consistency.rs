@@ -1,4 +1,5 @@
-//! Cross-check the product-readiness ledger against the Kanban backlog.
+//! Cross-check the product-readiness ledger against the Kanban backlog and
+//! against Appendix A of the production master plan.
 //!
 //! The two files are independently maintained and they drifted: the ledger's
 //! PR-LANG-001 row named `P3.F1.T2` (write-side apply activation) as a
@@ -12,6 +13,7 @@
 
 use std::{collections::BTreeMap, fs, path::Path};
 
+use crate::claim_audit::{LedgerRow, parse_ledger_rows};
 use crate::kanban_backlog::KanbanBacklog;
 
 /// Outer bound on the context taken either side of a task-id mention. The
@@ -366,6 +368,110 @@ pub fn check_consistency(
 /// Default path for the product-readiness ledger, repo-relative.
 pub const DEFAULT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 
+/// Compare Appendix A "Current ledger status" cells against the live matrix.
+pub fn check_appendix_against_ledger(
+    appendix: &str,
+    rows: &[LedgerRow],
+) -> Vec<ConsistencyViolation> {
+    let by_id: BTreeMap<&str, &LedgerRow> =
+        rows.iter().map(|row| (row.gate_id.as_str(), row)).collect();
+    let mut violations = Vec::new();
+    for (line_number, gate_id, appendix_status) in appendix_a_status_cells(appendix) {
+        let Some(row) = by_id.get(gate_id.as_str()) else {
+            violations.push(ConsistencyViolation {
+                task_id: gate_id,
+                backlog_status: "missing".to_string(),
+                line_number,
+                message: "Appendix A cites a readiness gate absent from the ledger matrix"
+                    .to_string(),
+            });
+            continue;
+        };
+        if appendix_status
+            .to_ascii_lowercase()
+            .contains("evals deferred")
+        {
+            let blob = format!("{} {}", row.status, row.evidence).to_ascii_lowercase();
+            if blob.contains("hostile-eval") || blob.contains("hostile eval") {
+                violations.push(ConsistencyViolation {
+                    task_id: gate_id.clone(),
+                    backlog_status: row.status.clone(),
+                    line_number,
+                    message: "Appendix A says adversarial evals are deferred, but the ledger names hostile-eval evidence".to_string(),
+                });
+            }
+        }
+        if !status_heads_compatible(&appendix_status, &row.status) {
+            violations.push(ConsistencyViolation {
+                task_id: gate_id,
+                backlog_status: row.status.clone(),
+                line_number,
+                message: format!(
+                    "Appendix A status `{}` does not match ledger status `{}`",
+                    appendix_status, row.status
+                ),
+            });
+        }
+    }
+    violations
+}
+
+fn appendix_a_status_cells(text: &str) -> Vec<(usize, String, String)> {
+    let mut in_appendix = false;
+    let mut rows = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.starts_with("## Appendix A") {
+            in_appendix = true;
+            continue;
+        }
+        if in_appendix && line.starts_with("## ") {
+            break;
+        }
+        if !in_appendix {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cells.len() < 4 {
+            continue;
+        }
+        let gate_cell = cells[1];
+        let Some(gate_id) = gate_cell.split_whitespace().next() else {
+            continue;
+        };
+        if !gate_id.starts_with("PR-") {
+            continue;
+        }
+        rows.push((index + 1, gate_id.to_string(), cells[2].to_string()));
+    }
+    rows
+}
+
+fn status_heads_compatible(appendix: &str, ledger: &str) -> bool {
+    let appendix_head = status_head(appendix);
+    let ledger_head = status_head(ledger);
+    if appendix_head.is_empty() || ledger_head.is_empty() {
+        return true;
+    }
+    ledger_head.starts_with(appendix_head) || appendix_head.starts_with(ledger_head)
+}
+
+fn status_head(status: &str) -> &str {
+    const VOCAB: [&str; 6] = [
+        "Product workflow validated",
+        "Deferred with explicit cut line",
+        "Substrate validated",
+        "In progress",
+        "Not started",
+        "Blocked",
+    ];
+    for vocab in VOCAB {
+        if status.starts_with(vocab) {
+            return vocab;
+        }
+    }
+    status.split([';', '(']).next().unwrap_or(status).trim()
+}
+
 pub fn run_verify_readiness_consistency(
     ledger_path: &Path,
     backlog_path: &Path,
@@ -379,7 +485,30 @@ pub fn run_verify_readiness_consistency(
     let backlog = KanbanBacklog::from_file(backlog_path)?;
     let statuses = backlog_statuses(&backlog);
 
-    let violations = check_consistency(&ledger_text, &statuses);
+    let mut violations = check_consistency(&ledger_text, &statuses);
+    if let Some(appendix_path) = ledger_path
+        .parent()
+        .map(|dir| dir.join("legion-production-master-plan-v0.2.md"))
+        && appendix_path.is_file()
+    {
+        let appendix = fs::read_to_string(&appendix_path).map_err(|err| {
+            format!(
+                "unable to read production master plan `{}`: {err}",
+                appendix_path.display()
+            )
+        })?;
+        match parse_ledger_rows(&ledger_text) {
+            Ok(rows) => {
+                violations.extend(check_appendix_against_ledger(&appendix, &rows));
+            }
+            Err(err) => {
+                return Err(format!(
+                    "unable to parse readiness matrix in `{}`: {err}",
+                    ledger_path.display()
+                ));
+            }
+        }
+    }
     if violations.is_empty() {
         Ok(statuses.len())
     } else {
@@ -612,5 +741,57 @@ mod tests {
         let ledger = format!("blocker {filler} P2.F3.T4");
         let violations = check_consistency(&ledger, &statuses(&[("P2.F3.T4", "done")]));
         assert!(violations.is_empty(), "unexpected: {violations:?}");
+    }
+
+    fn matrix_row(id: &str, status: &str, evidence: &str) -> LedgerRow {
+        LedgerRow {
+            gate_id: id.to_string(),
+            status: status.to_string(),
+            evidence: evidence.to_string(),
+        }
+    }
+
+    #[test]
+    fn appendix_evals_deferred_contradicts_hostile_eval_evidence() {
+        let appendix = "## Appendix A - Product Gate Mapping\n\
+             | Product gate | Current ledger status | v0.2 milestone target |\n\
+             | --- | --- | --- |\n\
+             | PR-AI-002 proposal safety/evals | Substrate validated; adversarial evals deferred | M9/M10 |\n\
+             ## Appendix B - next\n";
+        let rows = [matrix_row(
+            "PR-AI-002",
+            "Substrate validated (proposal safety + adversarial evals)",
+            "cargo test -p legion-app --test hostile_eval_integration; xtask hostile-evals",
+        )];
+        let violations = check_appendix_against_ledger(appendix, &rows);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("hostile-eval"));
+    }
+
+    #[test]
+    fn appendix_matching_substrate_status_without_evals_deferred_passes() {
+        let appendix = "## Appendix A - Product Gate Mapping\n\
+             | PR-AI-002 proposal safety/evals | Substrate validated (hostile evals + xtask hostile-evals); live-model evals remain deferred | M9/M10 |\n";
+        let rows = [matrix_row(
+            "PR-AI-002",
+            "Substrate validated (proposal safety + adversarial evals)",
+            "hostile-eval integration plus xtask hostile-evals",
+        )];
+        let violations = check_appendix_against_ledger(appendix, &rows);
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    #[test]
+    fn appendix_deferred_does_not_match_substrate_validated() {
+        let appendix = "## Appendix A - Product Gate Mapping\n\
+             | PR-ENT-001 remote | Deferred | M13+ |\n";
+        let rows = [matrix_row(
+            "PR-ENT-001",
+            "Substrate validated",
+            "contracts only",
+        )];
+        let violations = check_appendix_against_ledger(appendix, &rows);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].message.contains("does not match"));
     }
 }

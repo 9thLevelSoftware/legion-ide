@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-03",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:494ba67f95c2422b",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"read\",\n  \"arguments\": {\n    \"path\": \"textkit/slug.py\"\n  }\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119766,
+        "id": "chatcmpl-501",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 28,
+          "prompt_tokens": 612,
+          "total_tokens": 640
+        }
+      }
+    }
+  ]
+}

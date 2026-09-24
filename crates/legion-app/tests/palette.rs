@@ -793,6 +793,7 @@ fn palette_git_commit_and_stash_use_only_exact_parsed_messages() {
             .expect("commit command should dispatch"),
         AppCommandOutcome::GitUpdated(_)
     ));
+    app.drain_git_until_idle();
     assert_eq!(
         run_git(workspace.path(), &["log", "-1", "--pretty=%s"]).trim(),
         "fix(parser): preserve café exactly"
@@ -810,6 +811,7 @@ fn palette_git_commit_and_stash_use_only_exact_parsed_messages() {
             .expect("stash command should dispatch"),
         AppCommandOutcome::GitUpdated(_)
     ));
+    app.drain_git_until_idle();
     let stash_subject = run_git(workspace.path(), &["stash", "list", "--format=%gs"]);
     assert!(
         stash_subject
@@ -899,6 +901,8 @@ fn palette_command_mode_covers_registered_command_catalog() {
         PendingConfirmation,
         /// Command that returns `AppCommandOutcome::Noop` (e.g. LSP lifecycle).
         Noop,
+        AboutOpened,
+        SupportBundleExported,
     }
 
     struct CommandCase {
@@ -1000,6 +1004,18 @@ fn palette_command_mode_covers_registered_command_catalog() {
             expected_outcome: ExpectedOutcome::Noop,
             dirty_before_save: false,
         },
+        CommandCase {
+            query: ">help about",
+            expected_title: "Help: About",
+            expected_outcome: ExpectedOutcome::AboutOpened,
+            dirty_before_save: false,
+        },
+        CommandCase {
+            query: ">help export support bundle",
+            expected_title: "Help: Export Support Bundle",
+            expected_outcome: ExpectedOutcome::SupportBundleExported,
+            dirty_before_save: false,
+        },
     ];
 
     let workspace = TempWorkspace::new();
@@ -1078,6 +1094,18 @@ fn palette_command_mode_covers_registered_command_catalog() {
                     "expected Noop outcome, got {outcome:?}"
                 )
             }
+            ExpectedOutcome::AboutOpened => {
+                assert!(
+                    matches!(outcome, AppCommandOutcome::AboutOpened),
+                    "expected AboutOpened, got {outcome:?}"
+                )
+            }
+            ExpectedOutcome::SupportBundleExported => {
+                assert!(
+                    matches!(outcome, AppCommandOutcome::SupportBundleExported(_)),
+                    "expected SupportBundleExported, got {outcome:?}"
+                )
+            }
         }
 
         resolved_cases += 1;
@@ -1142,6 +1170,12 @@ fn palette_command_mode_covers_registered_command_catalog() {
         "Git: Push",
         "Git: Fetch",
         "Git: Pull",
+        "Git: Stage Focused Hunk",
+        "ACP: Attach Host",
+        "Language: Format Document",
+        "Language: Rename Symbol",
+        "Language: Organize Imports",
+        "Language: Code Action",
     ]
     .into_iter()
     .map(str::to_string)

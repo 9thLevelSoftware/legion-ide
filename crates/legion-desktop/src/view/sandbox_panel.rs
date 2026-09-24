@@ -9,6 +9,49 @@ use legion_sandbox::seatbelt::SeatbeltProfile;
 #[cfg(target_os = "windows")]
 use legion_sandbox::windows::WindowsProfile;
 
+/// How many sandbox rows the panel renders before collapsing the rest into an
+/// "N more rows" line.
+///
+/// Shared with the render call site so the row order in [`rows`] and the number
+/// of rows actually drawn cannot drift apart. They did: the panel drew five of
+/// eleven rows, and the line saying Windows enforces nothing but process
+/// lifetime was the ninth.
+pub(crate) const PANEL_VISIBLE_ROW_LIMIT: usize = 5;
+
+/// Windows enforces process lifetime and nothing else.
+///
+/// `legion-sandbox` spawns through a Job Object with `KILL_ON_JOB_CLOSE` and
+/// reports `windows-no-filesystem-enforcement`; `docs/SECURITY.md` records the
+/// same residual. The panel must say it where the reader can see it.
+const WINDOWS_LIMITATION: &str =
+    "Windows Job Object only: process lifetime enforced; filesystem and network are not";
+
+const MACOS_LIMITATION: &str =
+    "Seatbelt enforces filesystem writes and network scope; filesystem READS are not restricted";
+
+const LINUX_LIMITATION: &str =
+    "Landlock enforces filesystem writes; reads unrestricted; network deny-all only with bwrap";
+
+const UNKNOWN_TARGET_LIMITATION: &str =
+    "no sandbox backend on this target: nothing is enforced by the OS";
+
+/// The limitation line for the host this build targets.
+///
+/// `cfg!` rather than `#[cfg]` so every branch is compiled on every target:
+/// the four lines above are then checked by the same tests everywhere, instead
+/// of three of them going unread until someone builds for that platform.
+fn platform_limitation() -> &'static str {
+    if cfg!(target_os = "windows") {
+        WINDOWS_LIMITATION
+    } else if cfg!(target_os = "macos") {
+        MACOS_LIMITATION
+    } else if cfg!(target_os = "linux") {
+        LINUX_LIMITATION
+    } else {
+        UNKNOWN_TARGET_LIMITATION
+    }
+}
+
 /// What the sandbox panel should display.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SandboxPanelState {
@@ -22,6 +65,8 @@ pub(crate) enum SandboxPanelState {
         backend_label: String,
         /// Honest enforcement strength label.
         strength_label: String,
+        /// One line naming what this platform does *not* contain.
+        platform_limitation: String,
         /// Human-readable caveat descriptions for anything not enforced.
         caveats: Vec<String>,
         /// Whether an exclusive lease is held over the sandbox directory.
@@ -53,6 +98,7 @@ impl SandboxPanelState {
                     isolation_mode_label: "worktree-or-copy".to_string(),
                     backend_label: summary.backend_label,
                     strength_label: summary.strength_label,
+                    platform_limitation: summary.platform_limitation,
                     caveats: summary.caveats,
                     lease_held,
                 }
@@ -65,6 +111,13 @@ impl SandboxPanelState {
 struct SandboxProfileSummary {
     backend_label: String,
     strength_label: String,
+    /// What this platform does not contain, in one line.
+    ///
+    /// Separate from `caveats` because it is the one line that must never be
+    /// truncated away: the panel renders a bounded number of rows, and the
+    /// caveat list is long enough that the Windows "filesystem and network are
+    /// not enforced" line sat below the cut. See `rows`.
+    platform_limitation: String,
     caveats: Vec<String>,
 }
 
@@ -84,6 +137,7 @@ pub(crate) fn rows(snapshot: &ShellProjectionSnapshot, state: SandboxPanelState)
             isolation_mode_label,
             backend_label,
             strength_label,
+            platform_limitation,
             caveats,
             lease_held,
         } => {
@@ -91,6 +145,13 @@ pub(crate) fn rows(snapshot: &ShellProjectionSnapshot, state: SandboxPanelState)
                 "sandbox backend: {} (strength={})",
                 backend_label, strength_label
             ));
+            // Third row, deliberately. The panel renders only the first few
+            // rows and hides the rest behind an "N more rows" line, so a
+            // limitation pushed down among the caveats is a limitation the
+            // reader never sees. On Windows that hid the fact that the sandbox
+            // enforces process lifetime and nothing else, while the visible
+            // rows still said "profile compiled fail-closed".
+            rows.push(format!("sandbox limits: {platform_limitation}"));
             rows.push(format!("sandbox isolation: {}", isolation_mode_label));
             rows.push(format!(
                 "sandbox lease: {}",
@@ -169,6 +230,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
+            platform_limitation: platform_limitation().to_string(),
             caveats,
         };
     }
@@ -196,6 +258,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
+            platform_limitation: platform_limitation().to_string(),
             caveats,
         };
     }
@@ -203,14 +266,17 @@ fn host_profile_summary() -> SandboxProfileSummary {
     #[cfg(target_os = "windows")]
     {
         let profile = WindowsProfile::compile(scope).expect("windows sandbox profile compiles");
-        let mut caveats: Vec<String> = profile
-            .profile
-            .notes
-            .into_iter()
-            .chain(profile.notes)
-            .collect();
+        // `profile.notes` is dropped here on purpose. It says "filesystem scope
+        // limited to workspace root" and "egress remains allowlist-based and
+        // audited", which describe the scope the caller *requested*, not
+        // anything the Windows spawn path enforces: `legion-sandbox` uses a Job
+        // Object with KILL_ON_JOB_CLOSE and reports
+        // `windows-no-filesystem-enforcement`, and `docs/SECURITY.md` says so
+        // in as many words. Rendering those lines as sandbox caveats told the
+        // reader the workspace boundary was contained when it is not.
+        let mut caveats: Vec<String> = profile.profile.notes;
         caveats.push(
-            "Windows sandbox enforces process lifetime (job kill-on-close); filesystem and network scope are not fully enforced (C2 residual)"
+            "workspace-root scope and egress allowlist are requested policy, not enforced containment"
                 .to_string(),
         );
         caveats.push(
@@ -220,6 +286,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
         return SandboxProfileSummary {
             backend_label: sandbox_backend_label(&profile.profile.backend),
             strength_label: sandbox_strength_label(&profile.profile.backend).to_string(),
+            platform_limitation: platform_limitation().to_string(),
             caveats,
         };
     }
@@ -229,6 +296,7 @@ fn host_profile_summary() -> SandboxProfileSummary {
         SandboxProfileSummary {
             backend_label: "unknown".to_string(),
             strength_label: "unknown".to_string(),
+            platform_limitation: platform_limitation().to_string(),
             caveats: vec!["sandbox backend unavailable on this target".to_string()],
         }
     }
@@ -279,6 +347,12 @@ mod tests {
     use legion_protocol::DelegatedTaskRuntimeActivationState;
     use legion_ui::Shell;
 
+    /// Longest a row may be before the renderer elides its middle.
+    ///
+    /// Taken from the renderer rather than restated, so the budget these tests
+    /// hold the lines to is the budget the panel actually applies.
+    use crate::view::COMPACT_ROW_CHAR_BUDGET as PANEL_ROW_CHAR_BUDGET;
+
     fn snapshot_with_activation(
         activation: DelegatedTaskRuntimeActivationState,
     ) -> legion_ui::ShellProjectionSnapshot {
@@ -292,8 +366,96 @@ mod tests {
             isolation_mode_label: "git-worktree".to_string(),
             backend_label: "TestBackend".to_string(),
             strength_label: "os-enforced".to_string(),
+            platform_limitation: "test-limitation".to_string(),
             caveats: vec!["test-caveat-a".to_string()],
             lease_held: true,
+        }
+    }
+
+    /// The limitation row must sit inside the slice of rows the panel draws.
+    ///
+    /// This is the guard for the defect this field exists to fix: the row
+    /// naming what the platform does not contain used to be ninth of eleven in
+    /// a panel that draws five, so on Windows the reader saw
+    /// "profile compiled fail-closed" and never saw that filesystem and network
+    /// are unrestricted.
+    #[test]
+    fn the_platform_limitation_row_is_never_truncated_away() {
+        for activation in [
+            DelegatedTaskRuntimeActivationState::SandboxAllocated,
+            DelegatedTaskRuntimeActivationState::Executing,
+            DelegatedTaskRuntimeActivationState::Verifying,
+            DelegatedTaskRuntimeActivationState::WaitingForApproval,
+        ] {
+            let snapshot = snapshot_with_activation(activation);
+            let state = SandboxPanelState::from_snapshot(&snapshot);
+            let panel_rows = rows(&snapshot, state);
+            let index = panel_rows
+                .iter()
+                .position(|row| row.starts_with("sandbox limits: "))
+                .unwrap_or_else(|| {
+                    panic!("activation={activation:?}: no `sandbox limits:` row in {panel_rows:?}")
+                });
+            assert!(
+                index < PANEL_VISIBLE_ROW_LIMIT,
+                "activation={activation:?}: the limitation row is at index {index}, below the {PANEL_VISIBLE_ROW_LIMIT} rows the panel draws, so it is hidden behind the \"more rows\" line"
+            );
+        }
+    }
+
+    /// A limitation whose middle is replaced by an ellipsis is stated badly.
+    #[test]
+    fn every_platform_limitation_fits_the_rendered_row_budget() {
+        for limitation in [
+            WINDOWS_LIMITATION,
+            MACOS_LIMITATION,
+            LINUX_LIMITATION,
+            UNKNOWN_TARGET_LIMITATION,
+        ] {
+            let row = format!("sandbox limits: {limitation}");
+            assert!(
+                row.chars().count() <= PANEL_ROW_CHAR_BUDGET,
+                "`{row}` is {} chars, over the {PANEL_ROW_CHAR_BUDGET}-char budget, so the renderer would elide its middle",
+                row.chars().count()
+            );
+        }
+    }
+
+    /// The Windows line has to name the Job Object and deny the two things the
+    /// Job Object does not do. Checking the words rather than the whole string
+    /// leaves the wording free to improve without letting it go quiet.
+    #[test]
+    fn the_windows_limitation_names_what_is_not_enforced() {
+        let lowered = WINDOWS_LIMITATION.to_lowercase();
+        for term in ["job object", "filesystem", "network", "not"] {
+            assert!(
+                lowered.contains(term),
+                "the Windows limitation must mention `{term}`: {WINDOWS_LIMITATION}"
+            );
+        }
+    }
+
+    /// The panel must not repeat scope wording that Windows does not enforce.
+    ///
+    /// `WindowsProfile::notes` describes the requested scope — "filesystem
+    /// scope limited to workspace root", "egress remains allowlist-based and
+    /// audited" — and the panel used to render both as sandbox caveats. On a
+    /// Job-Object-only host both are false, and `docs/SECURITY.md` says so.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_rows_do_not_claim_filesystem_or_egress_containment() {
+        let snapshot =
+            snapshot_with_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
+        let state = SandboxPanelState::from_snapshot(&snapshot);
+        let all = rows(&snapshot, state).join("\n");
+        for claim in [
+            "filesystem scope limited to workspace root",
+            "egress remains allowlist-based and audited",
+        ] {
+            assert!(
+                !all.contains(claim),
+                "the Windows sandbox panel claims `{claim}` while the spawn path enforces process lifetime only, got: {all}"
+            );
         }
     }
 
@@ -447,5 +609,63 @@ mod tests {
             !all_output.contains("descriptor-only"),
             "rows() output must not contain 'descriptor-only' after PKT-SANDBOX landed, got: {all_output}",
         );
+    }
+}
+
+#[cfg(test)]
+mod limitation_accuracy_tests {
+    use super::{
+        LINUX_LIMITATION, MACOS_LIMITATION, UNKNOWN_TARGET_LIMITATION, WINDOWS_LIMITATION,
+    };
+
+    /// No backend restricts filesystem *reads*, so no limitation line may imply
+    /// it does.
+    ///
+    /// `docs/SECURITY.md` records read isolation as "Not enforced" on all three
+    /// platforms — Seatbelt's generated profile contains
+    /// `(allow file-read* (subpath "/"))`, and the backend identifier is
+    /// literally `seatbelt-profile-allows-file-read-subpath-root`. The macOS
+    /// line nonetheless said "enforces filesystem and network scope", which a
+    /// reader deciding whether to delegate a task would take as read
+    /// containment. That is the same overstatement the Windows row made by
+    /// hiding its caveat, arriving by a different route: wording rather than
+    /// truncation.
+    ///
+    /// The rule targets the *claim*, not the mention. A line may say the
+    /// filesystem is not enforced at all — Windows does, correctly, and that
+    /// already covers reads. What it may not do is claim filesystem
+    /// enforcement without scoping that claim to writes.
+    #[test]
+    fn a_line_claiming_filesystem_enforcement_must_scope_it_to_writes() {
+        for line in [
+            WINDOWS_LIMITATION,
+            MACOS_LIMITATION,
+            LINUX_LIMITATION,
+            UNKNOWN_TARGET_LIMITATION,
+        ] {
+            let lower = line.to_lowercase();
+            if lower.contains("enforces filesystem") || lower.contains("filesystem scope") {
+                assert!(
+                    lower.contains("write"),
+                    "`{line}` claims filesystem enforcement without scoping it to writes. Reads are unrestricted on every supported backend, so an unscoped claim reads as full containment to someone deciding whether to delegate a task."
+                );
+            }
+        }
+    }
+
+    /// The unqualified phrasing that caused this, pinned so it cannot return.
+    #[test]
+    fn no_limitation_claims_bare_filesystem_scope() {
+        for line in [
+            WINDOWS_LIMITATION,
+            MACOS_LIMITATION,
+            LINUX_LIMITATION,
+            UNKNOWN_TARGET_LIMITATION,
+        ] {
+            assert!(
+                !line.to_lowercase().contains("filesystem and network scope"),
+                "`{line}` claims filesystem scope without qualification; reads are unrestricted on every supported backend"
+            );
+        }
     }
 }

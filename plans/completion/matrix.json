@@ -1,0 +1,651 @@
+{
+  "schema_version": 1,
+  "configurations": [
+    {
+      "id": "CFG-WIN11-X64-RUST-BIN",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "rust-binary",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-RUST-LIB",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "rust-library",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-RUST-WORKSPACE",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "rust-multi-crate-workspace",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-TS-BROWSER",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "node": "PENDING:S0-02-node-lts",
+        "typescript": "PENDING:S0-02-typescript",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "typescript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-JS-BROWSER",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "browser": "PENDING:S0-02-browser",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "javascript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-TSJS-NODE",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "typescript-javascript-node",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-PY-APP",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "test_runner": "PENDING:S0-02-python-test-runner",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "python-application-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-PY-PKG",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "build_backend": "PENDING:S0-02-python-build-backend",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "python-package-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-RUST-BIN",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "rust-binary",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-RUST-LIB",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "rust-library",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-RUST-WORKSPACE",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "rust-multi-crate-workspace",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-TS-BROWSER",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "typescript": "PENDING:S0-02-typescript",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "typescript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-JS-BROWSER",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "browser": "PENDING:S0-02-browser",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "javascript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-TSJS-NODE",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "typescript-javascript-node",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-PY-APP",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "test_runner": "PENDING:S0-02-python-test-runner",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "python-application-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-PY-PKG",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "build_backend": "PENDING:S0-02-python-build-backend",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "python-package-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-RUST-BIN",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "rust-binary",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-RUST-LIB",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "rust-library",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-RUST-WORKSPACE",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "rust-multi-crate-workspace",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-TS-BROWSER",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "typescript": "PENDING:S0-02-typescript",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "typescript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-JS-BROWSER",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "browser": "PENDING:S0-02-browser",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "javascript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-TSJS-NODE",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "typescript-javascript-node",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-PY-APP",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "test_runner": "PENDING:S0-02-python-test-runner",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "python-application-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-PY-PKG",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "build_backend": "PENDING:S0-02-python-build-backend",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "python-package-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-RUST-BIN",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "rust-binary",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-RUST-LIB",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "rust-library",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-RUST-WORKSPACE",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "rust": "PENDING:S0-02-rust-toolchain",
+        "rust_analyzer": "PENDING:S0-02-rust-analyzer",
+        "debug_adapter": "PENDING:S0-02-rust-debug-adapter"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "rust-multi-crate-workspace",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-TS-BROWSER",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "node": "PENDING:S0-02-node-lts",
+        "typescript": "PENDING:S0-02-typescript",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "typescript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-JS-BROWSER",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "browser": "PENDING:S0-02-browser",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "javascript-browser",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-TSJS-NODE",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "node": "PENDING:S0-02-node-lts",
+        "language_server": "PENDING:S0-02-typescript-language-server",
+        "debug_adapter": "PENDING:S0-02-js-debug"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "typescript-javascript-node",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-PY-APP",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "test_runner": "PENDING:S0-02-python-test-runner",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "python-application-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-PY-PKG",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "python": "PENDING:S0-02-python",
+        "language_server": "PENDING:S0-02-pyright",
+        "build_backend": "PENDING:S0-02-python-build-backend",
+        "debug_adapter": "PENDING:S0-02-debugpy"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "python-package-isolated",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-PRODUCT-JOURNEY",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "package_format": "PENDING:S0-02-windows-package-format",
+        "uia_provider": "PENDING:S0-02-windows-uia-narrator-session"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "packaged-product-journey",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-X64-PRODUCT-JOURNEY",
+      "os": "macos",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "package_format": "PENDING:S0-02-macos-package-format",
+        "ax_provider": "PENDING:S0-02-macos-ax-voiceover-session"
+      },
+      "hardware": "macOS 15 x64 reference hardware (pending owner selection)",
+      "project_category": "packaged-product-journey",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-PRODUCT-JOURNEY",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "package_format": "PENDING:S0-02-macos-package-format",
+        "ax_provider": "PENDING:S0-02-macos-ax-voiceover-session"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "packaged-product-journey",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-PRODUCT-JOURNEY",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "package_format": "PENDING:S0-02-linux-package-format",
+        "at_spi_provider": "PENDING:S0-02-linux-at-spi-orca-session"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "packaged-product-journey",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-MANUAL-OFFLINE",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "artifact_flavor": "PENDING:S0-02-manual-offline-artifact-flavor",
+        "package_format": "PENDING:S0-02-windows-package-format",
+        "network_capture_tool": "PENDING:S0-02-windows-network-capture-tool"
+      },
+      "hardware": "Windows 11 x64 reference hardware (candidate observed; ratification pending)",
+      "project_category": "manual-offline-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-MANUAL-OFFLINE",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "artifact_flavor": "PENDING:S0-02-manual-offline-artifact-flavor",
+        "package_format": "PENDING:S0-02-macos-package-format",
+        "network_capture_tool": "PENDING:S0-02-macos-network-capture-tool"
+      },
+      "hardware": "macOS 15 arm64 reference hardware (pending owner selection)",
+      "project_category": "manual-offline-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-MANUAL-OFFLINE",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "artifact_flavor": "PENDING:S0-02-manual-offline-artifact-flavor",
+        "package_format": "PENDING:S0-02-linux-package-format",
+        "network_capture_tool": "PENDING:S0-02-linux-network-capture-tool"
+      },
+      "hardware": "Ubuntu supported x64 reference hardware (pending owner selection)",
+      "project_category": "manual-offline-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-WIN11-X64-STABLE-SIGNED",
+      "os": "windows",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-windows-version",
+        "artifact_flavor": "PENDING:S0-02-signed-stable-artifact-flavor",
+        "package_format": "PENDING:S0-02-windows-package-format",
+        "signer": "PENDING:S0-02-windows-signer",
+        "trust_verifier": "PENDING:S0-02-windows-trust-verifier"
+      },
+      "hardware": "Windows 11 x64 clean-machine reference hardware (pending owner selection; no clean machine is available in this workspace)",
+      "project_category": "signed-stable-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-MAC15-ARM64-STABLE-SIGNED",
+      "os": "macos",
+      "architecture": "arm64",
+      "tool_versions": {
+        "os_release": "macOS-15 (plan label; exact patch pending)",
+        "artifact_flavor": "PENDING:S0-02-signed-stable-artifact-flavor",
+        "package_format": "PENDING:S0-02-macos-package-format",
+        "signer": "PENDING:S0-02-macos-signer",
+        "trust_verifier": "PENDING:S0-02-macos-trust-verifier",
+        "notarizer": "PENDING:S0-02-macos-notarizer"
+      },
+      "hardware": "macOS 15 arm64 clean-machine reference hardware (pending owner selection; no clean machine is available in this workspace)",
+      "project_category": "signed-stable-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    },
+    {
+      "id": "CFG-LINUX-UBUNTU-X64-STABLE-SIGNED",
+      "os": "linux",
+      "architecture": "x64",
+      "tool_versions": {
+        "os_release": "PENDING:S0-02-linux-version",
+        "artifact_flavor": "PENDING:S0-02-signed-stable-artifact-flavor",
+        "package_format": "PENDING:S0-02-linux-package-format",
+        "signer": "PENDING:S0-02-linux-signer",
+        "trust_verifier": "PENDING:S0-02-linux-trust-verifier"
+      },
+      "hardware": "Ubuntu supported x64 clean-machine reference hardware (pending owner selection; no clean machine is available in this workspace)",
+      "project_category": "signed-stable-artifact",
+      "required": true,
+      "owner_approval_ref": "plans/completion/decisions.md#2026-09-08-provisional-register-ratification (PROVISIONAL: agent-made, not owner-ratified)"
+    }
+  ]
+}

@@ -7,8 +7,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::{Component, Path, PathBuf};
-#[cfg(any(test, feature = "test-helpers"))]
-use std::process::Command;
+
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
@@ -31,9 +30,25 @@ use legion_ai_providers::{
 #[cfg(not(feature = "ai"))]
 pub mod offline_ai;
 
+mod acp_host;
+mod assist_proposal;
+mod git_inspection;
+mod hot_exit;
+use acp_host::AcpHostCommand;
+#[cfg(feature = "ai")]
+use acp_host::run_acp_host_proposal;
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
+use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use git_inspection::GitInspectionRunner;
+use git_inspection::{GitMutateOp, GitWorkRequest, GitWorker};
+#[cfg(any(test, feature = "test-helpers"))]
+pub use language::LspWorkerRequest;
+
+pub(crate) use crate::language::proposal_kinds::LanguageProposalKind;
+pub use crate::language::toolchain_settings::LanguageToolchainConfigurationState;
 
 pub mod terminal_policy;
 
@@ -50,6 +65,34 @@ fn end_position(text: &str) -> legion_editor::TextPosition {
     legion_editor::TextPosition::new(line, column)
 }
 
+mod delegate_workflow;
+/// Live product-AI completions: which backend answers, and what it returns.
+/// Why a local model server did not answer, in words a person can act on.
+mod local_ai_diagnosis;
+mod phase4_trust;
+pub(crate) use local_ai_diagnosis::local_ai_unavailable_reason;
+#[cfg(feature = "ai")]
+use local_ai_diagnosis::resolve_anthropic_api_key;
+mod product_ai_completion;
+mod product_ai_lane;
+mod product_ai_policy;
+use delegate_workflow::*;
+use phase4_trust::*;
+use product_ai_completion::*;
+use product_ai_lane::*;
+use product_ai_policy::*;
+
+/// Where a product AI chat turn's bytes actually go, and what the audit says.
+pub mod ai_route_descriptor;
+
+/// Cloud-lane egress manifest and acknowledgement, with a content digest.
+pub mod cloud_lane_egress;
+
+/// App-owned extension catalog: verification, permission review, install (P7.F2).
+pub mod extension_management;
+
+/// Outcome construction, extracted from this file for the chokepoint budget.
+mod command_outcome;
 /// Command-intent routing, extracted from this file (roadmap 1.1).
 mod intent_routing;
 pub use intent_routing::*;
@@ -71,6 +114,7 @@ pub mod git_policy;
 mod git_remote;
 pub mod test_explorer;
 
+use crate::cloud_lane_egress::{CloudLaneEgressAcknowledgement, CloudLaneEgressManifestView};
 /// Re-exported from the `search` submodule so the crate-root path callers
 /// already use (`legion_app::SearchQueryOptions`) keeps working after the
 /// search pipeline moved out of `lib.rs`.
@@ -90,6 +134,10 @@ use debug_workflow::{DebugBreakpointToggleInput, DebugWorkflow};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use debug_workflow::{live_dap_should_prebuild, run_live_dap_prebuild};
 
+/// Re-export because `set_debug_dap_mode_for_tests` takes this type and
+/// `legion-desktop` carries `legion-debug` only as a dev-dependency: without
+/// this its runtime cannot name the argument its own seam forwards.
+pub use legion_debug::DapMode;
 /// Re-export for callers (e.g. `legion-desktop`) that cannot depend on `legion-storage` directly.
 pub use legion_storage::checkpoint::DurableCheckpointSummary;
 /// Re-export so `legion-desktop`'s view layer can access this without reaching into the
@@ -102,9 +150,16 @@ use legion_debug::{
     test_run_summary_evidence,
 };
 use legion_editor::{
-    Cursor, EditorEngine, EditorError, SaveAcknowledgement, SaveRequestDto, Selection, TextEdit,
-    TextPosition, TextRange as EditorTextRange,
+    Cursor, DirectedCaret, EditorEngine, EditorError, PreferredX, SaveAcknowledgement,
+    SaveRequestDto, Selection, ShapedVisualRow, SnapshotLeaseLineChunk, TextEdit, TextPosition,
+    TextRange as EditorTextRange, VerticalCaretStop, VerticalDirection, VerticalLayoutId,
+    VerticalMovementRequest, VerticalSourceRow,
 };
+// `AppSaveOutcome` carries this in two public variants, so a caller matching on
+// it needs to be able to name it without depending on `legion-editor` directly.
+/// Re-export the editor-owned, revocable snapshot handle for desktop workers.
+pub use legion_editor::OwnedSnapshotLease;
+pub use legion_editor::SaveRequestDto as PublicSaveRequestDto;
 use legion_index::{
     DEFAULT_GRAMMAR_VERSION, DEFAULT_MODEL_VERSION, LexicalIndexer, RetrievalQuery,
     RetrievalSearchResult, SemanticIndex, SourceDocument, StructuralRewriteFileInput,
@@ -129,22 +184,22 @@ use legion_observability::{
 use legion_platform::{NativeFileSystem, NativeWatcherService, resolve_existing_prefix};
 use legion_plugin::PluginRuntimeHost;
 use legion_project::{
-    CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitDiffStrategy, GitHunkStage,
-    GitInspectionError, GitSnapshotOptions, OpenedFileText, ProjectGitSnapshot, WorkspaceActor,
-    WorkspaceCreateFileRequest, WorkspaceDeleteFileRequest, WorkspaceError,
-    WorkspaceMutationRollbackCheckpoint, WorkspaceMutationRollbackCheckpointRequest,
-    WorkspaceMutationRollbackRequest, WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest,
-    WorkspaceRestoreFileOp, WorkspaceSaveRequest, collect_git_snapshot, commit_git_changes,
-    create_git_branch, delete_git_branch, discover_cargo_debug_configurations, git_repository_root,
-    prune_git_worktrees, push_git_remote, remove_git_worktree, resolve_git_conflict,
-    stage_git_hunk, stash_git_changes, switch_git_branch, unstage_git_hunk,
+    CargoDebugLocatorOptions, DebugLocatorError, GitConflictChoice, GitHunkStage,
+    GitInspectionError, OpenedFileText, WorkspaceActor, WorkspaceCreateFileRequest,
+    WorkspaceDeleteFileRequest, WorkspaceError, WorkspaceMutationRollbackCheckpoint,
+    WorkspaceMutationRollbackCheckpointRequest, WorkspaceMutationRollbackRequest,
+    WorkspaceMutationRollbackTarget, WorkspaceRenameFileRequest, WorkspaceRestoreFileOp,
+    WorkspaceSaveRequest, create_git_branch, delete_git_branch,
+    discover_cargo_debug_configurations, git_repository_root, prune_git_worktrees,
+    remove_git_worktree, resolve_git_conflict, stash_git_changes, switch_git_branch,
 };
+use legion_protocol::CallHierarchyDirection;
 use legion_protocol::{
     AssistedAiEditProposalOutput, AssistedAiOperationClass, AssistedAiProviderClass,
     AssistedAiProviderInvocationState, BatchProposalPayload, BufferId, BufferVersion, ByteRange,
     CancellationTokenId, CanonicalPath, CapabilityBrokerPort, CapabilityDecision,
     CapabilityDecisionId, CapabilityId, CapabilityNamespace, CapabilityRequest,
-    CapabilityRequestContext, CapabilityResponse, CausalityId, CheckpointAuditEvent,
+    CapabilityRequestContext, CapabilityResponse, CaretAffinity, CausalityId, CheckpointAuditEvent,
     CheckpointAuditRecord, CollaborationAcknowledgementStatus, CollaborationAuditRecord,
     CollaborationDocumentBinding, CollaborationDocumentEpoch, CollaborationDocumentOperation,
     CollaborationDocumentOperationKind, CollaborationGuiProjection, CollaborationParticipant,
@@ -176,19 +231,20 @@ use legion_protocol::{
     InlinePredictionStaleReason, InlinePredictionTriggerKind, LanguageBreadcrumbProjection,
     LanguageCodeLensProjection, LanguageCompletionProjection, LanguageHoverProjection, LanguageId,
     LanguageInlayHintProjection, LanguageLocationProjection, LanguageOutlineSymbolProjection,
-    LanguageProblemProjection, LanguageQuickFixProjection, LanguageStickyScopeProjection,
+    LanguageProblemProjection, LanguageServerId, LanguageStickyScopeProjection,
+    LanguageToolchainConfigurationStatus, LanguageToolchainSettingsRecord,
     LanguageToolingOperationKind, LanguageToolingOperationProjection, LanguageToolingProjection,
     LanguageToolingStatusKind, LegionCloudLaneProjection, LegionCloudLaneProjectionRow,
-    LegionCloudLaneTaskRequest, LegionCloudLaneTaskState, LegionCloudLaneTaskStatus,
-    LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult, LegionWorkflowConflictId,
-    LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry, LegionWorkflowDecisionId,
-    LegionWorkflowDecisionKind, LegionWorkflowDependencyState, LegionWorkflowKillSwitch,
-    LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState, LegionWorkflowMergeApproval,
-    LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState, LegionWorkflowProjection,
-    LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId, LegionWorkflowRiskMonitorSnapshot,
-    LegionWorkflowRiskMonitorState, LegionWorkflowSession, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowSignOffState, LegionWorkflowState,
-    LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
+    LegionCloudLaneTaskId, LegionCloudLaneTaskRequest, LegionCloudLaneTaskState,
+    LegionCloudLaneTaskStatus, LegionEvidenceRecord, LegionTaskPacket, LegionWorkerResult,
+    LegionWorkflowConflictId, LegionWorkflowConflictState, LegionWorkflowDecisionFeedEntry,
+    LegionWorkflowDecisionId, LegionWorkflowDecisionKind, LegionWorkflowDependencyState,
+    LegionWorkflowKillSwitch, LegionWorkflowKillSwitchId, LegionWorkflowKillSwitchState,
+    LegionWorkflowMergeApproval, LegionWorkflowMergeReadiness, LegionWorkflowMergeReadinessState,
+    LegionWorkflowProjection, LegionWorkflowRiskHaltReason, LegionWorkflowRiskMonitorId,
+    LegionWorkflowRiskMonitorSnapshot, LegionWorkflowRiskMonitorState, LegionWorkflowSession,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowSignOffState,
+    LegionWorkflowState, LegionWorkflowVerificationGateId, LegionWorkflowVerificationGateState,
     LegionWorkflowWorkerAssignment, LegionWorkflowWorkerId, LegionWorkflowWorkerState,
     LineWrappingPolicy, LspEditProposalConversionInput, LspRequestCorrelation, McpListChangedKind,
     McpPrimitiveKind, McpRegistrySnapshot, McpServerId, McpToolDescriptor, McpToolName,
@@ -211,19 +267,22 @@ use legion_protocol::{
     SaveIntent, SemanticGrammarVersion, SemanticModelVersion, SemanticPrivacyScope,
     SemanticQueryFreshnessPolicy, SemanticQueryId, SemanticQueryKind, SemanticQueryRequest,
     SemanticQueryScope, SessionDirtyIndicator, SessionPanelState, SessionTab, SessionTabGroup,
-    SpecArtifact, StorageRepositoryPort, StorageRepositoryRequest, StorageRepositoryResponse,
-    SymbolFileMapRecord, TaskGraphArtifact, TerminalInput, TerminalKillEscalation,
-    TerminalKillRequest, TerminalOutputRowProjection, TerminalPanelProjection, TerminalPanelStatus,
-    TerminalPanelStatusKind, TerminalPolicyProjection, TerminalResize, TerminalRuntimeState,
-    TerminalScrollbackProjection, TerminalSearchProjection, TerminalSessionId, TextCoordinate,
-    TextEdit as ProtocolWorkspaceTextEdit, TextRange as ProtocolEditTextRange,
-    TextTransactionDescriptor, TimestampMillis, TransactionSource, TrustDecisionContext,
-    Utf16Position, Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection,
-    ViewportScroll, ViewportSemanticTokenKind, ViewportSemanticTokenOverlay,
+    SnapshotConsumerKind, SnapshotId, SnapshotLeaseDescriptor, SpecArtifact, StorageRepositoryPort,
+    StorageRepositoryRequest, StorageRepositoryResponse, SymbolFileMapRecord, TaskGraphArtifact,
+    TerminalInput, TerminalKillEscalation, TerminalKillRequest, TerminalOutputRowProjection,
+    TerminalPanelProjection, TerminalPanelStatus, TerminalPanelStatusKind,
+    TerminalPolicyProjection, TerminalResize, TerminalRuntimeState, TerminalScrollbackProjection,
+    TerminalSearchProjection, TerminalSessionId, TextCoordinate,
+    TextRange as ProtocolEditTextRange, TextTransactionDescriptor, TimestampMillis,
+    TransactionSource, TrustDecisionContext, TypeScriptToolchainProjection, Utf16Position,
+    Utf16Range, VersionContext, ViewportLineSlice, ViewportProjection, ViewportScroll,
+    ViewportSemanticTokenKind, ViewportSemanticTokenOverlay, VisualNavigationCaret,
+    VisualNavigationDirection, VisualNavigationPosition, VisualNavigationProjection,
+    VisualNavigationRequest, VisualNavigationRow, VisualNavigationWindow, VisualNavigationX,
     WorkbenchSettingsRecord, WorkbenchTelemetryConsent, WorkspaceCloseRequest,
     WorkspaceEditProposalPayload, WorkspaceEditSourceKind, WorkspaceGeneration, WorkspaceId,
     WorkspaceOpenRequest, WorkspaceOpened, WorkspacePort, WorkspaceProposal, WorkspaceRequest,
-    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTextEdit, WorkspaceTrustState,
+    WorkspaceResponse, WorkspaceSessionRecord, WorkspaceTrustState,
     delegated_task_tool_permission_request, inline_prediction_projection_from_results,
     validate_inline_prediction_lifecycle_command, validate_legion_cloud_lane_projection,
     validate_legion_cloud_lane_task_request, validate_legion_workflow_decision_feed_entry,
@@ -267,14 +326,11 @@ use legion_ui::ui::{
     DebugStatusKindProjection, DebugStatusProjection, DebugStepKindProjection,
     DebugVariableProjection, DebugWatchProjection, EditorTabProjection, EditorTabsProjection,
     EditorViewportStateProjection, ExcerptSurfaceLineProjection, ExcerptSurfaceProjection,
-    ExcerptSurfaceSectionProjection, GitBlameLineProjection, GitCommitProjection,
-    GitConflictProjection, GitDiffStrategyProjection, GitFileProjection, GitHunkProjection,
-    GitHunkStageProjection, GitProjection, GitWorktreeKindProjection, GitWorktreeProjection,
-    PaletteMode, PaletteProjection, PaletteResult, PaletteResultKind, SearchProjection,
-    SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection, SettingsProjection,
-    StructuralSearchCaptureProjection, StructuralSearchMatchProjection, StructuralSearchProjection,
-    TestExplorerProjection, ThemePreferenceProjection, ToastVerbosityProjection,
-    WorkspaceSessionRecordProjection,
+    ExcerptSurfaceSectionProjection, GitProjection, PaletteMode, PaletteProjection, PaletteResult,
+    PaletteResultKind, SearchProjection, SearchScopeProjection, SearchStatusKindProjection,
+    SearchStatusProjection, SettingsProjection, StructuralSearchCaptureProjection,
+    StructuralSearchMatchProjection, StructuralSearchProjection, TestExplorerProjection,
+    ThemePreferenceProjection, ToastVerbosityProjection, WorkspaceSessionRecordProjection,
 };
 use legion_ui::{
     ActiveBufferProjection, ActiveBufferProjectionState, CommandDispatchIntent, DockMode,
@@ -471,6 +527,11 @@ enum PaletteCommandOperands {
     WorktreePath(String),
     CommitMessage(String),
     StashMessage(Option<String>),
+    RenameName(String),
+    AcpHost {
+        program: String,
+        args: Vec<String>,
+    },
     NewWorktree {
         branch: String,
         worktree_path: String,
@@ -499,6 +560,16 @@ impl PaletteCommandOperands {
                 format!("Stash changes as ‘{message}’")
             }
             ("git-stash", Self::StashMessage(None)) => "Stash local changes".to_string(),
+            ("language-rename", Self::RenameName(name)) => {
+                format!("Rename symbol to `{name}'")
+            }
+            ("acp-attach-host", Self::AcpHost { program, args }) => {
+                if args.is_empty() {
+                    format!("Attach ACP host `{program}'")
+                } else {
+                    format!("Attach ACP host `{program} {}'", args.join(" "))
+                }
+            }
             (
                 "git-new-worktree",
                 Self::NewWorktree {
@@ -516,6 +587,10 @@ impl PaletteCommandOperands {
             Self::WorktreePath(path) => vec![path.clone()],
             Self::CommitMessage(message) => vec![message.clone()],
             Self::StashMessage(message) => message.iter().cloned().collect(),
+            Self::RenameName(name) => vec![name.clone()],
+            Self::AcpHost { program, args } => std::iter::once(program.clone())
+                .chain(args.iter().cloned())
+                .collect(),
             Self::NewWorktree {
                 branch,
                 worktree_path,
@@ -533,6 +608,8 @@ fn argument_command_prefixes(command_id: &str) -> &'static [&'static str] {
         "git-new-worktree" => &["git new worktree", "git: new worktree"],
         "git-commit" => &["git commit", "git: commit staged changes"],
         "git-stash" => &["git stash", "git: stash changes"],
+        "language-rename" => &["language rename", "rename symbol", "rename"],
+        "acp-attach-host" => &["acp attach host", "acp: attach host"],
         _ => &[],
     }
 }
@@ -569,6 +646,8 @@ fn parse_palette_command_operands(
         "git-new-worktree" => "Enter a branch and worktree path",
         "git-commit" => "Enter a commit message",
         "git-stash" => "Enter a stash message",
+        "language-rename" => "Enter the new symbol name",
+        "acp-attach-host" => "Enter an ACP host program, optionally followed by arguments",
         _ => return None,
     };
     let Some(operands) = strip_argument_command_prefix(query, command_id) else {
@@ -589,6 +668,7 @@ fn parse_palette_command_operands(
         "git-stash" => Ok(PaletteCommandOperands::StashMessage(Some(
             operands.to_string(),
         ))),
+        "language-rename" => Ok(PaletteCommandOperands::RenameName(operands.to_string())),
         "git-new-worktree" => {
             let split = operands.find(char::is_whitespace);
             let Some(split) = split else {
@@ -604,6 +684,16 @@ fn parse_palette_command_operands(
                     worktree_path: worktree_path.to_string(),
                 })
             }
+        }
+        "acp-attach-host" => {
+            let mut parts = operands.split_whitespace();
+            let Some(program) = parts.next() else {
+                return Some(Err(missing));
+            };
+            Ok(PaletteCommandOperands::AcpHost {
+                program: program.to_string(),
+                args: parts.map(ToString::to_string).collect(),
+            })
         }
         _ => unreachable!("argument commands are matched above"),
     })
@@ -1008,11 +1098,38 @@ mod daily_editing_save_all_internal_tests {
     }
 }
 
+#[cfg(test)]
+#[path = "language/code_action_tests.rs"]
+mod code_action_tests;
+
 /// Typed save result returned by application save routing.
 #[derive(Debug, Clone)]
 pub enum AppSaveOutcome {
     /// Save applied successfully.
     Saved(SaveRequestDto),
+    /// The write reached disk, but recording it afterwards failed.
+    ///
+    /// Kept apart from `Rejected` because the file really did change and the
+    /// buffer has already been reconciled with it -- the editor is clean and
+    /// the typed bytes are on disk. Folding this into `Rejected` tells someone
+    /// their work was not saved when it was, which is the more dangerous of the
+    /// two wrong answers: it invites re-typing over content that is already
+    /// there, or abandoning a file in the belief that it is unchanged.
+    CommittedThenAuditFailed {
+        /// The write that did land.
+        save: SaveRequestDto,
+        /// Path of the file whose bytes are now on disk.
+        ///
+        /// Carried explicitly because the audit failure cannot supply it:
+        /// `audit_storage_failed_response` builds its diagnostic with
+        /// `path: None`, so anything recovering the filename from the response
+        /// gets nothing and has to say "the file". This is the one outcome where
+        /// naming the file matters most — it is the difference between "your
+        /// work is safe" and "*which* work is safe".
+        path: CanonicalPath,
+        /// The failure recorded after it.
+        response: Box<ProposalResponse>,
+    },
     /// Save proposal was rejected, denied, stale, conflicting, or failed without mutating disk.
     Rejected(Box<ProposalResponse>),
 }
@@ -1540,14 +1657,24 @@ pub enum AppDelegatedTaskExecutionOutcome {
 /// Product-facing AI provider preference for Assist / Delegate composition paths.
 ///
 /// **Local-first default (`Auto`):** try Ollama loopback when a fast TCP probe
-/// succeeds, else Anthropic BYOK when credentials exist, else deterministic fixture.
+/// succeeds, else the deterministic fixture. `Auto` does not reach a remote
+/// provider: a metered upload of the buffer excerpt is a decision somebody
+/// makes, not a fallback they discover afterwards. Select `Anthropic` for that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProductAiProviderPreference {
-    /// Local-first auto routing (Ollama → Anthropic → fixture).
+    /// Local-first auto routing (Ollama → fixture; never remote).
     #[default]
     Auto,
     /// Force Ollama loopback when reachable; else fixture.
     Ollama,
+    /// Force a llama.cpp server when reachable; else fixture.
+    ///
+    /// `LlamaCppProvider` has existed and been tested since the provider
+    /// registry was written, and nothing in the product could select it: this
+    /// enum had no variant for it, so `product_ai_selected_live_backend` had no
+    /// arm and the capability matrix reported it `Unavailable` forever. A
+    /// complete adapter nobody can reach is the same as no adapter.
+    LlamaCpp,
     /// Force Anthropic when credentials exist; else fixture.
     Anthropic,
     /// Always use the offline deterministic fixture (CI / zero-egress).
@@ -1559,6 +1686,7 @@ impl ProductAiProviderPreference {
     pub fn parse(label: &str) -> Self {
         match label.trim().to_ascii_lowercase().as_str() {
             "ollama" | "local" => Self::Ollama,
+            "llama-cpp" | "llamacpp" | "llama.cpp" | "llama" => Self::LlamaCpp,
             "anthropic" | "byok" | "claude" => Self::Anthropic,
             "deterministic" | "deterministic-local" | "fixture" | "offline" => Self::Deterministic,
             "auto" | "" => Self::Auto,
@@ -1571,6 +1699,7 @@ impl ProductAiProviderPreference {
         match self {
             Self::Auto => "auto",
             Self::Ollama => "ollama",
+            Self::LlamaCpp => "llama-cpp",
             Self::Anthropic => "anthropic",
             Self::Deterministic => "deterministic",
         }
@@ -1601,34 +1730,6 @@ impl ProductAiProviderPreference {
     }
 }
 
-/// Resolve Anthropic API key from env (preferred) or OS keyring BYOK storage.
-///
-/// Desktop `SetProviderApiKey` writes to the keyring; this path loads that secret
-/// when `ANTHROPIC_API_KEY` (and Legion prefixes) are unset.
-#[cfg(feature = "ai")]
-fn resolve_anthropic_api_key() -> Option<String> {
-    std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            std::env::var("LEGION_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            std::env::var("DEVIL_ANTHROPIC_API_KEY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-        })
-        .or_else(|| {
-            // Desktop SetProviderApiKey stores `anthropic:api_key`; also accept
-            // legacy `ANTHROPIC_API_KEY` account names.
-            load_provider_api_key(&OsKeyringSecretStore, "anthropic")
-                .ok()
-                .flatten()
-        })
-}
-
 /// Resolve configured Anthropic base URL (proxy / self-hosted / production).
 #[cfg(feature = "ai")]
 fn anthropic_base_url_from_env() -> String {
@@ -1645,6 +1746,7 @@ fn anthropic_base_url_from_env() -> String {
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         })
+        .map(|configured| crate::ai_route_descriptor::enforce_https_for_remote(&configured))
         .unwrap_or_else(|| "https://api.anthropic.com".to_string())
 }
 
@@ -1669,42 +1771,149 @@ fn anthropic_client_with_keyring_fallback() -> legion_ai_providers::AnthropicMes
             ReqwestProviderHttpTransport,
         );
     }
-    // No explicit key: still use from_env so base URL + any remaining credential
-    // sources stay consistent with the provider adapter.
-    AnthropicMessagesClient::from_env(ANTHROPIC_PROVIDER_ID)
+    // No explicit key: env credential resolution, but *this* base URL. Plain
+    // `from_env` reads the environment for the endpoint too, which would undo
+    // the plaintext refusal above and post the credential to the original
+    // address.
+    AnthropicMessagesClient::from_env_with_base_url(ANTHROPIC_PROVIDER_ID, base_url)
+}
+
+/// Resolve the configured Ollama base URL (custom port / self-hosted).
+///
+/// Not gated on the `ai` feature: it reads only the environment, and the route
+/// descriptor names a destination in every build.
+pub(crate) fn ollama_base_url_from_env() -> String {
+    std::env::var("OLLAMA_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://localhost:11434".to_string())
+}
+
+/// The llama.cpp model label, from configuration.
+///
+/// `llama-server` serves whatever model it was started with and the OpenAI
+/// dialect requires a `model` field anyway, so this is a label rather than a
+/// selection. Configurable because the record a reviewer reads should name the
+/// model that answered, and only the operator knows which one that is.
+pub(crate) fn llama_cpp_model_label() -> String {
+    std::env::var("LEGION_LLAMA_CPP_MODEL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "llama.cpp".to_string())
+}
+
+/// Resolve the configured llama.cpp base URL.
+///
+/// Reads the same three names in the same order as `LlamaCppProvider::from_env`
+/// -- product-prefixed, legacy product-prefixed, then bare -- and builds them
+/// from the same constants the client uses, so the two cannot drift into
+/// disagreeing about a name. The Ollama helper
+/// beside this one reads a single variable while its client reads more, and the
+/// comment on `ollama_loopback_reachable` records what that costs: a configured
+/// deployment probed at an address the request never uses. Copying the client's
+/// precedence is how the probe, the authorized target and the request stay one
+/// endpoint.
+pub(crate) fn llama_cpp_base_url_from_env() -> String {
+    // Built from the shared prefix constants rather than spelled out, because
+    // spelling them out is how this went wrong: the second name was written as
+    // `LEGION_AI_*` when the client's legacy prefix is `DEVIL`. A deployment
+    // setting `DEVIL_LLAMA_CPP_BASE_URL` was probed at the default while its
+    // requests went somewhere else -- the exact defect this function's own doc
+    // says it exists to prevent, introduced by the function itself.
+    [
+        format!("{}_LLAMA_CPP_BASE_URL", legion_protocol::PRODUCT_ENV_PREFIX),
+        format!(
+            "{}_LLAMA_CPP_BASE_URL",
+            legion_protocol::LEGACY_PRODUCT_ENV_PREFIX
+        ),
+        "LLAMA_CPP_BASE_URL".to_string(),
+    ]
+    .into_iter()
+    .find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    })
+    .unwrap_or_else(|| "http://localhost:8080/v1".to_string())
+}
+
+/// Fast TCP probe for llama.cpp so CI/offline does not pay HTTP timeouts.
+///
+/// Shares `loopback_target_reachable` with the Ollama probe, including the
+/// tuple-not-format-string handling that an IPv6 loopback needs.
+#[cfg(feature = "ai")]
+fn llama_cpp_reachable() -> bool {
+    loopback_target_reachable(
+        &crate::ai_route_descriptor::llama_cpp_network_target(),
+        local_ai_diagnosis::LLAMA_CPP_DEFAULT_PORT,
+    )
 }
 
 /// Fast TCP probe for Ollama loopback so CI/offline does not pay HTTP timeouts.
 #[cfg(feature = "ai")]
 fn ollama_loopback_reachable() -> bool {
+    // Through the shared route descriptor, so the probe, the authorized target
+    // and the provider client all resolve one endpoint from one configuration.
+    // This used to default to `127.0.0.1` while `OllamaProvider::default` used
+    // `localhost`, and to append `:11434` to a bare host the client would have
+    // reached on port 80 -- so a configured deployment could be probed at an
+    // address the request never used.
+    loopback_target_reachable(
+        &crate::ai_route_descriptor::ollama_network_target(),
+        local_ai_diagnosis::OLLAMA_DEFAULT_PORT,
+    )
+}
+
+/// Whether a loopback service is listening at `target`.
+///
+/// Shared by every local backend probe. Written once because each of the
+/// details below was a defect first, and a second copy is a second chance to
+/// get one of them wrong.
+#[cfg(feature = "ai")]
+fn loopback_target_reachable(target: &legion_protocol::NetworkTarget, default_port: u16) -> bool {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
-    let base =
-        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-    let trimmed = base
-        .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .trim_end_matches('/');
-    let host_port = if trimmed.contains(':') {
-        trimmed.to_string()
-    } else {
-        format!("{trimmed}:11434")
-    };
-    let Ok(mut addrs) = host_port.to_socket_addrs() else {
+    let target = target.clone();
+    // A tuple, not a formatted string.
+    //
+    // The host is stored the way a policy list writes it, so an IPv6 loopback is
+    // `::1` -- and formatting `{host}:{port}` turns that into `::1:11434`, which
+    // `ToSocketAddrs` cannot split into a host and a port. The probe then
+    // reported a running Ollama as unreachable and both `Ollama` and `Auto` fell
+    // through to the deterministic provider. A tuple takes the host and the port
+    // as the separate things they are, so no bracket convention has to be
+    // reintroduced here to undo one applied elsewhere.
+    let port = target.port.unwrap_or(default_port);
+    let Ok(addrs) = (target.host.as_str(), port).to_socket_addrs() else {
         return false;
     };
-    let Some(addr) = addrs.next() else {
-        return false;
-    };
-    // Guard against accidental remote probes in product auto mode.
-    match addr {
-        SocketAddr::V4(v4) if v4.ip().is_loopback() => {}
-        SocketAddr::V6(v6) if v6.ip().is_loopback() => {}
-        _ => return false,
-    }
-    TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok()
+
+    // Every resolved address, not just the first.
+    //
+    // On a dual-stack host `localhost` commonly resolves to `::1` before
+    // `127.0.0.1`. Ollama listens on IPv4 by default, so probing only the first
+    // address reported it unreachable while the provider client -- which tries
+    // them in turn -- could talk to it. `Auto` then fell through to Anthropic or
+    // to the deterministic fixture with a working local model right there.
+    //
+    // The budget stays bounded: the same 150ms applies to each candidate and at
+    // most four are tried, so the worst case is 600ms rather than one timeout
+    // multiplied by however many addresses a resolver returns.
+    const PER_ADDRESS_TIMEOUT: Duration = Duration::from_millis(150);
+    const MAX_CANDIDATES: usize = 4;
+
+    addrs
+        // Guard against accidental remote probes in product auto mode. Applied
+        // per address rather than to the first one only: a hostname can resolve
+        // to a mix, and a non-loopback entry appearing first must not decide the
+        // answer for the loopback entries behind it.
+        .filter(|addr| match addr {
+            SocketAddr::V4(v4) => v4.ip().is_loopback(),
+            SocketAddr::V6(v6) => v6.ip().is_loopback(),
+        })
+        .take(MAX_CANDIDATES)
+        .any(|addr| TcpStream::connect_timeout(&addr, PER_ADDRESS_TIMEOUT).is_ok())
 }
 
 #[cfg(feature = "ai")]
@@ -1728,328 +1937,46 @@ struct ProductChatCompletion {
     streamed: bool,
 }
 
-/// Product completion bound to the **authorized** live backend only.
-///
-/// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
-/// key exists. Completion never falls through from an Ollama-authorized route to
-/// Anthropic (or the reverse): that would bypass the capability/network decision
-/// built for the selected backend. Offline / no-provider returns `None` for
-/// fixture fallbacks.
-///
-/// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
-/// chunks arrive). Ollama remains a single-chunk completion.
-#[cfg(feature = "ai")]
-fn complete_product_chat(
-    preference: ProductAiProviderPreference,
-    system: &str,
-    user: &str,
-    max_tokens: u32,
-    temperature: f32,
-    mut on_delta: Option<&mut dyn FnMut(&str)>,
-) -> Option<ProductChatCompletion> {
-    use legion_ai::{ChatCompletionRequest, ChatMessage, ChatRole, ModelProvider};
-    use legion_ai_providers::OllamaProvider;
-
-    let backend = product_ai_selected_live_backend(preference)?;
-
-    match backend {
-        ProductAiLiveBackend::Ollama => {
-            let model = ollama_model_label();
-            let client = OllamaProvider::default();
-            let request = ChatCompletionRequest {
-                provider: "ollama".to_string(),
-                model: model.clone(),
-                messages: vec![
-                    ChatMessage {
-                        role: ChatRole::System,
-                        content: system.to_string(),
-                    },
-                    ChatMessage {
-                        role: ChatRole::User,
-                        content: user.to_string(),
-                    },
-                ],
-                max_tokens: Some(max_tokens),
-                temperature: Some(temperature),
-                metadata: Default::default(),
-            };
-            if let Ok(response) = client.complete(request)
-                && !response.text.trim().is_empty()
-            {
-                let text = response.text.trim().to_string();
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(&text);
-                }
-                return Some(ProductChatCompletion {
-                    provider_id: "ollama".to_string(),
-                    model: response.model,
-                    stream_chunks: vec![text.clone()],
-                    text,
-                    streamed: false,
-                });
-            }
-            None
-        }
-        ProductAiLiveBackend::Anthropic => {
-            let client = anthropic_client_with_keyring_fallback();
-            let request = ChatCompletionRequest {
-                provider: "anthropic".to_string(),
-                model: "claude-sonnet-4-20250514".to_string(),
-                messages: vec![
-                    ChatMessage {
-                        role: ChatRole::System,
-                        content: system.to_string(),
-                    },
-                    ChatMessage {
-                        role: ChatRole::User,
-                        content: user.to_string(),
-                    },
-                ],
-                max_tokens: Some(max_tokens),
-                temperature: Some(temperature),
-                metadata: Default::default(),
-            };
-            // Progressive SSE: on_delta fires as text deltas arrive on the wire.
-            let mut delta_sink = |text: &str| {
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(text);
-                }
-            };
-            if let Ok(chunks) = client.stream_text_deltas_with_callback(
-                request.clone(),
-                Default::default(),
-                &mut delta_sink,
-            ) {
-                let chunks: Vec<String> = chunks.into_iter().filter(|d| !d.is_empty()).collect();
-                let text = chunks.join("");
-                if !text.trim().is_empty() {
-                    let streamed = chunks.len() > 1;
-                    return Some(ProductChatCompletion {
-                        provider_id: "anthropic".to_string(),
-                        model: request.model.clone(),
-                        stream_chunks: if chunks.is_empty() {
-                            vec![text.clone()]
-                        } else {
-                            chunks
-                        },
-                        text: text.trim().to_string(),
-                        streamed,
-                    });
-                }
-            }
-            if let Ok(response) = client.complete(request)
-                && !response.text.trim().is_empty()
-            {
-                let text = response.text.trim().to_string();
-                if let Some(cb) = on_delta.as_mut() {
-                    cb(&text);
-                }
-                return Some(ProductChatCompletion {
-                    provider_id: "anthropic".to_string(),
-                    model: response.model,
-                    stream_chunks: vec![text.clone()],
-                    text,
-                    streamed: false,
-                });
-            }
-            None
-        }
-    }
-}
-
-/// Result of resolving assist edit proposal body text (live model or fixture).
-#[derive(Debug, Clone)]
-struct AssistedEditProposalSource {
-    provider_id: String,
-    summary: String,
-    details: Vec<String>,
-    replacement: String,
-}
-
-fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
-    AssistedEditProposalSource {
-        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-        summary: "Phase 4 local AI edit proposal".to_string(),
-        details: vec![
-            "Generated by deterministic local provider (no live credentials)".to_string(),
-            "Proposal is registered only; app/editor/workspace own apply".to_string(),
-        ],
-        replacement: "/* phase4 local AI proposal */\n".to_string(),
-    }
-}
-
-/// Display-safe record of the last / live product AI stream for rail projection.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProductAiStreamProjection {
-    /// Provider that produced the stream (`ollama`, `anthropic`, or empty).
-    pub provider_id: String,
-    /// Model label.
-    pub model: String,
-    /// Operation that produced the stream (`assist.proposal`, `delegate.chat`, …).
-    pub operation: String,
-    /// Ordered stream chunks (SSE deltas or single full response).
-    pub chunks: Vec<String>,
-    /// Whether the provider used multi-delta streaming.
-    pub streamed: bool,
-    /// True while a background or progressive stream is still receiving deltas.
-    pub in_flight: bool,
-    /// Final accumulated text (bounded for projection rows).
-    pub text_preview: String,
-}
-
-/// Resolve assist edit text via product preference routing (Ollama / Anthropic / fixture).
-#[cfg(feature = "ai")]
-fn resolve_assisted_edit_proposal_text(
-    preference: ProductAiProviderPreference,
-    instruction_label: &str,
-    buffer_excerpt: &str,
-    file_path: &str,
-    on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (
-    AssistedEditProposalSource,
-    Option<ProductAiStreamProjection>,
-) {
-    let system = "You are Legion's Assist mode. Propose a small, reviewable code edit. \
-Respond with ONLY the exact text to insert at the top of the file (as a comment or code), \
-no markdown fences, no explanation.";
-    let user = format!(
-        "Instruction: {instruction_label}\nFile: {file_path}\n\nCurrent buffer (excerpt):\n{buffer_excerpt}"
-    );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
-        Some(completion) => {
-            let mut text = completion.text.clone();
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
-            let stream = product_stream_from_completion(&completion, "assist.proposal");
-            (
-                AssistedEditProposalSource {
-                    provider_id: completion.provider_id.clone(),
-                    summary: format!("Assist edit proposal from {}", completion.provider_id),
-                    details: vec![
-                        format!("model={}", completion.model),
-                        format!("preference={}", preference.as_str()),
-                        format!(
-                            "streamed={} chunks={}",
-                            completion.streamed,
-                            completion.stream_chunks.len()
-                        ),
-                        "Proposal is registered only; app/editor/workspace own apply".to_string(),
-                    ],
-                    replacement: text,
-                },
-                Some(stream),
-            )
-        }
-        None => (deterministic_assisted_edit_proposal(), None),
-    }
-}
-
-#[cfg(not(feature = "ai"))]
-fn resolve_assisted_edit_proposal_text(
-    _preference: ProductAiProviderPreference,
-    _instruction_label: &str,
-    _buffer_excerpt: &str,
-    _file_path: &str,
-    _on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (
-    AssistedEditProposalSource,
-    Option<ProductAiStreamProjection>,
-) {
-    (deterministic_assisted_edit_proposal(), None)
-}
-
-/// Resolve Delegate chat assistant body via product preference routing.
-#[cfg(feature = "ai")]
-#[allow(clippy::too_many_arguments)]
-fn resolve_delegate_chat_reply(
-    preference: ProductAiProviderPreference,
-    prompt_label: &str,
-    buffer_excerpt: &str,
-    file_path: &str,
-    citation_count: usize,
-    route_id: &str,
-    route_labels: &[String],
-    on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (String, Option<ProductAiStreamProjection>) {
-    let system = "You are Legion's Delegate chat assistant. Answer helpfully and concisely \
-about the user's workspace code. Prefer concrete references to the cited file. \
-Do not invent file paths. Keep the reply under ~800 characters.";
-    let user = format!(
-        "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
-    );
-    match complete_product_chat(preference, system, &user, 512, 0.2, on_delta) {
-        Some(completion) => {
-            let stream = product_stream_from_completion(&completion, "delegate.chat");
-            (bounded_label(completion.text, 1_200), Some(stream))
-        }
-        None => (
-            format!(
-                "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={} (preference={}; fixture — enable Ollama loopback or Anthropic BYOK for a live reply)",
-                route_labels.join(","),
-                preference.as_str()
-            ),
-            None,
-        ),
-    }
-}
-
-#[cfg(not(feature = "ai"))]
-#[allow(clippy::too_many_arguments)]
-fn resolve_delegate_chat_reply(
-    _preference: ProductAiProviderPreference,
-    _prompt_label: &str,
-    _buffer_excerpt: &str,
-    _file_path: &str,
-    citation_count: usize,
-    route_id: &str,
-    route_labels: &[String],
-    _on_delta: Option<&mut dyn FnMut(&str)>,
-) -> (String, Option<ProductAiStreamProjection>) {
-    (
-        format!(
-            "Delegate provider answer ready via {citation_count} citation(s); route={route_id} labels={}",
-            route_labels.join(",")
-        ),
-        None,
-    )
-}
-
-fn product_stream_from_completion(
-    completion: &ProductChatCompletion,
-    operation: &str,
-) -> ProductAiStreamProjection {
-    ProductAiStreamProjection {
-        provider_id: completion.provider_id.clone(),
-        model: completion.model.clone(),
-        operation: operation.to_string(),
-        chunks: completion.stream_chunks.clone(),
-        streamed: completion.streamed,
-        in_flight: false,
-        text_preview: bounded_label(completion.text.as_str(), 480),
-    }
-}
-
-/// Whether product AI will attempt a live (non-fixture) completion for `preference`.
-#[cfg(feature = "ai")]
-fn product_ai_will_attempt_live(preference: ProductAiProviderPreference) -> bool {
-    product_ai_selected_live_backend(preference).is_some()
-}
-
-#[cfg(not(feature = "ai"))]
-fn product_ai_will_attempt_live(_preference: ProductAiProviderPreference) -> bool {
-    false
-}
-
 /// Selected live backend for product composition (policy + routing metadata).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProductAiLiveBackend {
     Ollama,
+    LlamaCpp,
     Anthropic,
 }
 
+/// The backend a preference resolves to.
+///
+/// Discards the credential state, so a caller that will need to explain a
+/// fallback should use [`product_ai_selection`] instead.
 #[cfg(feature = "ai")]
 fn product_ai_selected_live_backend(
+    preference: ProductAiProviderPreference,
+) -> Option<ProductAiLiveBackend> {
+    product_ai_selection(preference).0
+}
+
+/// The backend a preference resolves to, and what looking for a key found.
+///
+/// The state travels with the selection it belongs to. A process-wide slot
+/// could be overwritten between one request's selection and its fallback
+/// diagnosis, so a run explained itself with another run's credential answer.
+#[cfg(feature = "ai")]
+fn product_ai_selection(
+    preference: ProductAiProviderPreference,
+) -> (
+    Option<ProductAiLiveBackend>,
+    Option<local_ai_diagnosis::AnthropicKeyState>,
+) {
+    if preference == ProductAiProviderPreference::Anthropic {
+        let (key, state) = local_ai_diagnosis::resolve_anthropic_credential();
+        return (key.map(|_| ProductAiLiveBackend::Anthropic), Some(state));
+    }
+    (product_ai_selected_live_backend_inner(preference), None)
+}
+
+#[cfg(feature = "ai")]
+fn product_ai_selected_live_backend_inner(
     preference: ProductAiProviderPreference,
 ) -> Option<ProductAiLiveBackend> {
     match preference {
@@ -2057,16 +1984,40 @@ fn product_ai_selected_live_backend(
         ProductAiProviderPreference::Ollama => {
             ollama_loopback_reachable().then_some(ProductAiLiveBackend::Ollama)
         }
+        ProductAiProviderPreference::LlamaCpp => {
+            llama_cpp_reachable().then_some(ProductAiLiveBackend::LlamaCpp)
+        }
         ProductAiProviderPreference::Anthropic => {
             resolve_anthropic_api_key().map(|_| ProductAiLiveBackend::Anthropic)
         }
+        // Auto never escalates to a remote provider on its own.
+        //
+        // A key in the environment is not consent. `can_activate_provider`
+        // holds a BYOK remote provider to `AssistedAiWorkspaceConsent::Granted`
+        // *and* a credential, and Auto was treating the credential alone as
+        // both -- so a workspace that happened to have `ANTHROPIC_API_KEY` set
+        // would send buffer excerpts to a paid remote provider because Ollama
+        // was not running, without anyone choosing that.
+        //
+        // Choosing Anthropic explicitly is a person selecting a remote provider
+        // in settings, which is an act they took. Auto is not, so Auto stops at
+        // the local route.
+        //
+        // Narrower than the full contract, and deliberately so: no
+        // `AssistedAiWorkspaceConsent` state exists in this composition yet, so
+        // this cannot check consent -- it removes the path that never asked.
+        // Auto tries each local backend in turn and still stops there.
+        //
+        // Ollama first because it is the one most people have running; a
+        // llama.cpp server is a deliberate setup and its owner is not harmed by
+        // Ollama winning when both are up. Neither is remote, so the rule above
+        // is untouched: Auto reaches a local model or the fixture, never a paid
+        // endpoint nobody chose.
         ProductAiProviderPreference::Auto => {
             if ollama_loopback_reachable() {
                 Some(ProductAiLiveBackend::Ollama)
-            } else if resolve_anthropic_api_key().is_some() {
-                Some(ProductAiLiveBackend::Anthropic)
             } else {
-                None
+                llama_cpp_reachable().then_some(ProductAiLiveBackend::LlamaCpp)
             }
         }
     }
@@ -2079,6 +2030,17 @@ fn product_ai_selected_live_backend(
     None
 }
 
+/// Without the provider there is no selection and no credential to look for.
+#[cfg(not(feature = "ai"))]
+fn product_ai_selection(
+    _preference: ProductAiProviderPreference,
+) -> (
+    Option<ProductAiLiveBackend>,
+    Option<local_ai_diagnosis::AnthropicKeyState>,
+) {
+    (None, None)
+}
+
 /// Security policy for product AI routes that may reach local loopback or BYOK remote.
 fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> SecurityPolicy {
     let mut policy = SecurityPolicy::default();
@@ -2088,6 +2050,43 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
             policy.network_policy.air_gap = true;
             policy.ai_provider_policy.allow_local_provider = true;
             policy.ai_provider_policy.allow_remote_provider = false;
+            // The default allowlist holds `localhost` only, so a configured
+            // `OLLAMA_BASE_URL` of `http://127.0.0.1:11500` produced a route the
+            // probe selected and the broker then denied -- Assist proposals and
+            // Delegate chat silently never reaching a server that was running.
+            //
+            // Only a loopback host is added. The air gap above is what keeps
+            // this local; adding a resolved host without checking it would let
+            // one environment variable turn a local-only policy into an
+            // allowlist entry for anywhere.
+            let host = crate::ai_route_descriptor::ollama_network_target().host;
+            if crate::ai_route_descriptor::is_loopback_host(&host)
+                && !policy
+                    .network_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry == &host)
+            {
+                policy.network_policy.allowlist.push(host);
+            }
+        }
+        Some(ProductAiLiveBackend::LlamaCpp) => {
+            // Same posture as Ollama: a loopback server, so the air gap holds
+            // and only its own loopback host joins the allowlist.
+            policy.network_policy.local_provider_only = true;
+            policy.network_policy.air_gap = true;
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = false;
+            let host = crate::ai_route_descriptor::llama_cpp_network_target().host;
+            if crate::ai_route_descriptor::is_loopback_host(&host)
+                && !policy
+                    .network_policy
+                    .allowlist
+                    .iter()
+                    .any(|entry| entry == &host)
+            {
+                policy.network_policy.allowlist.push(host);
+            }
         }
         Some(ProductAiLiveBackend::Anthropic) => {
             // Trusted-workspace BYOK: allow the configured Anthropic host only.
@@ -2111,24 +2110,10 @@ fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> Security
 }
 
 fn anthropic_route_host() -> String {
-    #[cfg(feature = "ai")]
-    {
-        let base = anthropic_base_url_from_env();
-        base.trim()
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .split(':')
-            .next()
-            .unwrap_or("api.anthropic.com")
-            .to_string()
-    }
-    #[cfg(not(feature = "ai"))]
-    {
-        "api.anthropic.com".to_string()
-    }
+    // The host the broker allowlists must come from the same parse as the host
+    // the route request names, or a configured proxy is authorized under one
+    // spelling and contacted under another.
+    crate::ai_route_descriptor::anthropic_network_target().host
 }
 
 /// Provider route metadata that matches the backend that will receive workspace text.
@@ -2148,12 +2133,21 @@ fn product_ai_route_fields(
             "ollama".to_string(),
             ollama_model_label_offline_safe(),
             AssistedAiProviderClass::LocalLoopback,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            Some(crate::ai_route_descriptor::ollama_network_target()),
             vec!["local.ollama".to_string()],
+            vec!["local.free".to_string()],
+            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+        ),
+        Some(ProductAiLiveBackend::LlamaCpp) => (
+            "llama-cpp".to_string(),
+            llama_cpp_model_label(),
+            // Loopback-local, exactly like Ollama: the excerpt reaches a server
+            // on this machine and the capability must say so, because that is
+            // what a reviewer reads to decide whether the edit was free and
+            // air-gap safe.
+            AssistedAiProviderClass::LocalLoopback,
+            Some(crate::ai_route_descriptor::llama_cpp_network_target()),
+            vec!["local.llama-cpp".to_string()],
             vec!["local.free".to_string()],
             legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
         ),
@@ -2161,11 +2155,7 @@ fn product_ai_route_fields(
             "anthropic".to_string(),
             "claude-sonnet-4-20250514".to_string(),
             AssistedAiProviderClass::ByokRemote,
-            Some(legion_protocol::NetworkTarget {
-                scheme: "https".to_string(),
-                host: anthropic_route_host(),
-                port: Some(443),
-            }),
+            Some(crate::ai_route_descriptor::anthropic_network_target()),
             vec!["byok.anthropic".to_string()],
             vec!["remote.byok".to_string()],
             // Buffer excerpts leave the machine under BYOK remote.
@@ -2198,224 +2188,37 @@ fn ollama_model_label_offline_safe() -> String {
     }
 }
 
-/// Background job result for non-blocking product AI generation.
-#[derive(Debug, Clone)]
-struct ProductAiBackgroundResult {
-    /// Delegate chat assistant message to finalize; empty when this is Assist.
-    assistant_message_id: String,
-    content_label: String,
-    stream: Option<ProductAiStreamProjection>,
-    /// When set, `poll_product_ai_stream` registers an Assist proposal on the app thread.
-    assist_proposal: Option<AssistedEditProposalSource>,
-}
-
-/// Context retained while a live Assist proposal streams on a worker thread.
+/// What an inline prediction says it was, taken from the route that ran it.
 ///
-/// Authorization and agent Planning→Proposing run on the UI thread; completion
-/// text arrives later so the renderer can poll progressive deltas and remain
-/// responsive. Proposal registration happens on poll after the worker finishes.
-#[derive(Debug, Clone)]
-struct PendingAssistProposalJob {
-    run_id: legion_protocol::AgentRunId,
-    route_id: String,
-    operation_class: legion_protocol::AssistedAiOperationClass,
-    provider_class: legion_protocol::AssistedAiProviderClass,
-    provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
-    route_response: legion_protocol::AssistedAiProviderRouteResponse,
-    context_manifest_projection: legion_protocol::ContextManifestProjection,
-    privacy_inspector_projection: legion_protocol::PrivacyInspectorProjection,
-    permission_budget_projection: legion_protocol::PermissionBudgetProjection,
-    generated_at: TimestampMillis,
-    event_context: EventContext,
-    principal: PrincipalId,
-    file_id: FileId,
-    preconditions: ProposalVersionPreconditions,
-    agent: AgentRuntime,
-}
-
-/// Shared live stream sink updated as SSE deltas arrive (background or progressive).
-#[derive(Debug, Default)]
-struct LiveProductAiStreamSink {
-    projection: Mutex<ProductAiStreamProjection>,
-    in_flight: std::sync::atomic::AtomicBool,
-    /// Completed background chat results waiting to be applied on the app thread.
-    pending_results: Mutex<VecDeque<ProductAiBackgroundResult>>,
-}
-
-struct ProductAiLaneReservation {
-    sink: Arc<LiveProductAiStreamSink>,
-    operation: &'static str,
-    armed: bool,
-}
-
-impl ProductAiLaneReservation {
-    fn try_acquire(
-        sink: Arc<LiveProductAiStreamSink>,
-        operation: &'static str,
-        provider_hint: &str,
-        model_hint: &str,
-    ) -> Option<Self> {
-        if !sink.try_begin(operation, provider_hint, model_hint) {
-            return None;
-        }
-        Some(Self {
-            sink,
-            operation,
-            armed: true,
-        })
-    }
-
-    fn sink(&self) -> Arc<LiveProductAiStreamSink> {
-        self.sink.clone()
-    }
-
-    fn finish(mut self, completion: Option<&ProductChatCompletion>) {
-        self.armed = false;
-        self.sink.finish(completion, self.operation);
-    }
-
-    fn finish_background(
-        mut self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-    ) {
-        self.armed = false;
-        self.sink
-            .finish_background(result, completion, self.operation);
-    }
-}
-
-impl Drop for ProductAiLaneReservation {
-    fn drop(&mut self) {
-        if self.armed {
-            self.sink.finish(None, self.operation);
-        }
-    }
-}
-
-impl LiveProductAiStreamSink {
-    fn try_begin(&self, operation: &str, provider_hint: &str, model_hint: &str) -> bool {
-        let Ok(pending) = self.pending_results.lock() else {
-            return false;
-        };
-        if !pending.is_empty()
-            || self
-                .in_flight
-                .compare_exchange(
-                    false,
-                    true,
-                    std::sync::atomic::Ordering::SeqCst,
-                    std::sync::atomic::Ordering::SeqCst,
-                )
-                .is_err()
-        {
-            return false;
-        }
-        let Ok(mut guard) = self.projection.lock() else {
-            self.in_flight
-                .store(false, std::sync::atomic::Ordering::SeqCst);
-            return false;
-        };
-        *guard = ProductAiStreamProjection {
-            provider_id: provider_hint.to_string(),
-            model: model_hint.to_string(),
-            operation: operation.to_string(),
-            chunks: Vec::new(),
-            streamed: false,
-            in_flight: true,
-            text_preview: String::new(),
-        };
-        true
-    }
-
-    fn push_delta(&self, delta: &str) {
-        if delta.is_empty() {
-            return;
-        }
-        if let Ok(mut guard) = self.projection.lock() {
-            guard.chunks.push(delta.to_string());
-            guard.streamed = guard.chunks.len() > 1 || guard.streamed;
-            guard.in_flight = true;
-            let joined = guard.chunks.join("");
-            guard.text_preview = joined.chars().take(480).collect();
-        }
-    }
-
-    fn finish(&self, completion: Option<&ProductChatCompletion>, operation: &str) {
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn snapshot(&self) -> ProductAiStreamProjection {
-        self.projection
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
-
-    fn is_in_flight(&self) -> bool {
-        self.in_flight.load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    fn has_pending_results(&self) -> bool {
-        self.pending_results
-            .lock()
-            .map(|queue| !queue.is_empty())
-            .unwrap_or(true)
-    }
-
-    fn mode_allows_active_operation(&self, mode: AppProductMode) -> bool {
-        if !self.is_in_flight() && !self.has_pending_results() {
-            return true;
-        }
-        let Ok(guard) = self.projection.lock() else {
-            return false;
-        };
-        match guard.operation.as_str() {
-            "delegate.chat" => mode.allows_delegate(),
-            "assist.proposal" => mode.allows_assist(),
-            _ => false,
-        }
-    }
-
-    /// Publish the final stream projection and enqueue its app-thread result
-    /// before making the operation observable as no longer in flight. This
-    /// ordering closes the Manual-transition race between provider completion
-    /// and result handoff.
-    fn finish_background(
-        &self,
-        result: ProductAiBackgroundResult,
-        completion: Option<&ProductChatCompletion>,
-        operation: &str,
-    ) {
-        let Ok(mut queue) = self.pending_results.lock() else {
-            return;
-        };
-        if let Ok(mut guard) = self.projection.lock() {
-            if let Some(completion) = completion {
-                *guard = product_stream_from_completion(completion, operation);
-            } else {
-                guard.in_flight = false;
-            }
-        }
-        queue.push_back(result);
-        self.in_flight
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    fn take_background_results(&self) -> Vec<ProductAiBackgroundResult> {
-        self.pending_results
-            .lock()
-            .map(|mut queue| queue.drain(..).collect())
-            .unwrap_or_default()
-    }
+/// This used to be three separate `provider_id == "ollama"` comparisons, which
+/// called everything else remote and metered. A llama.cpp prediction served
+/// from a loopback server on this machine was therefore reported to diagnostics
+/// and projections as `byok`/`remote` -- contradicting the route that had just
+/// authorized it as local and free, and misinforming the one reader who checks
+/// whether the buffer left the machine.
+///
+/// `product_ai_route_fields` is where every other path reads the class from, so
+/// this reads it there too. Deriving the same fact twice is how the two answers
+/// came to disagree, and adding a third backend would have needed a fourth
+/// string comparison nobody would remember to write.
+#[cfg(any(feature = "ai", test))]
+fn inline_prediction_route_labels(
+    backend: Option<ProductAiLiveBackend>,
+    provider_id: &str,
+) -> (AssistedAiProviderClass, Vec<String>, Vec<String>) {
+    let (_, _, route_provider_class, ..) = product_ai_route_fields(backend);
+    let local_route = matches!(
+        route_provider_class,
+        AssistedAiProviderClass::LocalLoopback | AssistedAiProviderClass::Local
+    );
+    (
+        route_provider_class,
+        vec![
+            if local_route { "local" } else { "byok" }.to_string(),
+            provider_id.to_string(),
+        ],
+        vec![if local_route { "local" } else { "remote" }.to_string()],
+    )
 }
 
 /// Bound ghost-text bytes for live inline predictions (matches protocol max).
@@ -2434,7 +2237,7 @@ fn bound_inline_prediction_text(text: &str, max_bytes: u32) -> String {
 /// the ghost-text result shape. Falls back to `None` for deterministic offline.
 #[cfg(feature = "ai")]
 fn try_live_product_inline_prediction(
-    preference: ProductAiProviderPreference,
+    backend: Option<ProductAiLiveBackend>,
     metadata: &InlinePredictionRequestMetadata,
     buffer_excerpt: &str,
 ) -> Option<InlinePredictionResult> {
@@ -2449,7 +2252,18 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
         "Language: {}\nCursor line {} character {}\nBuffer excerpt:\n{buffer_excerpt}",
         metadata.language_id.0, metadata.cursor.line, metadata.cursor.character
     );
-    let completion = complete_product_chat(preference, &system, &user, 128, 0.1, None)?;
+    // The already-authorized backend, not the preference. Resolving again here
+    // would repeat the delegate-chat defect: the caller has just authorized one
+    // destination through the broker, and a second resolution can answer
+    // differently and send the excerpt somewhere never approved.
+    let completion = complete_product_chat(
+        backend,
+        &system,
+        &user,
+        INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
+        0.1,
+        None,
+    )?;
     let text = bound_inline_prediction_text(completion.text.trim(), max_bytes);
     if text.is_empty() {
         return None;
@@ -2459,26 +2273,13 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
     let mut provider = metadata.provider.clone();
     provider.provider_id = completion.provider_id.clone();
     provider.model_label = completion.model.clone();
-    provider.provider_class = if completion.provider_id == "ollama" {
-        AssistedAiProviderClass::LocalLoopback
-    } else {
-        AssistedAiProviderClass::ByokRemote
-    };
+    let (route_provider_class, health_labels, cost_labels) =
+        inline_prediction_route_labels(backend, &completion.provider_id);
+    provider.provider_class = route_provider_class;
     provider.operation_class = AssistedAiOperationClass::InlinePrediction;
     provider.invocation_state = AssistedAiProviderInvocationState::Completed;
-    provider.health_labels = vec![
-        if completion.provider_id == "ollama" {
-            "local".to_string()
-        } else {
-            "byok".to_string()
-        },
-        completion.provider_id.clone(),
-    ];
-    provider.cost_labels = vec![if completion.provider_id == "ollama" {
-        "local".to_string()
-    } else {
-        "remote".to_string()
-    }];
+    provider.health_labels = health_labels;
+    provider.cost_labels = cost_labels;
     provider.latency = InlinePredictionLatencyMetadata {
         queued_ms: 0,
         inference_ms: 0,
@@ -2756,6 +2557,7 @@ impl Drop for InFlightDelegatedTaskRun {
 struct DelegatedTaskRunCompletion {
     audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
     loop_result: Option<legion_agent::agent_loop::DelegatedTaskLoopResult>,
+    acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     sandbox_allocation_failure: Option<String>,
     sandbox_enforcement_label: Option<String>,
 }
@@ -3044,176 +2846,15 @@ pub struct AppDelegateChatOutcome {
     pub assistant_message_id: String,
     /// Number of retrieval citations attached to the assistant response.
     pub citation_count: usize,
-}
-
-#[derive(Debug, Clone)]
-struct DelegateWorkflowState {
-    chat_messages: Vec<DelegatedTaskChatMessage>,
-    context_citations: Vec<DelegatedTaskContextCitation>,
-    hunk_decisions: HashMap<(ProposalId, String), DelegatedTaskProposalHunkDisposition>,
-    tool_permission_requests: HashMap<String, DelegatedTaskToolPermissionRequest>,
-    runtime_activation: DelegatedTaskRuntimeActivationState,
-    next_message_sequence: u64,
-    /// Last live sandbox enforcement summary from tool-host spawns (display-safe).
-    last_sandbox_enforcement_label: Option<String>,
-}
-
-impl Default for DelegateWorkflowState {
-    fn default() -> Self {
-        Self {
-            chat_messages: Vec::new(),
-            context_citations: Vec::new(),
-            hunk_decisions: HashMap::new(),
-            tool_permission_requests: HashMap::new(),
-            runtime_activation: DelegatedTaskRuntimeActivationState::NotEncoded,
-            next_message_sequence: 0,
-            last_sandbox_enforcement_label: None,
-        }
-    }
-}
-
-impl DelegateWorkflowState {
-    fn next_message_id(&mut self, role: DelegatedTaskChatRole) -> String {
-        self.next_message_sequence = self.next_message_sequence.saturating_add(1);
-        format!("delegate:{role:?}:{}", self.next_message_sequence)
-    }
-
-    #[cfg_attr(not(feature = "ai"), allow(dead_code))]
-    fn set_runtime_activation(&mut self, runtime_activation: DelegatedTaskRuntimeActivationState) {
-        self.runtime_activation = runtime_activation;
-    }
-
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn record_system_message(
-        &mut self,
-        content_label: impl Into<String>,
-        plan_id: Option<DelegatedTaskPlanId>,
-        proposal_id: Option<ProposalId>,
-        correlation_id: CorrelationId,
-        causality_id: CausalityId,
-    ) -> String {
-        let message_id = self.next_message_id(DelegatedTaskChatRole::System);
-        self.chat_messages.push(DelegatedTaskChatMessage {
-            message_id: message_id.clone(),
-            role: DelegatedTaskChatRole::System,
-            content_label: content_label.into(),
-            plan_id,
-            proposal_id,
-            citation_ids: Vec::new(),
-            tool_permission_request_ids: Vec::new(),
-            correlation_id,
-            causality_id,
-            created_at: TimestampMillis::now(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        });
-        message_id
-    }
-
-    fn record_tool_permission(&mut self, request: DelegatedTaskToolPermissionRequest) {
-        self.tool_permission_requests
-            .insert(request.request_id.clone(), request);
-    }
-
-    fn tool_permission(&self, request_id: &str) -> Option<&DelegatedTaskToolPermissionRequest> {
-        self.tool_permission_requests.get(request_id)
-    }
-
-    fn record_tool_permission_decision(
-        &mut self,
-        mut input: DelegatedTaskToolPermissionRequestInput,
-    ) -> DelegatedTaskToolPermissionRequest {
-        let effective_decision = if self
-            .tool_permission_requests
-            .get(&input.request_id)
-            .is_some_and(|request| request.deny_overrides)
-        {
-            DelegatedTaskToolPermissionDecision::Deny
-        } else {
-            input.decision
-        };
-        input.decision = effective_decision;
-        let request = delegated_task_tool_permission_request(input);
-        self.record_tool_permission(request.clone());
-        request
-    }
-
-    fn apply_to_projection(
-        &self,
-        projection: &mut DelegatedTaskProjection,
-        proposal_ledger: &ProposalLedgerProjection,
-    ) {
-        projection.chat_messages = self.chat_messages.clone();
-        projection.context_citations = self.context_citations.clone();
-        projection.proposal_reviews = proposal_ledger
-            .rows
-            .iter()
-            .filter(|row| row.diff_summary.hunk_count > 0 || !row.diff_summary.chunks.is_empty())
-            .map(|row| self.review_for_row(row))
-            .collect();
-        projection.tool_permission_requests = self
-            .tool_permission_requests
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        projection.tool_permission_requests.sort_by(|left, right| {
-            left.request_id
-                .cmp(&right.request_id)
-                .then_with(|| format!("{:?}", left.profile).cmp(&format!("{:?}", right.profile)))
-        });
-        projection.runtime_activation = self.runtime_activation;
-        projection.chat_message_count = projection.chat_messages.len() as u32;
-        projection.context_citation_count = projection.context_citations.len() as u32;
-        projection.proposal_review_count = projection.proposal_reviews.len() as u32;
-        projection.tool_permission_request_count = projection.tool_permission_requests.len() as u32;
-        if let Some(label) = &self.last_sandbox_enforcement_label
-            && !projection
-                .plan_only_disclaimers
-                .iter()
-                .any(|existing| existing == label)
-        {
-            projection.plan_only_disclaimers.push(label.clone());
-        }
-    }
-
-    fn review_for_row(&self, row: &ProposalLedgerRow) -> DelegatedTaskProposalReview {
-        let chunks = proposal_review_chunks(row)
-            .into_iter()
-            .map(|chunk| {
-                let hunk_id = delegate_hunk_id(row.proposal_id, &chunk);
-                let disposition = self
-                    .hunk_decisions
-                    .get(&(row.proposal_id, hunk_id.clone()))
-                    .copied()
-                    .unwrap_or(DelegatedTaskProposalHunkDisposition::Pending);
-                DelegatedTaskProposalHunkReview {
-                    hunk_id,
-                    proposal_id: row.proposal_id,
-                    target_id: chunk.target_id.clone(),
-                    payload_kind: row.payload_kind,
-                    path: target_path_for_chunk(row, chunk.target_id.as_deref()),
-                    byte_range: chunk.byte_range,
-                    changed_line_count: chunk.changed_line_count,
-                    inserted_line_count: chunk.inserted_line_count,
-                    deleted_line_count: chunk.deleted_line_count,
-                    content_hash: chunk.content_hash.clone(),
-                    disposition,
-                    risk_label: row.risk_label,
-                    privacy_label: row.privacy_label,
-                    labels: vec!["delegate.proposal_hunk.human_review".to_string()],
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                }
-            })
-            .collect::<Vec<_>>();
-        DelegatedTaskProposalReview::from_hunks(
-            format!("delegate:review:{}", row.proposal_id.0),
-            row.proposal_id,
-            chunks,
-            vec!["delegate.proposal_review.human_approval_queue".to_string()],
-            1,
-        )
-    }
+    /// The provider route this turn was authorized against.
+    ///
+    /// Delegate chat built an accurate route request, used it for the broker
+    /// decision, and dropped it -- so a reachable UI operation could upload the
+    /// buffer excerpt with nothing retained about the destination. Assist keeps
+    /// its route; this is the same evidence for the other path.
+    pub provider_route_request: legion_protocol::AssistedAiProviderRouteRequest,
+    /// How the provider invocation ended.
+    pub invocation_state: legion_protocol::AssistedAiProviderInvocationState,
 }
 
 /// App-owned outcome for an Automate MCP tool-call attempt.
@@ -3312,50 +2953,6 @@ pub trait AppAutomateMcpToolRuntime: Send + Sync {
         &self,
         invocation: &AppAutomateMcpToolInvocation,
     ) -> Result<AppAutomateMcpToolInvocationReceipt, AppAutomateMcpToolRuntimeError>;
-}
-
-/// ACP host command configured by the app.
-#[derive(Debug, Clone)]
-#[cfg(any(test, feature = "test-helpers"))]
-struct AcpHostCommand {
-    program: PathBuf,
-    args: Vec<String>,
-}
-
-#[cfg(any(test, feature = "test-helpers"))]
-impl AcpHostCommand {
-    fn new(program: impl Into<PathBuf>, args: Vec<String>) -> Self {
-        Self {
-            program: program.into(),
-            args,
-        }
-    }
-
-    fn run(
-        &self,
-        sandbox_path: &Path,
-        target_path: &Path,
-        plan_id: &str,
-    ) -> std::io::Result<std::process::Output> {
-        let mut command = Command::new(&self.program);
-        command.args(&self.args);
-        command.current_dir(sandbox_path);
-        command.env("LEGION_ACP_PLAN_ID", plan_id);
-        command.env("LEGION_ACP_SANDBOX_PATH", sandbox_path);
-        command.env("LEGION_ACP_TARGET_PATH", target_path);
-        command.env(
-            "LEGION_ACP_TARGET_DIR",
-            target_path.parent().unwrap_or(sandbox_path),
-        );
-        command.env(
-            "LEGION_ACP_TARGET_FILE",
-            target_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("proposal.txt"),
-        );
-        command.output()
-    }
 }
 
 /// App adapter that invokes a `legion-ai-providers` MCP client from Automate workflows.
@@ -4879,6 +4476,35 @@ impl AppProposalCoordinator {
     fn preview_warnings(payload: &ProposalPayload) -> Vec<ProposalPreviewWarning> {
         match payload {
             ProposalPayload::Batch(payload) => payload.preview_warnings.clone(),
+            ProposalPayload::WorkspaceEdit(payload) => payload
+                .change_annotations
+                .iter()
+                .map(|annotation| {
+                    let description = annotation
+                        .description
+                        .as_deref()
+                        .filter(|description| !description.trim().is_empty())
+                        .unwrap_or("No additional description");
+                    let confirmation = if annotation.needs_confirmation {
+                        "Confirmation required."
+                    } else {
+                        "Confirmation not requested by the language server."
+                    };
+                    ProposalPreviewWarning {
+                        code: format!("lsp.change_annotation:{}", annotation.id),
+                        kind: ProposalPreviewWarningKind::ChangeAnnotation,
+                        message: format!(
+                            "{}: {} {} Affects {} target(s).",
+                            annotation.label,
+                            description,
+                            confirmation,
+                            annotation.targets.len()
+                        ),
+                        target_id: Some(annotation.id.clone()),
+                        redaction_hints: vec![RedactionHint::MetadataOnly],
+                    }
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -6652,15 +6278,30 @@ impl ProposalPort for AppProposalCoordinator {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 struct CorrelationGenerator {
-    next: u64,
+    next: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CorrelationGenerator {
-    fn next(&mut self) -> CorrelationId {
-        self.next = self.next.saturating_add(1).max(1);
-        CorrelationId(self.next)
+    fn next(&self) -> CorrelationId {
+        let value = self
+            .next
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |current| current.checked_add(1),
+            )
+            .expect("correlation id exhausted");
+        CorrelationId(value)
+    }
+}
+
+impl Default for CorrelationGenerator {
+    fn default() -> Self {
+        Self {
+            next: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
     }
 }
 
@@ -6834,6 +6475,17 @@ impl ActiveDocumentController {
         })
     }
 
+    fn restore_expected_fingerprint(&mut self, buffer_id: BufferId, fingerprint: FileFingerprint) {
+        if let Some(metadata) = self.buffer_file_metadata.get_mut(&buffer_id) {
+            metadata.fingerprint = fingerprint.clone();
+        }
+        if self.active_buffer_id == Some(buffer_id)
+            && let Some(metadata) = self.active_file_metadata.as_mut()
+        {
+            metadata.fingerprint = fingerprint;
+        }
+    }
+
     fn require_open_buffer(&self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
         if self.open_tabs.contains(&buffer_id) && self.metadata_for_buffer(buffer_id).is_some() {
             Ok(())
@@ -6974,22 +6626,21 @@ impl ActiveDocumentController {
             .ok_or(AppCompositionError::WorkspaceNotOpen)
     }
 
-    /// Finds the `BufferId` for an open buffer whose canonical path matches
-    /// `path`.  Returns `None` if no open buffer has that path.
-    fn buffer_id_for_path(&self, path: &str) -> Option<BufferId> {
-        // Check active buffer first (fast path).
-        if let Some(meta) = &self.active_file_metadata
-            && meta.identity.canonical_path.0 == path
-        {
-            return self.active_buffer_id;
+    /// Every file with an open buffer right now.
+    ///
+    /// The active buffer is included explicitly rather than assumed to be in
+    /// the map, because the active buffer can be projected before its metadata
+    /// has been inserted into the map.
+    fn open_file_ids(&self) -> std::collections::HashSet<FileId> {
+        let mut ids: std::collections::HashSet<FileId> = self
+            .buffer_file_metadata
+            .values()
+            .map(|meta| meta.identity.file_id)
+            .collect();
+        if let Some(meta) = &self.active_file_metadata {
+            ids.insert(meta.identity.file_id);
         }
-        // Fall back to iterating the open buffer metadata map.
-        for (buffer_id, meta) in &self.buffer_file_metadata {
-            if meta.identity.canonical_path.0 == path {
-                return Some(*buffer_id);
-            }
-        }
-        None
+        ids
     }
 
     fn require_workspace_context(&self) -> Result<ActiveWorkspaceContext, AppCompositionError> {
@@ -7008,6 +6659,7 @@ impl ActiveDocumentController {
                 .active_workspace_trust
                 .clone()
                 .ok_or(AppCompositionError::WorkspaceNotOpen)?,
+            root_path: self.workspace_root_path.clone(),
         })
     }
 
@@ -7042,6 +6694,9 @@ struct ActiveWorkspaceContext {
     workspace_generation: WorkspaceGeneration,
     principal: PrincipalId,
     trust: WorkspaceTrustState,
+    /// Absolute workspace root, so a terminal can spawn inside the open
+    /// project rather than wherever the process happened to start.
+    root_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -7063,6 +6718,19 @@ struct LanguageRequestInput {
     snapshot_id: legion_protocol::SnapshotId,
     buffer_version: legion_protocol::BufferVersion,
     event_context: EventContext,
+    /// Files with an open buffer at the moment this request was built.
+    ///
+    /// The Problems panel carries rows forward across reads, and a row is only
+    /// worth carrying while something can still retire it. A server publishes
+    /// diagnostics for open buffers and `ingest_lsp_diagnostic_batch` drops any
+    /// notification -- including a clear -- for a path with no open buffer, so
+    /// once a file is closed its rows can never be updated or withdrawn. Held
+    /// past that point they outlive deletes and renames too, and the panel goes
+    /// on offering to navigate to a path that is gone.
+    ///
+    /// The workflow that carries the rows has no view of open documents, so the
+    /// set travels with the request that reaches it.
+    open_files: std::collections::HashSet<FileId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -7074,10 +6742,16 @@ enum LanguageReadKind {
     Outline,
     InlayHints,
     CodeLens,
+    /// Callers of the symbol under the caret.
+    IncomingCalls,
+    /// Callees of the symbol under the caret.
+    OutgoingCalls,
 }
 
 struct LspReadProjectionIngest {
     kind: LanguageReadKind,
+    /// Call-hierarchy rows, when `kind` is one of the two call directions.
+    call_hierarchy: Vec<LanguageLocationProjection>,
     hover: Option<LanguageHoverProjection>,
     completions: Vec<LanguageCompletionProjection>,
     locations: Vec<LanguageLocationProjection>,
@@ -7092,7 +6766,7 @@ fn lsp_identity_for_language_request(
     input: &LanguageRequestInput,
 ) -> legion_lsp::LspTextDocumentIdentity {
     legion_lsp::LspTextDocumentIdentity {
-        uri: format!("file://{}", input.metadata.identity.canonical_path.0),
+        uri: canonical_path_to_uri(&input.metadata.identity.canonical_path.0),
         language_id: language_id_for_path(&input.metadata.identity.canonical_path),
         workspace_id: input.workspace_id,
         file_id: input.metadata.identity.file_id,
@@ -7110,14 +6784,6 @@ fn utf16_position_from_text_coordinate(position: TextCoordinate) -> Utf16Positio
             .and_then(|offset| u32::try_from(offset).ok())
             .unwrap_or(position.character),
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum LanguageProposalKind {
-    Formatting,
-    Rename,
-    OrganizeImports,
-    CodeAction,
 }
 
 #[derive(Debug, Clone)]
@@ -7138,6 +6804,23 @@ impl Default for LanguageToolingWorkflow {
 }
 
 impl LanguageToolingWorkflow {
+    /// Drop everything scoped to the workspace being left.
+    ///
+    /// The ingest paths bound their carried-forward problems to a matching
+    /// workspace, which is necessary and not sufficient: that check only runs
+    /// when something asks for a read or a server publishes, and opening a
+    /// workspace starts neither. A workspace with no language server, or one
+    /// nobody has opened a file in yet, would keep showing the previous
+    /// workspace's Problems panel -- listing paths outside itself, and
+    /// navigating to them on click -- for as long as it stayed quiet.
+    ///
+    /// The switch itself is the moment that is certain to happen, so the reset
+    /// belongs here, alongside the debug, prediction and palette state that is
+    /// cleared for the same reason.
+    fn clear_workspace_state(&mut self) {
+        self.projection = LanguageToolingProjection::empty();
+    }
+
     fn projection(&self) -> LanguageToolingProjection {
         self.projection.clone()
     }
@@ -7155,6 +6838,12 @@ impl LanguageToolingWorkflow {
         self.semantic_index.upsert(file_index);
     }
 
+    fn has_indexed_file(&self, workspace_id: WorkspaceId, file_id: FileId) -> bool {
+        self.semantic_index.files().iter().any(|file| {
+            file.identity.workspace_id == workspace_id && file.identity.file_id == file_id
+        })
+    }
+
     fn search_retrieval(&self, query: &RetrievalQuery) -> Vec<RetrievalSearchResult> {
         self.semantic_index.search_hybrid_retrieval(query).results
     }
@@ -7164,8 +6853,8 @@ impl LanguageToolingWorkflow {
         self.projection.status_message = format!("Language operation {operation_id} cancelled");
         self.projection.cancellation_count = self.projection.cancellation_count.saturating_add(1);
         self.projection.generated_at = TimestampMillis::now();
-        self.push_operation(LanguageToolingOperationProjection {
-            operation_id,
+        let row = LanguageToolingOperationProjection {
+            operation_id: operation_id.clone(),
             kind: LanguageToolingOperationKind::Diagnostics,
             status: LanguageToolingStatusKind::Cancelled,
             request_id: None,
@@ -7175,7 +6864,62 @@ impl LanguageToolingWorkflow {
             causality_id: Some(event_context.causality_id),
             generated_at: TimestampMillis::now(),
             schema_version: 1,
-        });
+        };
+        if let Some(existing) = self
+            .projection
+            .operations
+            .iter_mut()
+            .find(|operation| operation.operation_id == operation_id)
+        {
+            *existing = row;
+        } else {
+            self.push_operation(row);
+        }
+    }
+
+    /// Updates the existing metadata-only row for an accepted LSP write.
+    ///
+    /// Write operations are admitted with an opaque app operation id and must
+    /// keep that same id through terminal failure, staleness, cancellation, or
+    /// proposal creation.  In particular, this helper never manufactures an
+    /// LSP request id: the request tag is app-owned and the worker does not
+    /// expose a protocol id at this boundary.
+    pub(crate) fn upsert_write_operation(
+        &mut self,
+        pending: &crate::language::PendingLspWriteOperation,
+        status: LanguageToolingStatusKind,
+        message: String,
+        proposal_id: Option<ProposalId>,
+    ) -> LanguageToolingProjection {
+        self.projection.workspace_id = Some(pending.workspace_id);
+        self.projection.buffer_id = Some(pending.buffer_id);
+        self.projection.file_id = Some(pending.file_id);
+        self.projection.status = status;
+        self.projection.status_message = message.clone();
+        self.projection.generated_at = TimestampMillis::now();
+        let row = LanguageToolingOperationProjection {
+            operation_id: pending.operation_id.clone(),
+            kind: pending.operation_kind,
+            status,
+            request_id: None,
+            proposal_id,
+            message,
+            correlation_id: Some(pending.event_context.correlation_id),
+            causality_id: Some(pending.event_context.causality_id),
+            generated_at: TimestampMillis::now(),
+            schema_version: 1,
+        };
+        if let Some(existing) = self
+            .projection
+            .operations
+            .iter_mut()
+            .find(|operation| operation.operation_id == pending.operation_id)
+        {
+            *existing = row;
+        } else {
+            self.push_operation(row);
+        }
+        self.projection()
     }
 
     fn ingest_lsp_diagnostics(
@@ -7189,15 +6933,12 @@ impl LanguageToolingWorkflow {
             && self.projection.buffer_id == Some(input.buffer_id)
             && self.projection.file_id == Some(input.metadata.identity.file_id);
         if !same_identity {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            self.projection = projection;
+            self.projection = language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            );
         }
 
         self.projection.workspace_id = Some(input.workspace_id);
@@ -7229,7 +6970,14 @@ impl LanguageToolingWorkflow {
             problem.redaction_hints.dedup();
         }
         self.projection.problems.extend(problems);
-        self.projection.quick_fixes = language_quick_fixes_for_problems(&self.projection.problems);
+        // Prioritised here too. The read leg already did this; the diagnostics
+        // leg rebuilding fixes from the raw list meant a file whose problems
+        // had just arrived could be listed with no fixes at all, whenever
+        // another file was already holding the cap.
+        self.projection.quick_fixes = language_quick_fixes_prioritizing(
+            &self.projection.problems,
+            input.metadata.identity.file_id,
+        );
         let operation_id = self.next_operation_id(LanguageToolingOperationKind::Diagnostics);
         self.push_operation(LanguageToolingOperationProjection {
             operation_id,
@@ -7246,6 +6994,18 @@ impl LanguageToolingWorkflow {
         self.projection()
     }
 
+    /// Record that no answer is coming after all.
+    ///
+    /// The read leg sets `call_hierarchy_awaiting` from the kind alone, because
+    /// at that point the question has been asked. When the request was never
+    /// issued — no live session, or a server without `callHierarchyProvider` —
+    /// the operation is still worth recording (the user did press the key) but
+    /// the wait is not, and a flag nobody will ever clear renders as a spinner
+    /// that never resolves.
+    fn cancel_call_hierarchy_wait(&mut self) {
+        self.projection.call_hierarchy_awaiting = false;
+    }
+
     fn ingest_lsp_read_projection(
         &mut self,
         input: &LanguageRequestInput,
@@ -7259,6 +7019,8 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
             LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
             LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
+            LanguageReadKind::IncomingCalls => LanguageToolingOperationKind::IncomingCalls,
+            LanguageReadKind::OutgoingCalls => LanguageToolingOperationKind::OutgoingCalls,
         };
         let same_identity = self.projection.workspace_id == Some(input.workspace_id)
             && self.projection.buffer_id == Some(input.buffer_id)
@@ -7266,15 +7028,12 @@ impl LanguageToolingWorkflow {
         let mut projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
 
         projection.workspace_id = Some(input.workspace_id);
@@ -7293,11 +7052,21 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => projection.outline = ingest.outline,
             LanguageReadKind::InlayHints => projection.inlay_hints = ingest.inlay_hints,
             LanguageReadKind::CodeLens => projection.code_lenses = ingest.code_lenses,
+            LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls => {
+                // The answer is here, so the wait is over — including when the
+                // answer is "nobody", which is a result rather than a silence.
+                projection.call_hierarchy_awaiting = false;
+                projection.call_hierarchy = ingest.call_hierarchy;
+                projection.call_hierarchy_direction = Some(match ingest.kind {
+                    LanguageReadKind::IncomingCalls => CallHierarchyDirection::Incoming,
+                    _ => CallHierarchyDirection::Outgoing,
+                });
+            }
         }
         self.projection = projection;
         let operation_id = self.next_operation_id(operation_kind);
-        self.push_operation(LanguageToolingOperationProjection {
-            operation_id,
+        let row = LanguageToolingOperationProjection {
+            operation_id: operation_id.clone(),
             kind: operation_kind,
             status: LanguageToolingStatusKind::Ready,
             request_id: ingest.request_id,
@@ -7307,7 +7076,17 @@ impl LanguageToolingWorkflow {
             causality_id: Some(input.event_context.causality_id),
             generated_at: TimestampMillis::now(),
             schema_version: 1,
-        });
+        };
+        if let Some(existing) = self
+            .projection
+            .operations
+            .iter_mut()
+            .find(|operation| operation.operation_id == operation_id)
+        {
+            *existing = row;
+        } else {
+            self.push_operation(row);
+        }
         self.projection()
     }
 
@@ -7325,6 +7104,8 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::Outline => LanguageToolingOperationKind::Outline,
             LanguageReadKind::InlayHints => LanguageToolingOperationKind::InlayHints,
             LanguageReadKind::CodeLens => LanguageToolingOperationKind::CodeLens,
+            LanguageReadKind::IncomingCalls => LanguageToolingOperationKind::IncomingCalls,
+            LanguageReadKind::OutgoingCalls => LanguageToolingOperationKind::OutgoingCalls,
         };
         let operation_id = self.next_operation_id(operation_kind);
         let same_identity = self.projection.workspace_id == Some(input.workspace_id)
@@ -7333,15 +7114,12 @@ impl LanguageToolingWorkflow {
         let previous_projection = if same_identity {
             self.projection.clone()
         } else {
-            let mut projection = LanguageToolingProjection::empty();
-            projection.operations = self.projection.operations.clone();
-            projection.cancellation_count = self.projection.cancellation_count;
-            projection.stale_result_count = if self.projection.buffer_id.is_some() {
-                self.projection.stale_result_count.saturating_add(1)
-            } else {
-                self.projection.stale_result_count
-            };
-            projection
+            language_projection_for_new_identity(
+                &self.projection,
+                input.workspace_id,
+                input.metadata.identity.file_id,
+                &input.open_files,
+            )
         };
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
         let document = SourceDocument::with_versions(
@@ -7369,7 +7147,14 @@ impl LanguageToolingWorkflow {
             LanguageReadKind::References => SemanticQueryKind::References,
             LanguageReadKind::Outline
             | LanguageReadKind::InlayHints
-            | LanguageReadKind::CodeLens => SemanticQueryKind::SymbolLookup,
+            | LanguageReadKind::CodeLens
+            // The index has no call graph, so this leg cannot answer either
+            // direction. It runs anyway, for the reason the inlay-hint arm
+            // gives: it records the operation and stamps the projection with
+            // this buffer's identity, so the panel has a row to update when the
+            // server answers rather than one appearing from nowhere.
+            | LanguageReadKind::IncomingCalls
+            | LanguageReadKind::OutgoingCalls => SemanticQueryKind::SymbolLookup,
         };
         let response = self.semantic_index.query(&SemanticQueryRequest {
             query_id: SemanticQueryId(uuid::Uuid::now_v7()),
@@ -7407,7 +7192,113 @@ impl LanguageToolingWorkflow {
                 schema_version: 1,
             })
             .collect::<Vec<_>>();
-        let quick_fixes = language_quick_fixes_for_problems(&problems);
+        // Merge into the panel rather than replace it.
+        //
+        // This assignment used to hand `problems` straight to the projection,
+        // so the index leg's answer became the entire Problems panel. The leg
+        // runs on hover and completion, it only ever produces rows for the
+        // buffer being read, and it produces none at all when the index has
+        // nothing to say -- so a single hover replaced every LSP diagnostic in
+        // the workspace with an empty list, and nothing republished them until
+        // that file's server spoke again. The panel simply emptied while the
+        // errors were still in the code.
+        //
+        // `ingest_lsp_diagnostics` already states the rule for a shared
+        // multi-file list: replace only the rows this producer owns for this
+        // file, and leave everything else alone. This is the same rule read
+        // from the other side.
+        let problems = {
+            let merged = previous_projection.problems.clone();
+            // Every index-owned row goes, not just this file's.
+            //
+            // A row may only outlive the read that made it if something can
+            // later retire it. An LSP row has that: the server that published
+            // it publishes an empty list for the same file when it goes away,
+            // and `ingest_lsp_diagnostics` acts on that. An index row has
+            // nothing of the kind -- it is computed as a by-product of reading
+            // a buffer, no producer ever retracts it, and neither closing a tab
+            // nor deleting or renaming the file through the proposal flow
+            // clears it. Retaining those workspace-wide would leave the panel
+            // listing, and offering to navigate to, paths that no longer exist.
+            //
+            // So index rows live exactly as long as the file being read. The
+            // defect this merge exists to fix is unaffected: a read still
+            // leaves every LSP diagnostic in the workspace alone, which is
+            // what emptied the panel.
+            //
+            // The identity reset below states the same rule, and on every path
+            // that reaches here a file change has already fired it -- so either
+            // one alone is sufficient today. Both are kept because the rule
+            // belongs to whoever carries a row forward, and a future caller
+            // that carries without resetting would otherwise inherit the bug
+            // silently. `index_problems_do_not_survive_a_read_in_another_file`
+            // fails only when both are removed, which is what defence in depth
+            // means and is worth saying rather than implying each is
+            // load-bearing on its own.
+            // Replaced in place, not removed and appended.
+            //
+            // The Problems panel holds its keyboard selection as a bare index
+            // into this list. Dropping the index rows and pushing their
+            // replacements onto the end shifts every row that followed them, so
+            // a selection resting on one of them silently comes to rest on a
+            // different file's diagnostic and the next activation opens
+            // somewhere the reader never chose. Splicing the new rows in where
+            // the old ones were leaves every other position untouched.
+            let mut spliced = Vec::with_capacity(merged.len() + problems.len());
+            let mut placed = false;
+            for existing in &merged {
+                if existing.source_label.as_deref() == Some("legion-index") {
+                    if !placed {
+                        spliced.extend(problems.iter().cloned());
+                        placed = true;
+                    }
+                    continue;
+                }
+                // A closed file's rows go the same way. The server publishes
+                // for open buffers, and the notification handler drops
+                // anything -- a clear included -- for a path with no open
+                // buffer, so once a file is closed its rows can never be
+                // updated or withdrawn. Held past that they survive deletes
+                // and renames too, and the panel keeps offering to navigate
+                // somewhere that is gone.
+                if existing
+                    .file_id
+                    .is_some_and(|file| !input.open_files.contains(&file))
+                {
+                    continue;
+                }
+                spliced.push(existing.clone());
+            }
+            if !placed {
+                spliced.extend(problems);
+            }
+            spliced
+        };
+        // Deliberately not sorted.
+        //
+        // Sorting the merged list by file and line reads better and is wrong
+        // here: `DesktopRuntime` holds the Problems panel's keyboard selection
+        // as a bare index into this list, so reordering moves the highlight to
+        // a different diagnostic without the user touching anything, and the
+        // next `ProblemActivate` opens a file they did not choose. Appending
+        // keeps every row a reader has already seen at the index it was at.
+        //
+        // The underlying fragility -- a selection identified by position in a
+        // list that other code edits -- is older than this function and is not
+        // fixed here; this only refuses to make it worse.
+
+        // Quick fixes see the active file first, because they are capped.
+        //
+        // `language_quick_fixes_for_problems` takes the first 50 rows. Before
+        // this merge it only ever saw the buffer being read, so the cap was
+        // about one file's diagnostics. Feeding it the workspace-wide list
+        // changed what the cap cuts: the rows for the file under the cursor are
+        // appended last, so a workspace already carrying 50 problems would lose
+        // every fix for the file actually being edited. The list itself keeps
+        // its order -- the panel's selection indexes into it -- and only this
+        // view of it is reordered.
+        let quick_fixes =
+            language_quick_fixes_prioritizing(&problems, input.metadata.identity.file_id);
         let locations = response
             .results
             .iter()
@@ -7490,6 +7381,7 @@ impl LanguageToolingWorkflow {
             });
 
         self.projection = LanguageToolingProjection {
+            typescript_toolchain: previous_projection.typescript_toolchain,
             workspace_id: Some(input.workspace_id),
             buffer_id: Some(input.buffer_id),
             file_id: Some(input.metadata.identity.file_id),
@@ -7501,6 +7393,7 @@ impl LanguageToolingWorkflow {
             sticky_scopes,
             inlay_hints,
             code_lenses,
+            code_action_candidates: previous_projection.code_action_candidates,
             hover: if matches!(kind, LanguageReadKind::Hover) {
                 hover
             } else {
@@ -7521,6 +7414,30 @@ impl LanguageToolingWorkflow {
             } else {
                 previous_projection.references
             },
+            // The index leg cannot answer "who calls this" — it has no call
+            // graph — so rows only ever arrive from the server via
+            // `ingest_lsp_read_projection`. What this leg must do is stop the
+            // previous answer from masquerading as this one: asking for callees
+            // while the panel still lists callers under an "incoming" heading
+            // shows a confident wrong answer, and shows it forever if the
+            // server never replies.
+            call_hierarchy: if matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ) {
+                Vec::new()
+            } else {
+                previous_projection.call_hierarchy
+            },
+            call_hierarchy_direction: match kind {
+                LanguageReadKind::IncomingCalls => Some(CallHierarchyDirection::Incoming),
+                LanguageReadKind::OutgoingCalls => Some(CallHierarchyDirection::Outgoing),
+                _ => previous_projection.call_hierarchy_direction,
+            },
+            call_hierarchy_awaiting: matches!(
+                kind,
+                LanguageReadKind::IncomingCalls | LanguageReadKind::OutgoingCalls
+            ),
             outline: if matches!(kind, LanguageReadKind::Outline) {
                 outline
             } else {
@@ -7551,89 +7468,6 @@ impl LanguageToolingWorkflow {
         self.projection()
     }
 
-    fn record_proposal(
-        &mut self,
-        input: &LanguageRequestInput,
-        kind: LanguageProposalKind,
-        proposal_id: ProposalId,
-        action_id: Option<&str>,
-        message: String,
-    ) -> LanguageToolingProjection {
-        let operation_kind = match kind {
-            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
-            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
-            LanguageProposalKind::OrganizeImports => {
-                LanguageToolingOperationKind::OrganizeImportsProposal
-            }
-            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
-        };
-        self.projection.workspace_id = Some(input.workspace_id);
-        self.projection.buffer_id = Some(input.buffer_id);
-        self.projection.file_id = Some(input.metadata.identity.file_id);
-        self.projection.status = LanguageToolingStatusKind::Ready;
-        self.projection.status_message = message.clone();
-        self.projection.generated_at = TimestampMillis::now();
-        if matches!(kind, LanguageProposalKind::CodeAction)
-            && let Some(action_id) = action_id
-        {
-            for quick_fix in &mut self.projection.quick_fixes {
-                if quick_fix.action_id == action_id {
-                    quick_fix.proposal_id = Some(proposal_id);
-                }
-            }
-        }
-        let operation_id = self.next_operation_id(operation_kind);
-        self.push_operation(LanguageToolingOperationProjection {
-            operation_id,
-            kind: operation_kind,
-            status: LanguageToolingStatusKind::Ready,
-            request_id: Some(legion_protocol::LspRequestId(uuid::Uuid::now_v7())),
-            proposal_id: Some(proposal_id),
-            message,
-            correlation_id: Some(input.event_context.correlation_id),
-            causality_id: Some(input.event_context.causality_id),
-            generated_at: TimestampMillis::now(),
-            schema_version: 1,
-        });
-        self.projection()
-    }
-
-    fn record_proposal_failure(
-        &mut self,
-        input: &LanguageRequestInput,
-        kind: LanguageProposalKind,
-        message: String,
-    ) -> LanguageToolingProjection {
-        let operation_kind = match kind {
-            LanguageProposalKind::Formatting => LanguageToolingOperationKind::FormattingProposal,
-            LanguageProposalKind::Rename => LanguageToolingOperationKind::RenameProposal,
-            LanguageProposalKind::OrganizeImports => {
-                LanguageToolingOperationKind::OrganizeImportsProposal
-            }
-            LanguageProposalKind::CodeAction => LanguageToolingOperationKind::CodeActionProposal,
-        };
-        self.projection.workspace_id = Some(input.workspace_id);
-        self.projection.buffer_id = Some(input.buffer_id);
-        self.projection.file_id = Some(input.metadata.identity.file_id);
-        self.projection.status = LanguageToolingStatusKind::Failed;
-        self.projection.status_message = message.clone();
-        self.projection.generated_at = TimestampMillis::now();
-        let operation_id = self.next_operation_id(operation_kind);
-        self.push_operation(LanguageToolingOperationProjection {
-            operation_id,
-            kind: operation_kind,
-            status: LanguageToolingStatusKind::Failed,
-            request_id: Some(legion_protocol::LspRequestId(uuid::Uuid::now_v7())),
-            proposal_id: None,
-            message,
-            correlation_id: Some(input.event_context.correlation_id),
-            causality_id: Some(input.event_context.causality_id),
-            generated_at: TimestampMillis::now(),
-            schema_version: 1,
-        });
-        self.projection()
-    }
-
     fn next_operation_id(&mut self, kind: LanguageToolingOperationKind) -> String {
         self.next_operation_id = self.next_operation_id.saturating_add(1).max(1);
         format!("language:{kind:?}:{}", self.next_operation_id)
@@ -7642,8 +7476,19 @@ impl LanguageToolingWorkflow {
     fn push_operation(&mut self, operation: LanguageToolingOperationProjection) {
         self.projection.operations.push(operation);
         if self.projection.operations.len() > 20 {
-            let excess = self.projection.operations.len() - 20;
-            self.projection.operations.drain(0..excess);
+            // Keep every admitted write row while it is Running so a bounded
+            // 32-entry request map cannot lose cancellation/status identity.
+            // Completed history remains bounded at twenty rows.
+            while self.projection.operations.len() > 20 {
+                let Some(index) =
+                    self.projection.operations.iter().position(|operation| {
+                        operation.status != LanguageToolingStatusKind::Running
+                    })
+                else {
+                    break;
+                };
+                self.projection.operations.remove(index);
+            }
         }
     }
 }
@@ -7918,10 +7763,15 @@ impl TerminalWorkflow {
             .env_policy
             .effective_env()
             .expect("effective_env always returns Some");
+        // `cwd_policy` above says "workspace-root" and, until this field
+        // existed, nothing made that true: the PTY inherited the process
+        // working directory, so a terminal opened against a project could start
+        // in an unrelated tree and `cargo test` would run there.
         match self.runtime.launch(TerminalRuntimeLaunchRequest {
             policy: launch_policy,
             command,
             args,
+            cwd: context.root_path.as_ref().map(std::path::PathBuf::from),
             env: Some(pty_env),
         }) {
             Ok(outcome) => {
@@ -8715,22 +8565,14 @@ impl TerminalWorkflow {
 ///   (lowercase) for a document opened as `file:///C:/…`, and lsp-types'
 ///   `Url` can percent-encode the colon (`C%3A`). Before this
 ///   normalization, every echoed diagnostic for an open buffer was
-///   silently dropped by the `buffer_id_for_path` lookup on Windows.
+///   silently dropped by exact path lookup on Windows.
 /// - Unix absolute paths keep their leading `/` — stripping `file:///`
 ///   consumed it, so `/tmp/ws/main.rs` became `tmp/ws/main.rs` and the
 ///   lookup silently dropped diagnostics on Unix through this path too.
 /// - `/` becomes `\` on Windows for consistency with the editor's paths.
-fn uri_to_canonical_path(uri: &str) -> String {
+pub(crate) fn uri_to_canonical_path(uri: &str) -> String {
     let path_part = if let Some(rest) = uri.strip_prefix("file:///") {
-        // Percent-decode a drive colon (`C%3A` → `C:`), either hex case.
-        let rest = if rest.len() >= 4
-            && rest.as_bytes()[0].is_ascii_alphabetic()
-            && rest[1..4].eq_ignore_ascii_case("%3a")
-        {
-            format!("{}:{}", &rest[..1], &rest[4..])
-        } else {
-            rest.to_string()
-        };
+        let rest = percent_decode_uri_path(rest);
         let bytes = rest.as_bytes();
         if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
             // Windows drive path: canonical uppercase drive letter.
@@ -8739,8 +8581,15 @@ fn uri_to_canonical_path(uri: &str) -> String {
             // Unix absolute path: restore the leading `/` the strip consumed.
             format!("/{rest}")
         }
+    } else if let Some(rest) = uri.strip_prefix("file://localhost/") {
+        let rest = percent_decode_uri_path(rest);
+        if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+            rest
+        } else {
+            format!("/{rest}")
+        }
     } else if let Some(rest) = uri.strip_prefix("file://") {
-        rest.to_string()
+        format!("//{}", percent_decode_uri_path(rest))
     } else {
         uri.to_string()
     };
@@ -8753,6 +8602,65 @@ fn uri_to_canonical_path(uri: &str) -> String {
     {
         path_part
     }
+}
+
+/// Normalizes an LSP file URI to the app's authoritative URI spelling.
+pub(crate) fn normalize_lsp_document_uri(uri: &str) -> Option<String> {
+    if !uri.starts_with("file://") || uri.contains('?') || uri.contains('#') {
+        return None;
+    }
+    Some(canonical_path_to_uri(&uri_to_canonical_path(uri)))
+}
+
+/// Return whether two `file://` URIs name the same on-disk document.
+///
+/// Drive-letter and percent-encoding differences are normalized first.
+/// When both paths exist, filesystem canonicalize then equates macOS
+/// `/var` vs `/private/var` and Windows `\\?\` prefixes so a live
+/// server echo cannot drop diagnostics for an open buffer.
+pub(crate) fn lsp_file_uris_refer_to_same_document(left: &str, right: &str) -> bool {
+    let Some(left) = normalize_lsp_document_uri(left) else {
+        return false;
+    };
+    let Some(right) = normalize_lsp_document_uri(right) else {
+        return false;
+    };
+    if left == right {
+        return true;
+    }
+    let left_path = uri_to_canonical_path(&left);
+    let right_path = uri_to_canonical_path(&right);
+    match (
+        std::fs::canonicalize(&left_path),
+        std::fs::canonicalize(&right_path),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn percent_decode_uri_path(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            let hex = |byte: u8| match byte {
+                b'0'..=b'9' => Some(byte - b'0'),
+                b'a'..=b'f' => Some(byte - b'a' + 10),
+                b'A'..=b'F' => Some(byte - b'A' + 10),
+                _ => None,
+            };
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                decoded.push((high << 4) | low);
+                index += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| value.to_string())
 }
 
 #[cfg(test)]
@@ -8792,43 +8700,167 @@ mod uri_to_canonical_path_tests {
 
     #[cfg(not(target_os = "windows"))]
     #[test]
+    fn file_uris_decode_spaces_and_unicode_without_path_guessing() {
+        let path = uri_to_canonical_path("file:///tmp/ws/space%20and%20%E2%98%83.ts");
+        assert_eq!(path, "/tmp/ws/space and ☃.ts");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn unix_localhost_file_uri_is_local_absolute_path() {
+        assert_eq!(
+            uri_to_canonical_path("file://localhost/tmp/ws/src/main.ts"),
+            "/tmp/ws/src/main.ts"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
     fn unix_path_component_case_is_preserved() {
         assert_eq!(
             uri_to_canonical_path("file:///tmp/WS/src/Main.rs"),
             "/tmp/WS/src/Main.rs"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_and_canonical_file_uris_name_the_same_document() {
+        use super::{canonical_path_to_uri, lsp_file_uris_refer_to_same_document};
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_dir = root.path().join("real");
+        std::fs::create_dir(&real_dir).expect("mkdir real");
+        let file = real_dir.join("main.ts");
+        std::fs::write(&file, "const value = 1;\n").expect("write");
+        let alias_dir = root.path().join("alias");
+        symlink(&real_dir, &alias_dir).expect("symlink");
+        let alias_file = alias_dir.join("main.ts");
+
+        let real_uri = canonical_path_to_uri(&file.to_string_lossy());
+        let alias_uri = canonical_path_to_uri(&alias_file.to_string_lossy());
+        assert_ne!(
+            real_uri, alias_uri,
+            "the test must exercise two different URI spellings"
+        );
+        assert!(lsp_file_uris_refer_to_same_document(&real_uri, &alias_uri));
+    }
 }
 
 /// Converts a canonical path string to a `file://` URI.
-fn canonical_path_to_uri(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    if normalized.starts_with('/') {
-        format!("file://{normalized}")
+pub(crate) fn canonical_path_to_uri(path: &str) -> String {
+    let windows_form = path.starts_with("\\\\")
+        || path.starts_with("//")
+        || path.starts_with("\\\\?\\")
+        || path.starts_with("//?/")
+        || (path.len() >= 2
+            && path.as_bytes()[0].is_ascii_alphabetic()
+            && path.as_bytes()[1] == b':');
+    let mut normalized = if windows_form {
+        path.replace('\\', "/")
     } else {
-        format!("file:///{normalized}")
+        path.to_string()
+    };
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        normalized = format!("//{rest}");
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
     }
+    let encoded = percent_encode_file_path(&normalized);
+    if let Some(rest) = encoded.strip_prefix("//") {
+        format!("file://{rest}")
+    } else if encoded.starts_with('/') {
+        format!("file://{encoded}")
+    } else {
+        format!("file:///{encoded}")
+    }
+}
+
+fn percent_encode_file_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.as_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/' | b':') {
+            encoded.push(*byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte >> 4) as usize]));
+            encoded.push(char::from(b"0123456789ABCDEF"[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 fn language_id_for_path(path: &CanonicalPath) -> LanguageId {
     let lower = path.0.to_ascii_lowercase();
     let language = if lower.ends_with(".rs") {
         "rust"
-    } else if lower.ends_with(".ts") || lower.ends_with(".tsx") {
+    } else if lower.ends_with(".tsx") {
+        "typescriptreact"
+    } else if lower.ends_with(".ts") {
         "typescript"
-    } else if lower.ends_with(".js") || lower.ends_with(".jsx") {
+    } else if lower.ends_with(".jsx") {
+        "javascriptreact"
+    } else if lower.ends_with(".js") {
         "javascript"
     } else if lower.ends_with(".md") {
         "markdown"
     } else if lower.ends_with(".json") {
         "json"
+    } else if lower.ends_with(".py") || lower.ends_with(".pyi") || lower.ends_with(".pyw") {
+        "python"
     } else {
         "text"
     };
     LanguageId(language.to_string())
 }
 
-fn bounded_label(value: impl Into<String>, limit: usize) -> String {
+#[cfg(test)]
+mod language_id_for_path_tests {
+    use super::language_id_for_path;
+    use legion_protocol::{CanonicalPath, LanguageId};
+
+    #[test]
+    fn recognizes_python_source_stub_and_windows_extensions_case_insensitively() {
+        for path in [
+            "src/main.py",
+            "src/types.pyi",
+            "src/tool.pyw",
+            "src/MAIN.PY",
+        ] {
+            assert_eq!(
+                language_id_for_path(&CanonicalPath(path.to_string())),
+                LanguageId("python".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_unknown_extensions_as_text() {
+        assert_eq!(
+            language_id_for_path(&CanonicalPath("src/main.unknown".to_string())),
+            LanguageId("text".to_string())
+        );
+    }
+
+    #[test]
+    fn distinguishes_javascript_and_jsx_language_ids() {
+        assert_eq!(
+            language_id_for_path(&CanonicalPath("src/main.js".to_string())),
+            LanguageId("javascript".to_string())
+        );
+        assert_eq!(
+            language_id_for_path(&CanonicalPath("src/view.jsx".to_string())),
+            LanguageId("javascriptreact".to_string())
+        );
+        assert_eq!(
+            language_id_for_path(&CanonicalPath("src/view.tsx".to_string())),
+            LanguageId("typescriptreact".to_string())
+        );
+    }
+}
+
+pub(crate) fn bounded_label(value: impl Into<String>, limit: usize) -> String {
     value.into().chars().take(limit).collect()
 }
 
@@ -9008,68 +9040,6 @@ fn debug_step_kind(kind: DebugStepKindProjection) -> DebugStepKind {
         DebugStepKindProjection::Into => DebugStepKind::Into,
         DebugStepKindProjection::Out => DebugStepKind::Out,
         DebugStepKindProjection::Back => DebugStepKind::Back,
-    }
-}
-
-fn language_quick_fixes_for_problems(
-    problems: &[LanguageProblemProjection],
-) -> Vec<LanguageQuickFixProjection> {
-    problems
-        .iter()
-        .take(50)
-        .enumerate()
-        .map(|(index, problem)| {
-            let code_label = problem
-                .code_label
-                .clone()
-                .unwrap_or_else(|| "diagnostic".to_string());
-            LanguageQuickFixProjection {
-                action_id: language_quick_fix_action_id(index, problem),
-                title: format!(
-                    "Prepare code action for {}",
-                    bounded_label(code_label.clone(), 64)
-                ),
-                kind_label: "quickfix.diagnostic".to_string(),
-                problem_code_label: problem.code_label.clone(),
-                problem_range: problem.range,
-                severity: problem.severity,
-                source_label: problem.source_label.clone(),
-                proposal_id: None,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            }
-        })
-        .collect()
-}
-
-fn language_quick_fix_action_id(index: usize, problem: &LanguageProblemProjection) -> String {
-    let code = problem.code_label.as_deref().unwrap_or("diagnostic");
-    let safe_code = sanitized_action_component(code, 64);
-    let (line, character) = problem
-        .range
-        .map(|range| (range.start.line, range.start.character))
-        .unwrap_or((0, 0));
-    format!("quickfix:{safe_code}:{line}:{character}:{index}")
-}
-
-fn sanitized_action_component(value: &str, limit: usize) -> String {
-    let sanitized = value
-        .chars()
-        .filter_map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | ':') {
-                Some(character)
-            } else if character.is_ascii_whitespace() {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .take(limit)
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "diagnostic".to_string()
-    } else {
-        sanitized
     }
 }
 
@@ -9300,262 +9270,6 @@ fn selected_line_count(selected: &str) -> usize {
     }
 }
 
-fn identifier_byte_range_at(text: &str, requested_byte: u64) -> Option<ByteRange> {
-    if text.is_empty() {
-        return None;
-    }
-
-    let mut index = usize::try_from(requested_byte).unwrap_or(usize::MAX);
-    index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    let bytes = text.as_bytes();
-    if index == bytes.len() && index > 0 {
-        index -= 1;
-    }
-    if index < bytes.len()
-        && !is_identifier_byte(bytes[index])
-        && index > 0
-        && is_identifier_byte(bytes[index - 1])
-    {
-        index -= 1;
-    }
-    if index >= bytes.len() || !is_identifier_byte(bytes[index]) {
-        return None;
-    }
-
-    let mut start = index;
-    while start > 0 && is_identifier_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-    let mut end = index + 1;
-    while end < bytes.len() && is_identifier_byte(bytes[end]) {
-        end += 1;
-    }
-    Some(ByteRange::new(start as u64, end as u64))
-}
-
-fn is_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-struct Phase4ContextAssemblyService;
-
-impl Phase4ContextAssemblyService {
-    #[allow(clippy::too_many_arguments)]
-    fn assemble_context_manifest(
-        context: &ActiveSaveContext,
-        run_id: &legion_protocol::AgentRunId,
-        provider_route_id: &str,
-        snapshot_id: legion_protocol::SnapshotId,
-        buffer_version: legion_protocol::BufferVersion,
-        snapshot_hash: FileFingerprint,
-        byte_len: u64,
-        line_count: u32,
-        generated_at: TimestampMillis,
-        instruction_manifest_items: Vec<legion_protocol::ContextManifestItem>,
-    ) -> legion_protocol::ContextManifestProjection {
-        let file_item = legion_protocol::ContextManifestItem {
-            item_id: format!("phase4:{}:file", run_id.0),
-            kind: legion_protocol::ContextManifestItemKind::File,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(context.workspace_id),
-            file_id: Some(context.metadata.identity.file_id),
-            buffer_id: Some(context.buffer_id),
-            proposal_id: None,
-            target_id: Some(context.metadata.identity.file_id.0.to_string()),
-            path: Some(context.metadata.identity.canonical_path.clone()),
-            ranges: Vec::new(),
-            counts: context
-                .metadata
-                .file_length
-                .map(|count| legion_protocol::ContextManifestItemCount {
-                    label: "file_bytes".to_string(),
-                    count: count.min(u32::MAX as u64) as u32,
-                })
-                .into_iter()
-                .collect(),
-            hashes: vec![context.metadata.fingerprint.clone()],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
-                state: legion_protocol::SemanticFreshnessState::Fresh,
-                freshness_key_present: true,
-                snapshot_id: Some(snapshot_id),
-                file_content_version: Some(context.metadata.file_content_version),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                content_hash: Some(context.metadata.fingerprint.clone()),
-                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-                observed_at: Some(generated_at),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            preconditions: None,
-            labels: vec!["phase4.context.file_metadata".to_string()],
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let buffer_item = legion_protocol::ContextManifestItem {
-            item_id: format!("phase4:{}:buffer", run_id.0),
-            kind: legion_protocol::ContextManifestItemKind::Buffer,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(context.workspace_id),
-            file_id: Some(context.metadata.identity.file_id),
-            buffer_id: Some(context.buffer_id),
-            proposal_id: None,
-            target_id: Some(context.buffer_id.0.to_string()),
-            path: None,
-            ranges: Vec::new(),
-            counts: vec![
-                legion_protocol::ContextManifestItemCount {
-                    label: "snapshot_bytes".to_string(),
-                    count: byte_len.min(u32::MAX as u64) as u32,
-                },
-                legion_protocol::ContextManifestItemCount {
-                    label: "lines".to_string(),
-                    count: line_count,
-                },
-            ],
-            hashes: vec![snapshot_hash],
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            freshness: Some(legion_protocol::ContextManifestFreshnessSummary {
-                state: legion_protocol::SemanticFreshnessState::Fresh,
-                freshness_key_present: true,
-                snapshot_id: Some(snapshot_id),
-                file_content_version: Some(context.metadata.file_content_version),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                content_hash: None,
-                privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-                observed_at: Some(generated_at),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            preconditions: Some(legion_protocol::ContextManifestPreconditionSummary {
-                file_content_version: Some(context.metadata.file_content_version),
-                buffer_version: Some(buffer_version),
-                snapshot_id: Some(snapshot_id),
-                workspace_generation: Some(context.metadata.workspace_generation),
-                expected_fingerprint: Some(context.metadata.fingerprint.clone()),
-                expected_file_length: context.metadata.file_length,
-                expected_modified_at: context.metadata.modified_at,
-                core_preconditions_present: true,
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                risk_reasons: Vec::new(),
-                schema_version: 1,
-            }),
-            labels: vec!["phase4.context.buffer_descriptor".to_string()],
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let route_item = Self::metadata_item(
-            format!("phase4:{}:provider-route", run_id.0),
-            legion_protocol::ContextManifestItemKind::ProviderRoute,
-            context.workspace_id,
-            provider_route_id,
-            legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            vec!["phase4.provider.local_loopback".to_string()],
-        );
-        let agent_item = Self::metadata_item(
-            format!("phase4:{}:agent-step", run_id.0),
-            legion_protocol::ContextManifestItemKind::AgentStep,
-            context.workspace_id,
-            &run_id.0,
-            legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            vec!["phase4.agent.proposal_only".to_string()],
-        );
-        let selection_item = Self::metadata_item(
-            format!("phase4:{}:selection", run_id.0),
-            legion_protocol::ContextManifestItemKind::UserSelection,
-            context.workspace_id,
-            "active-buffer",
-            legion_protocol::ContextManifestEgressStatus::LocalOnly,
-            vec!["phase4.selection.active_buffer".to_string()],
-        );
-
-        let permission = legion_protocol::ContextManifestPermissionSummary {
-            kind: legion_protocol::ContextManifestPermissionKind::ModelProvider,
-            capability: CapabilityId("ai.provider.invoke".to_string()),
-            principal: Some(context.principal.clone()),
-            decision_id: None,
-            granted: false,
-            privacy_scope: legion_protocol::SemanticPrivacyScope::MetadataOnly,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let manifest = legion_protocol::ContextManifestRecord {
-            manifest_id: format!("phase4:manifest:{}", run_id.0),
-            workspace_id: Some(context.workspace_id),
-            proposal_id: None,
-            purpose: legion_protocol::ContextManifestPurpose::ProviderRequest,
-            workspace_trust_state: Some(context.trust.clone()),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress: legion_protocol::ContextManifestEgressStatus::LocalProvider,
-            items: vec![file_item, buffer_item]
-                .into_iter()
-                .chain(instruction_manifest_items)
-                .chain(vec![selection_item, route_item, agent_item])
-                .collect(),
-            permissions: vec![permission],
-            omitted_item_count: 0,
-            stale_or_missing_metadata_risk_present: false,
-            generated_at,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        legion_protocol::ContextManifestProjection {
-            manifest,
-            selected_item_id: None,
-            generated_at,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }
-    }
-
-    fn metadata_item(
-        item_id: String,
-        kind: legion_protocol::ContextManifestItemKind,
-        workspace_id: WorkspaceId,
-        target_id: &str,
-        egress: legion_protocol::ContextManifestEgressStatus,
-        labels: Vec<String>,
-    ) -> legion_protocol::ContextManifestItem {
-        legion_protocol::ContextManifestItem {
-            item_id,
-            kind,
-            inclusion: legion_protocol::ContextManifestInclusionState::Included,
-            workspace_id: Some(workspace_id),
-            file_id: None,
-            buffer_id: None,
-            proposal_id: None,
-            target_id: Some(target_id.to_string()),
-            path: None,
-            ranges: Vec::new(),
-            counts: Vec::new(),
-            hashes: Vec::new(),
-            privacy_scope: Some(legion_protocol::SemanticPrivacyScope::MetadataOnly),
-            privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-            risk_label: legion_protocol::ProposalRiskLabel::Low,
-            egress,
-            freshness: None,
-            preconditions: None,
-            labels,
-            redaction_hints: vec![legion_protocol::RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct InstructionPrefixSource {
     source_label: String,
@@ -9764,6 +9478,140 @@ struct DeferredSaveSuccess {
     applied: legion_project::WorkspaceSaveApplied,
 }
 
+fn visual_navigation_position(
+    position: VisualNavigationPosition,
+) -> Result<TextPosition, AppCompositionError> {
+    let line = usize::try_from(position.line).map_err(|_| {
+        AppCompositionError::Editor(EditorError::InvalidEdit("visual line overflows usize"))
+    })?;
+    let column = usize::try_from(position.byte_column).map_err(|_| {
+        AppCompositionError::Editor(EditorError::InvalidEdit(
+            "visual byte column overflows usize",
+        ))
+    })?;
+    Ok(TextPosition::new(line, column))
+}
+
+fn visual_navigation_x(x: VisualNavigationX) -> Result<PreferredX, AppCompositionError> {
+    PreferredX::new(x.value).map_err(AppCompositionError::Editor)
+}
+
+fn visual_navigation_caret(
+    caret: VisualNavigationCaret,
+) -> Result<DirectedCaret, AppCompositionError> {
+    let head = visual_navigation_position(caret.head)?;
+    let anchor = caret.anchor.map(visual_navigation_position).transpose()?;
+    let preferred_x = caret.preferred_x.map(visual_navigation_x).transpose()?;
+    Ok(DirectedCaret {
+        head,
+        anchor,
+        affinity: caret.affinity,
+        preferred_x,
+    })
+}
+
+fn visual_navigation_row(row: VisualNavigationRow) -> Result<ShapedVisualRow, AppCompositionError> {
+    let stops = row
+        .stops
+        .into_iter()
+        .map(|stop| {
+            Ok(VerticalCaretStop {
+                position: visual_navigation_position(stop.position)?,
+                x: visual_navigation_x(stop.x)?,
+                affinity: stop.affinity,
+            })
+        })
+        .collect::<Result<Vec<_>, AppCompositionError>>()?;
+    Ok(ShapedVisualRow {
+        logical_line: row.logical_line,
+        row_index: row.row_index,
+        row_count: row.row_count,
+        start: visual_navigation_position(row.start)?,
+        end: visual_navigation_position(row.end)?,
+        stops,
+    })
+}
+
+fn visual_navigation_request(
+    request: &VisualNavigationRequest,
+) -> Result<VerticalMovementRequest, AppCompositionError> {
+    let layout_id = VerticalLayoutId::new(request.layout_id.0).ok_or(
+        AppCompositionError::Editor(EditorError::InvalidEdit("visual layout id must be nonzero")),
+    )?;
+    let expected_carets = request
+        .expected_carets
+        .clone()
+        .into_iter()
+        .map(visual_navigation_caret)
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_rows = request
+        .source_rows
+        .clone()
+        .into_iter()
+        .map(|source| {
+            Ok(VerticalSourceRow {
+                row: visual_navigation_row(source.row)?,
+                source_x: visual_navigation_x(source.source_x)?,
+            })
+        })
+        .collect::<Result<Vec<_>, AppCompositionError>>()?;
+    let target_rows = request
+        .target_rows
+        .clone()
+        .into_iter()
+        .map(visual_navigation_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    let direction = match request.direction {
+        VisualNavigationDirection::Up => VerticalDirection::Up,
+        VisualNavigationDirection::Down => VerticalDirection::Down,
+    };
+    Ok(VerticalMovementRequest {
+        expected_snapshot_id: request.expected_snapshot_id,
+        expected_buffer_version: request.expected_buffer_version,
+        expected_carets,
+        layout_id,
+        direction,
+        extend: request.extend,
+        source_rows,
+        target_rows,
+    })
+}
+
+fn visual_navigation_position_from_editor(
+    position: TextPosition,
+) -> Result<VisualNavigationPosition, AppCompositionError> {
+    Ok(VisualNavigationPosition {
+        line: u32::try_from(position.line).map_err(|_| {
+            AppCompositionError::Editor(EditorError::InvalidEdit(
+                "editor line overflows visual navigation DTO",
+            ))
+        })?,
+        byte_column: u64::try_from(position.column).map_err(|_| {
+            AppCompositionError::Editor(EditorError::InvalidEdit(
+                "editor byte column overflows visual navigation DTO",
+            ))
+        })?,
+    })
+}
+
+fn visual_navigation_x_from_editor(x: PreferredX) -> VisualNavigationX {
+    VisualNavigationX { value: x.get() }
+}
+
+fn visual_navigation_caret_from_editor(
+    caret: DirectedCaret,
+) -> Result<VisualNavigationCaret, AppCompositionError> {
+    Ok(VisualNavigationCaret {
+        head: visual_navigation_position_from_editor(caret.head)?,
+        anchor: caret
+            .anchor
+            .map(visual_navigation_position_from_editor)
+            .transpose()?,
+        affinity: caret.affinity,
+        preferred_x: caret.preferred_x.map(visual_navigation_x_from_editor),
+    })
+}
+
 #[derive(Debug, Clone)]
 enum ProposalMutationRollback {
     None,
@@ -9786,6 +9634,8 @@ pub enum AppCommandRequest {
     Noop,
     /// Command requested shell termination.
     Quit,
+    /// A Cloud Lane operation (P9.F3.T3).
+    CloudLane(cloud_lane_egress::CloudLaneRequest),
     /// Set the app-owned product mode.
     SetProductMode {
         /// Target product mode.
@@ -9807,6 +9657,64 @@ pub enum AppCommandRequest {
         buffer_id: BufferId,
         /// Editor edit in UI-projected text coordinates.
         edit: TextEdit,
+    },
+    /// Replace every directed caret range through editor authority.
+    ReplaceDirectedCarets {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Replacement or insertion payload.
+        text: String,
+    },
+    /// Delete each directed caret's selection or adjacent grapheme cluster.
+    DeleteDirectedCarets {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Delete toward the document start when true; otherwise toward the end.
+        backward: bool,
+    },
+    /// Set a directed pointer selection while preserving anchor/head order.
+    SetDirectedSelection {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Fixed selection anchor.
+        anchor: TextCoordinate,
+        /// Current selection head.
+        head: TextCoordinate,
+    },
+    /// Place a visual cursor with stale-layout protection and wrap-side affinity.
+    SetVisualCursor {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Layout snapshot identity.
+        expected_snapshot_id: SnapshotId,
+        /// Layout buffer version.
+        expected_buffer_version: BufferVersion,
+        /// Cursor coordinate from projection space.
+        cursor: TextCoordinate,
+        /// Rendered wrap-side affinity.
+        affinity: CaretAffinity,
+    },
+    /// Place a visual directed selection with stale-layout protection.
+    SetVisualDirectedSelection {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Layout snapshot identity.
+        expected_snapshot_id: SnapshotId,
+        /// Layout buffer version.
+        expected_buffer_version: BufferVersion,
+        /// Fixed selection anchor.
+        anchor: TextCoordinate,
+        /// Current selection head.
+        head: TextCoordinate,
+        /// Rendered wrap-side affinity for the head.
+        head_affinity: CaretAffinity,
+    },
+    /// Move every ordered caret through app-owned shaped visual-row facts.
+    MoveVertically {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Renderer-shaped vertical movement request.
+        request: VisualNavigationRequest,
     },
     /// Copy the current selection and return metadata-only clipboard evidence.
     ClipboardCopy {
@@ -9861,6 +9769,24 @@ pub enum AppCommandRequest {
         /// Selection range from UI projection space.
         range: legion_protocol::ProtocolTextRange,
     },
+    /// Move every active caret to a semantic line/document boundary.
+    MoveToBoundary {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Requested boundary.
+        boundary: legion_ui::EditorBoundaryKind,
+        /// Extend the directed selections.
+        extend: bool,
+    },
+    /// Move every active caret one grapheme boundary horizontally.
+    MoveHorizontally {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Move toward the document start when true, otherwise toward the end.
+        left: bool,
+        /// Extend the directed selections.
+        extend: bool,
+    },
     /// Update viewport scroll state for a buffer.
     SetViewportScroll {
         /// Target buffer identifier.
@@ -9909,6 +9835,17 @@ pub enum AppCommandRequest {
     },
     /// Open the app-owned Settings projection.
     OpenSettings,
+    /// Open the Help/About projection.
+    OpenAbout,
+    /// Export a metadata-only support bundle through [`crate::diagnostics::SupportBundleAssembler`].
+    ExportSupportBundle,
+    /// Attach an optional local ACP adapter host for delegated proposal work.
+    AttachAcpHost {
+        /// Executable or program path.
+        program: String,
+        /// Arguments passed to the local adapter host.
+        args: Vec<String>,
+    },
     /// Update the app-owned theme preference.
     SetThemePreference {
         /// Requested theme preference.
@@ -10039,6 +9976,18 @@ pub enum AppCommandRequest {
     StageGitHunk {
         /// Projected hunk identifier.
         hunk_id: String,
+    },
+    /// Stage the hunk currently focused in the Git review surface.
+    StageFocusedGitHunk,
+    /// Stage every change to one path, hunk or not.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
     },
     /// Unstage one cached git hunk by projected hunk id.
     UnstageGitHunk {
@@ -10199,6 +10148,28 @@ pub enum AppCommandRequest {
         /// Cursor position.
         position: TextCoordinate,
     },
+    /// Resolve the symbol under the caret for call hierarchy, without asking a
+    /// direction yet.
+    PrepareCallHierarchy {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callers of the symbol under the caret.
+    ShowIncomingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callees of the symbol under the caret.
+    ShowOutgoingCalls {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// Cursor position.
+        position: TextCoordinate,
+    },
     /// Refresh the active document outline through app-owned language tooling.
     RefreshOutline {
         /// Target buffer identifier.
@@ -10238,6 +10209,20 @@ pub enum AppCommandRequest {
         /// Target buffer identifier.
         buffer_id: BufferId,
         /// Code-action identifier selected from projection data.
+        action_id: String,
+    },
+    /// Request bounded metadata for all code actions in a document range.
+    RequestCodeActions {
+        /// Target buffer identifier.
+        buffer_id: BufferId,
+        /// UTF-16 range supplied to the language server.
+        range: ProtocolTextRange,
+    },
+    /// Select an opaque candidate from a previously projected response.
+    SelectCodeAction {
+        /// Response-scoped identity.
+        response_id: String,
+        /// Candidate token scoped to the response.
         action_id: String,
     },
     /// Activate a projected language code lens through app authority.
@@ -10481,6 +10466,8 @@ pub enum AppCommandRequest {
         /// Metadata-only label for audit and bounded output.
         metadata_label: String,
     },
+    /// Extension catalog lifecycle operation (P7.F2).
+    ExtensionCatalog(extension_management::ExtensionCatalogRequest),
     /// Join a collaboration session through app-owned composition.
     JoinCollaborationSession {
         /// Session identifier selected from projection data.
@@ -10502,6 +10489,17 @@ pub enum AppCommandRequest {
     LspStartSession,
     /// Restart the language server session, resetting the circuit breaker (PKT-LSP-C T1/T3).
     LspRestartSession,
+    /// Explicitly configure the local TypeScript toolchain.
+    ConfigureTypeScriptToolchain {
+        /// Local TypeScript language-server archive.
+        server_archive: PathBuf,
+        /// Local TypeScript compiler archive.
+        compiler_archive: PathBuf,
+        /// Explicit Node executable.
+        node_executable: PathBuf,
+    },
+    /// Clear the local TypeScript toolchain configuration.
+    ClearTypeScriptToolchain,
 }
 
 /// Minimal editor command port used by app command routing.
@@ -10512,6 +10510,20 @@ pub trait AppEditorCommandPort {
         buffer_id: BufferId,
         edit: TextEdit,
     ) -> Result<TextTransactionDescriptor, AppCompositionError>;
+
+    /// Replace every directed caret range through editor authority.
+    fn replace_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        text: String,
+    ) -> Result<TextTransactionDescriptor, AppCompositionError>;
+
+    /// Delete each directed caret's selection or adjacent grapheme cluster.
+    fn delete_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        backward: bool,
+    ) -> Result<Option<TextTransactionDescriptor>, AppCompositionError>;
 
     /// Undo a buffer through editor authority.
     fn undo(
@@ -10535,6 +10547,33 @@ impl AppEditorCommandPort for EditorEngine {
         let record =
             EditorEngine::apply_edit(self, buffer_id, edit, TransactionSource::User, None, None)?;
         Ok(record.to_protocol_descriptor())
+    }
+
+    fn replace_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        text: String,
+    ) -> Result<TextTransactionDescriptor, AppCompositionError> {
+        Ok(
+            EditorEngine::replace_directed_carets(self, buffer_id, text, None)?
+                .to_protocol_descriptor(),
+        )
+    }
+
+    fn delete_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        backward: bool,
+    ) -> Result<Option<TextTransactionDescriptor>, AppCompositionError> {
+        let direction = if backward {
+            legion_editor::DeleteDirection::Backward
+        } else {
+            legion_editor::DeleteDirection::Forward
+        };
+        Ok(
+            EditorEngine::delete_directed_carets(self, buffer_id, direction, None)?
+                .map(|record| record.to_protocol_descriptor()),
+        )
     }
 
     fn undo(
@@ -10677,6 +10716,24 @@ impl CommandExecutionService {
                     editor.apply_edit(*buffer_id, edit.clone())?,
                 )))
             }
+            AppCommandRequest::ReplaceDirectedCarets { buffer_id, text } => {
+                state.ensure_active_buffer(*buffer_id)?;
+                Ok(Some(AppCommandOutcome::Edited(
+                    editor.replace_directed_carets(*buffer_id, text.clone())?,
+                )))
+            }
+            AppCommandRequest::DeleteDirectedCarets {
+                buffer_id,
+                backward,
+            } => {
+                state.ensure_active_buffer(*buffer_id)?;
+                Ok(Some(
+                    match editor.delete_directed_carets(*buffer_id, *backward)? {
+                        Some(descriptor) => AppCommandOutcome::Edited(descriptor),
+                        None => AppCommandOutcome::Noop,
+                    },
+                ))
+            }
             AppCommandRequest::Save { .. }
             | AppCommandRequest::ClipboardCopy { .. }
             | AppCommandRequest::ClipboardCut { .. }
@@ -10688,6 +10745,12 @@ impl CommandExecutionService {
             | AppCommandRequest::SaveAll
             | AppCommandRequest::SetCursor { .. }
             | AppCommandRequest::SetSelection { .. }
+            | AppCommandRequest::MoveToBoundary { .. }
+            | AppCommandRequest::MoveHorizontally { .. }
+            | AppCommandRequest::SetDirectedSelection { .. }
+            | AppCommandRequest::SetVisualCursor { .. }
+            | AppCommandRequest::SetVisualDirectedSelection { .. }
+            | AppCommandRequest::MoveVertically { .. }
             | AppCommandRequest::SetViewportScroll { .. }
             | AppCommandRequest::OpenPalette { .. }
             | AppCommandRequest::ClosePalette
@@ -10698,6 +10761,9 @@ impl CommandExecutionService {
             | AppCommandRequest::ConfirmPaletteSelection { .. }
             | AppCommandRequest::CancelPaletteConfirmation { .. }
             | AppCommandRequest::OpenSettings
+            | AppCommandRequest::OpenAbout
+            | AppCommandRequest::ExportSupportBundle
+            | AppCommandRequest::AttachAcpHost { .. }
             | AppCommandRequest::SetThemePreference { .. }
             | AppCommandRequest::SetZoomPercent { .. }
             | AppCommandRequest::SetEditorFontSize { .. }
@@ -10721,7 +10787,10 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelSearch { .. }
             | AppCommandRequest::RefreshGit
             | AppCommandRequest::StageGitHunk { .. }
+            | AppCommandRequest::StageFocusedGitHunk
             | AppCommandRequest::UnstageGitHunk { .. }
+            | AppCommandRequest::StageGitPath { .. }
+            | AppCommandRequest::UnstageGitPath { .. }
             | AppCommandRequest::ResolveGitConflict { .. }
             | AppCommandRequest::CommitGitChanges { .. }
             | AppCommandRequest::SwitchGitBranch { .. }
@@ -10765,6 +10834,9 @@ impl CommandExecutionService {
             | AppCommandRequest::CancelAssistInlinePrediction { .. }
             | AppCommandRequest::GoToDefinition { .. }
             | AppCommandRequest::FindReferences { .. }
+            | AppCommandRequest::PrepareCallHierarchy { .. }
+            | AppCommandRequest::ShowIncomingCalls { .. }
+            | AppCommandRequest::ShowOutgoingCalls { .. }
             | AppCommandRequest::RefreshOutline { .. }
             | AppCommandRequest::RefreshInlayHints { .. }
             | AppCommandRequest::RefreshCodeLenses { .. }
@@ -10772,6 +10844,8 @@ impl CommandExecutionService {
             | AppCommandRequest::RequestRenameProposal { .. }
             | AppCommandRequest::RequestOrganizeImportsProposal { .. }
             | AppCommandRequest::RequestCodeActionProposal { .. }
+            | AppCommandRequest::RequestCodeActions { .. }
+            | AppCommandRequest::SelectCodeAction { .. }
             | AppCommandRequest::ActivateLanguageCodeLens { .. }
             | AppCommandRequest::CancelLanguageOperation { .. }
             | AppCommandRequest::TerminalLaunch { .. }
@@ -10797,11 +10871,15 @@ impl CommandExecutionService {
             | AppCommandRequest::ReplayAiRun { .. }
             | AppCommandRequest::InspectAiRun { .. }
             | AppCommandRequest::InvokePluginCommand { .. }
+            | AppCommandRequest::ExtensionCatalog(_)
+            | AppCommandRequest::CloudLane(_)
             | AppCommandRequest::JoinCollaborationSession { .. }
             | AppCommandRequest::LeaveCollaborationSession { .. }
             | AppCommandRequest::PublishCollaborationPresence { .. }
             | AppCommandRequest::LspStartSession
-            | AppCommandRequest::LspRestartSession => Ok(None),
+            | AppCommandRequest::LspRestartSession
+            | AppCommandRequest::ConfigureTypeScriptToolchain { .. }
+            | AppCommandRequest::ClearTypeScriptToolchain => Ok(None),
             AppCommandRequest::RefreshExplorer => {
                 let workspace_id = state.require_workspace_id()?;
                 let tree = workspace.tree_snapshot(workspace_id)?;
@@ -11520,10 +11598,20 @@ fn semantic_kind_for_scope_stack(scope_stack: &ScopeStack) -> Option<ViewportSem
 struct ProjectionBuilder;
 
 impl ProjectionBuilder {
+    fn apply_line_wrapping_policy(
+        viewport: &mut ViewportProjection,
+        settings: &SettingsProjection,
+    ) {
+        let settings = settings.clone().normalized();
+        viewport.line_wrapping_policy = settings.editor.line_wrapping_policy;
+        viewport.wrap_column = settings.editor.wrap_column;
+    }
+
     fn active_buffer_projection(
         active: &ActiveDocumentController,
         editor: &EditorEngine,
         layout: &ShellLayoutProjection,
+        settings: &SettingsProjection,
     ) -> Result<ActiveBufferProjection, AppCompositionError> {
         let Some(buffer_id) = active.active_buffer_id else {
             return Ok(ActiveBufferProjection::empty());
@@ -11540,6 +11628,9 @@ impl ProjectionBuilder {
 
         let active_text = editor.text(buffer_id).ok();
         let mut viewport = editor.viewport_projection(request).ok();
+        if let Some(viewport) = &mut viewport {
+            Self::apply_line_wrapping_policy(viewport, settings);
+        }
         if let (Some(viewport), Some(path)) = (&mut viewport, active.active_file_path.as_deref()) {
             add_semantic_token_overlays(path, active_text, viewport);
         }
@@ -11590,6 +11681,18 @@ impl ProjectionBuilder {
                 file_id: node.identity.file_id,
                 canonical_path: node.identity.canonical_path,
                 name: node.name,
+                // A node with children is a directory whether or not metadata
+                // arrived, and metadata is the authority when it did. Nodes
+                // with neither are treated as files, which is the safe default:
+                // opening one either succeeds or surfaces a read error, where
+                // mis-classifying a file as a directory would silently make it
+                // unopenable with no error to point at.
+                is_directory: node
+                    .metadata
+                    .as_ref()
+                    .map_or(!node.children.is_empty(), |metadata| {
+                        matches!(metadata.kind, FileKind::Directory)
+                    }),
                 children: node.children,
             })
             .collect();
@@ -11882,6 +11985,10 @@ fn capture_workspace_session_record(
         }],
         layout_splits: Vec::new(),
         explorer_expansion: Vec::new(),
+        // Renderer-owned, like explorer expansion: the app builds the record,
+        // the desktop adapter fills these in before it writes.
+        canvas_nodes: Vec::new(),
+        canvas_edges: Vec::new(),
         panel_state: SessionPanelState {
             bottom_visible: false,
             side_visible: true,
@@ -11891,6 +11998,7 @@ fn capture_workspace_session_record(
         },
         dock_layouts: Vec::new(),
         workbench_settings: WorkbenchSettingsRecord::default(),
+        language_toolchain_settings: LanguageToolchainSettingsRecord::default(),
         memory_snapshot_json: None,
         dirty_indicators,
         saved_at: TimestampMillis::now(),
@@ -12756,92 +12864,6 @@ fn command_descriptor(input: AppCommandDescriptorInput<'_>) -> legion_protocol::
     }
 }
 
-fn phase4_provider_capability(
-    provider_class: legion_protocol::AssistedAiProviderClass,
-    refusal: Option<legion_protocol::AssistedAiRefusalMetadata>,
-) -> legion_protocol::AssistedAiProviderCapability {
-    legion_protocol::AssistedAiProviderCapability {
-        provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-        provider_label: "Deterministic local provider".to_string(),
-        provider_class,
-        supported_operations: vec![
-            legion_protocol::AssistedAiOperationClass::Explain,
-            legion_protocol::AssistedAiOperationClass::ProposeEdit,
-        ],
-        model_capability_labels: vec!["deterministic".to_string()],
-        tool_capability_labels: Vec::new(),
-        context_window_label: "small".to_string(),
-        cost_budget_label: "local.free".to_string(),
-        risk_budget_label: "low".to_string(),
-        privacy_retention_label: "metadata-only".to_string(),
-        byok_support: legion_protocol::AssistedAiSupportLabel::Unsupported,
-        local_execution_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        offline_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        air_gap_support: legion_protocol::AssistedAiSupportLabel::Supported,
-        redaction_requirements: vec!["metadata-only".to_string()],
-        consent_requirements: vec!["proposal-review".to_string()],
-        availability: if refusal.is_some() {
-            legion_protocol::AssistedAiProviderAvailabilityState::Refused
-        } else {
-            legion_protocol::AssistedAiProviderAvailabilityState::Available
-        },
-        refusal,
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    }
-}
-
-fn phase4_permission_budget_projection(
-    context_manifest: &legion_protocol::ContextManifestProjection,
-    run_id: &legion_protocol::AgentRunId,
-    generated_at: TimestampMillis,
-) -> legion_protocol::PermissionBudgetProjection {
-    let budget = legion_protocol::PermissionBudgetContract {
-        budget_id: format!("phase4:budget:{}", run_id.0),
-        action_class: legion_protocol::PermissionBudgetActionClass::InvokeProvider,
-        capability: Some(CapabilityId("ai.provider.invoke".to_string())),
-        state: legion_protocol::PermissionBudgetState::Allowed,
-        privacy_scope: legion_protocol::SemanticPrivacyScope::MetadataOnly,
-        usage: legion_protocol::PermissionBudgetUsageSummary {
-            unit_label: "calls".to_string(),
-            used: 0,
-            ceiling: Some(1),
-            remaining: Some(1),
-            attempted: 0,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        },
-        reset_policy_label: legion_protocol::PermissionBudgetResetPolicyLabel::Session,
-        consent_requirement_label:
-            legion_protocol::PermissionBudgetConsentRequirementLabel::NotRequired,
-        risk_label: legion_protocol::ProposalRiskLabel::Low,
-        reasons: vec!["phase4.local_provider.budget_allowed".to_string()],
-        redaction_hints: vec![RedactionHint::MetadataOnly],
-        schema_version: 1,
-    };
-    let action = legion_protocol::permission_budget_action_from_permission_summary(
-        &context_manifest.manifest.permissions[0],
-        format!("phase4:budget-action:{}", run_id.0),
-        legion_protocol::PermissionBudgetActionClass::InvokeProvider,
-        context_manifest.manifest.workspace_id,
-        context_manifest.manifest.proposal_id,
-        1,
-    );
-    let evaluation = legion_protocol::evaluate_permission_budget(
-        &budget,
-        action,
-        format!("phase4:budget-eval:{}", run_id.0),
-        1,
-    );
-    legion_protocol::permission_budget_projection_from_contracts(
-        format!("phase4:permission-budget:{}", run_id.0),
-        vec![budget],
-        vec![evaluation],
-        generated_at,
-        1,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn assisted_ai_request_contract_from_metadata(
     request_id: String,
@@ -12920,6 +12942,8 @@ pub struct AppClipboardUpdate {
 /// Result of routing a UI command intent through application-owned services.
 #[derive(Debug, Clone)]
 pub enum AppCommandOutcome {
+    /// A Cloud Lane task was cancelled mid-flight (P9.F3.T3).
+    CloudLaneTaskCancelled(Box<LegionCloudLaneTaskStatus>),
     /// Vim modal editing state changed; carries the mode to display, or
     /// `None` when modal editing is off.
     VimModeChanged(Option<legion_ui::EditorInputMode>),
@@ -12962,7 +12986,8 @@ pub enum AppCommandOutcome {
     /// Test explorer projection changed.
     TestExplorerUpdated(TestExplorerProjection),
     /// Language tooling projection changed.
-    LanguageToolingUpdated(LanguageToolingProjection),
+    /// Boxed; construct through [`AppCommandOutcome::language_tooling`].
+    LanguageToolingUpdated(Box<LanguageToolingProjection>),
     /// Assist inline prediction projection changed.
     AssistInlinePredictionUpdated(AssistInlinePredictionProjection),
     /// Terminal panel projection changed.
@@ -12985,6 +13010,8 @@ pub enum AppCommandOutcome {
     AiRunInspected(Box<AppAiInspectionSnapshot>),
     /// Phase 5 plugin command was invoked through app-owned plugin composition.
     PluginCommandInvoked(Box<PluginHostCallResponse>),
+    /// Extension catalog changed through app-owned extension authority (P7.F2).
+    ExtensionCatalogChanged(extension_management::ExtensionCatalogChange),
     /// Collaboration session was joined through app-owned composition.
     CollaborationSessionJoined(CollaborationSessionId),
     /// Collaboration session was left through app-owned composition.
@@ -13009,6 +13036,10 @@ pub enum AppCommandOutcome {
     LocalHistoryEntriesUpdated(Vec<legion_ui::LocalHistoryEntryProjection>),
     /// Worktree state evidence was exported; contains the absolute path to the written file.
     WorktreeEvidenceExported(String),
+    /// Help/About overlay should open.
+    AboutOpened,
+    /// Metadata-only support bundle was written; contains the absolute path.
+    SupportBundleExported(String),
 }
 
 /// Per-buffer save-all result.
@@ -13206,8 +13237,34 @@ struct Phase4ProjectionState {
     approval_checklist_projection: Option<legion_protocol::ProposalApprovalChecklistProjection>,
     checkpoint_rollback_projection: Option<legion_protocol::CheckpointRollbackProjection>,
     assisted_ai_projection: Option<legion_protocol::AssistedAiProjection>,
+    /// The trust projections a Phase 4 run built, keyed by its proposal.
+    ///
+    /// The selected-proposal path reconstructs these generically from the
+    /// proposal row, and that reconstruction cannot know what route produced the
+    /// proposal -- it hard-codes `NotRequired` consent. A remote run's consent
+    /// refusal was therefore computed, linked to the proposal, and then replaced
+    /// on the one path that renders. Keeping what the run actually built means a
+    /// reviewer reads the run's own answer rather than a plausible one.
+    phase4_trust_by_proposal: HashMap<ProposalId, Box<SelectedProposalTrustProjections>>,
+    /// Terminal Delegate route records whose write has not succeeded yet.
+    ///
+    /// The background result that carries the ending is consumed once, so a
+    /// failed write left the route recorded as `Streaming` for good -- the
+    /// audit trail permanently unable to say whether a remote turn had
+    /// finished. Kept here and retried on the next poll instead.
+    pending_route_audits: Vec<PendingRouteAudit>,
     replay_manifests: HashMap<legion_protocol::AgentRunId, legion_protocol::AgentReplayManifest>,
     inspection_snapshots: HashMap<legion_protocol::AgentRunId, AppAiInspectionSnapshot>,
+}
+
+/// A terminal route record still owed to the audit trail.
+#[derive(Debug, Clone)]
+struct PendingRouteAudit {
+    run_id: legion_protocol::AgentRunId,
+    route_id: String,
+    state: legion_protocol::AssistedAiProviderInvocationState,
+    outcome_label: &'static str,
+    event_context: EventContext,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -13307,124 +13364,6 @@ fn build_structural_search_projection(
         proposal_id: input.proposal_id,
         generated_at: TimestampMillis::now(),
         schema_version: 1,
-    }
-}
-
-fn git_projection_from_project(snapshot: ProjectGitSnapshot) -> GitProjection {
-    GitProjection {
-        root_label: Some(snapshot.root.0),
-        branch_label: snapshot.branch_label,
-        head_short: snapshot.head_short,
-        remote_url: snapshot.remote_url,
-        remote_default_branch: snapshot.remote_default_branch,
-        changed_files: snapshot
-            .changed_files
-            .into_iter()
-            .map(|file| GitFileProjection {
-                path: file.path,
-                status: file.status,
-                inserted_lines: file.inserted_lines,
-                deleted_lines: file.deleted_lines,
-                unstaged_hunk_count: file.unstaged_hunk_count,
-                staged_hunk_count: file.staged_hunk_count,
-                stageable: file.stageable,
-                diff_strategy: git_diff_strategy_projection(file.diff_strategy),
-                fallback_reason: file.fallback_reason,
-                conflict: file.conflict,
-            })
-            .collect(),
-        hunks: snapshot
-            .hunks
-            .into_iter()
-            .map(|hunk| GitHunkProjection {
-                hunk_id: hunk.hunk_id,
-                path: hunk.path,
-                stage: git_hunk_stage_projection(hunk.stage),
-                header: hunk.header,
-                old_start: hunk.old_start,
-                old_lines: hunk.old_lines,
-                new_start: hunk.new_start,
-                new_lines: hunk.new_lines,
-                added_lines: hunk.added_lines,
-                deleted_lines: hunk.deleted_lines,
-                context: hunk.context,
-            })
-            .collect(),
-        blame_lines: snapshot
-            .blame_lines
-            .into_iter()
-            .map(|line| GitBlameLineProjection {
-                path: line.path,
-                line_number: line.line_number,
-                commit_short: line.commit_short,
-                author: line.author,
-                summary: line.summary,
-                line_preview: line.line_preview,
-            })
-            .collect(),
-        commits: snapshot
-            .commits
-            .into_iter()
-            .map(|commit| GitCommitProjection {
-                hash: commit.hash,
-                short_hash: commit.short_hash,
-                author: commit.author,
-                date: commit.date,
-                summary: commit.summary,
-                parent_count: commit.parent_count,
-                refs: commit.refs,
-            })
-            .collect(),
-        conflicts: snapshot
-            .conflicts
-            .into_iter()
-            .map(|conflict| GitConflictProjection {
-                path: conflict.path,
-                marker_count: conflict.marker_count,
-                actions: conflict.actions,
-            })
-            .collect(),
-        worktrees: snapshot
-            .worktrees
-            .into_iter()
-            .map(|worktree| GitWorktreeProjection {
-                path: worktree.path,
-                branch_label: worktree.branch_label,
-                head_short: worktree.head_short,
-                kind: match worktree.kind {
-                    legion_project::ProjectGitWorktreeKind::Agent => {
-                        GitWorktreeKindProjection::Agent
-                    }
-                    legion_project::ProjectGitWorktreeKind::Manual => {
-                        GitWorktreeKindProjection::Manual
-                    }
-                },
-                prunable: worktree.prunable,
-            })
-            .collect(),
-        diagnostics: snapshot.diagnostics,
-        generated_at: snapshot.generated_at,
-        schema_version: snapshot.schema_version,
-        // Navigation state and local history entries are injected at the app layer after build.
-        focused_hunk_id: None,
-        commit_validation_warnings: Vec::new(),
-        commit_validation_errors: Vec::new(),
-        local_history_entries: Vec::new(),
-        remote_policy_audit: Vec::new(),
-    }
-}
-
-fn git_diff_strategy_projection(strategy: GitDiffStrategy) -> GitDiffStrategyProjection {
-    match strategy {
-        GitDiffStrategy::Syntactic => GitDiffStrategyProjection::Syntactic,
-        GitDiffStrategy::LineFallback => GitDiffStrategyProjection::LineFallback,
-    }
-}
-
-fn git_hunk_stage_projection(stage: GitHunkStage) -> GitHunkStageProjection {
-    match stage {
-        GitHunkStage::Unstaged => GitHunkStageProjection::Unstaged,
-        GitHunkStage::Staged => GitHunkStageProjection::Staged,
     }
 }
 
@@ -13743,6 +13682,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "git-stage-focused-hunk",
+            title: "Git: Stage Focused Hunk",
+            detail: "Stage the currently focused unstaged hunk",
+            shortcut_label: Some("Ctrl+Shift+G"),
+        },
+        PaletteCommandSpec {
             id: "git-switch-branch",
             title: "Git: Switch Branch",
             detail: "Switch to another Git branch",
@@ -13823,6 +13768,12 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             shortcut_label: None,
         },
         PaletteCommandSpec {
+            id: "acp-attach-host",
+            title: "ACP: Attach Host",
+            detail: "Attach an optional local ACP adapter bridge",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
             id: "close-palette",
             title: "Close Command Palette",
             detail: "Close the command palette",
@@ -13832,6 +13783,18 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             id: "preferences-open",
             title: "Preferences: Open Settings",
             detail: "Open Settings",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "help-about",
+            title: "Help: About",
+            detail: "Show version, license, and privacy posture",
+            shortcut_label: None,
+        },
+        PaletteCommandSpec {
+            id: "help-export-support-bundle",
+            title: "Help: Export Support Bundle",
+            detail: "Write a metadata-only support bundle to .legion/",
             shortcut_label: None,
         },
         PaletteCommandSpec {
@@ -13877,6 +13840,30 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             detail: "Restart the language server",
             shortcut_label: None,
         },
+        PaletteCommandSpec {
+            id: "language-format",
+            title: "Language: Format Document",
+            detail: "Create a formatting proposal preview",
+            shortcut_label: Some("Shift+Alt+F"),
+        },
+        PaletteCommandSpec {
+            id: "language-rename",
+            title: "Language: Rename Symbol",
+            detail: "Enter a new name and create a proposal preview",
+            shortcut_label: Some("F2"),
+        },
+        PaletteCommandSpec {
+            id: "language-organize-imports",
+            title: "Language: Organize Imports",
+            detail: "Create an organize-imports proposal preview",
+            shortcut_label: Some("Ctrl+Shift+O"),
+        },
+        PaletteCommandSpec {
+            id: "language-code-action",
+            title: "Language: Code Action",
+            detail: "Request code actions for the current selection",
+            shortcut_label: None,
+        },
     ]
 }
 
@@ -13885,12 +13872,14 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "save-all" => Some(CommandDispatchIntent::SaveAll),
         "refresh-explorer" => Some(CommandDispatchIntent::RefreshExplorer),
         "refresh-git" => Some(CommandDispatchIntent::RefreshGit),
+        "git-stage-focused-hunk" => Some(CommandDispatchIntent::StageFocusedGitHunk),
         "refresh-tests" => Some(CommandDispatchIntent::RefreshTestExplorer),
         "run-test" => None, // requires item id via :test-run <id>
         "git-switch-branch" => None,
         "git-create-branch" => None,
         "git-delete-branch" => None,
         "git-stash" => None,
+        "acp-attach-host" => None,
         "git-push" => Some(CommandDispatchIntent::PushGitRemote {
             remote: "origin".to_string(),
         }),
@@ -13907,6 +13896,8 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         "git-export-evidence" => Some(CommandDispatchIntent::ExportWorktreeEvidence),
         "close-palette" => Some(CommandDispatchIntent::ClosePalette),
         "preferences-open" => Some(CommandDispatchIntent::OpenSettings),
+        "help-about" => Some(CommandDispatchIntent::OpenAbout),
+        "help-export-support-bundle" => Some(CommandDispatchIntent::ExportSupportBundle),
         "preferences-theme-dark" => Some(CommandDispatchIntent::SetThemePreference {
             preference: ThemePreferenceProjection::Dark,
         }),
@@ -13923,6 +13914,10 @@ fn palette_command_intent(command_id: &str) -> Option<CommandDispatchIntent> {
         // PKT-LSP-C T1: language server lifecycle palette commands.
         "lsp-start-session" => Some(CommandDispatchIntent::LspStartSession),
         "lsp-restart-session" => Some(CommandDispatchIntent::LspRestartSession),
+        "language-format"
+        | "language-rename"
+        | "language-organize-imports"
+        | "language-code-action" => None,
         _ => None,
     }
 }
@@ -14426,6 +14421,58 @@ impl LegionCloudLaneComposition {
         Ok(status)
     }
 
+    fn cancel_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        reason_label: &str,
+        event_sequence: EventSequence,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        if !self.runtime_enabled {
+            return Err(AppCompositionError::Remote(
+                "cloud lane runtime disabled by app policy".to_string(),
+            ));
+        }
+        if reason_label.trim().is_empty() {
+            return Err(AppCompositionError::Remote(
+                "cloud lane cancellation reason must be non-empty".to_string(),
+            ));
+        }
+        let Some(row) = self.rows.iter_mut().find(|row| row.task_id == *task_id) else {
+            return Err(AppCompositionError::Remote(format!(
+                "cloud lane task {} is not tracked",
+                task_id.0
+            )));
+        };
+        // Terminal states are not cancellable, and saying so is the point: a
+        // cancel that silently "succeeds" against a finished upload tells the
+        // user their data was withheld when it has already left.
+        if matches!(
+            row.state,
+            LegionCloudLaneTaskState::Completed
+                | LegionCloudLaneTaskState::Failed
+                | LegionCloudLaneTaskState::Cancelled
+        ) {
+            return Err(AppCompositionError::Remote(format!(
+                "cloud lane task {} is already {:?} and cannot be cancelled",
+                task_id.0, row.state
+            )));
+        }
+        row.state = LegionCloudLaneTaskState::Cancelled;
+        row.status_label = format!("cancelled: {reason_label}");
+        Ok(LegionCloudLaneTaskStatus {
+            task_id: task_id.clone(),
+            state: LegionCloudLaneTaskState::Cancelled,
+            status_label: row.status_label.clone(),
+            estimated_cost_cents: row.estimated_cost_cents,
+            billed_cost_cents: row.billed_cost_cents,
+            queue_position: None,
+            event_sequence,
+            generated_at: TimestampMillis::now(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        })
+    }
+
     fn projection(&self, generated_at: TimestampMillis) -> LegionCloudLaneProjection {
         let mut rows = self.rows.clone();
         rows.sort_by_key(|row| row.task_id.0.clone());
@@ -14608,9 +14655,16 @@ pub struct LspDebounceEvent {
     pub kind: LspDebounceKind,
 }
 
+/// Maximum characters of a Delegate chat prompt that reach app authority.
+///
+/// Exported so the renderer's composer caps at the same number; the two used to
+/// disagree (4096 in the field, 240 here) and the difference vanished without a
+/// word.
+pub const DELEGATE_CHAT_PROMPT_MAX_CHARS: usize = 240;
+
 /// Root application composition.
 pub struct AppComposition {
-    workspace: WorkspaceActor,
+    workspace: Arc<WorkspaceActor>,
     editor: EditorEngine,
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
@@ -14623,6 +14677,20 @@ pub struct AppComposition {
     live_product_ai_stream: Arc<LiveProductAiStreamSink>,
     /// Live Assist proposal awaiting worker completion (registered on poll).
     pending_assist_proposal: Option<PendingAssistProposalJob>,
+    /// Set when a running inline prediction has been cancelled.
+    ///
+    /// The worker cannot be interrupted -- the provider client is blocking --
+    /// but it can be told that nobody wants its answer, so it releases nothing
+    /// and publishes nothing when it finally returns.
+    pending_inline_prediction_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The inline prediction request a worker thread is currently running.
+    ///
+    /// Kept so that a worker returning nothing -- an unreachable provider, an
+    /// empty completion -- can still be answered with the deterministic
+    /// prediction, on the app thread, rather than leaving the request with no
+    /// result at all. The synchronous path used to fall through to that fixture
+    /// itself; moving the live call to a worker moved the fallback with it.
+    pending_inline_prediction: Option<InlinePredictionRequestMetadata>,
     palette: PaletteState,
     settings: SettingsProjection,
     correlation_generator: CorrelationGenerator,
@@ -14640,6 +14708,7 @@ pub struct AppComposition {
     assist_inline_prediction_state: AssistInlinePredictionState,
     plugin_runtime: PluginRuntimeHost,
     plugin_contribution_projections: Vec<PluginContributionProjection>,
+    extension_catalog: extension_management::ExtensionCatalog,
     collaboration: CollaborationComposition,
     remote: RemoteComposition,
     legion_cloud_lane: LegionCloudLaneComposition,
@@ -14660,6 +14729,21 @@ pub struct AppComposition {
     injected_delegated_spawn_failure: bool,
     #[cfg(any(test, feature = "test-helpers"))]
     injected_assist_spawn_failure: bool,
+    /// Answer the next synchronous Assist run resolves, instead of the fixture.
+    ///
+    /// The fixture is a canned insertion that always resolves, so the paths
+    /// that produce no proposal have no way to occur in a test otherwise.
+    #[cfg(any(test, feature = "test-helpers"))]
+    injected_assist_reply: Option<String>,
+    /// Force the Delegate chat worker spawn to fail, for tests.
+    ///
+    /// Separate from the Assist seam because the two paths fail differently:
+    /// Assist publishes nothing until the worker exists, and a Delegate turn is
+    /// already half written by the time the spawn is attempted.
+    injected_delegate_chat_spawn_failure: bool,
+    /// One-shot workspace-edit preflight barrier used by in-crate atomicity tests.
+    #[cfg(test)]
+    workspace_edit_preflight_hook: Option<Box<dyn FnOnce()>>,
     /// Test-only interruption seam after a Pending proposal observation is
     /// durable but before its proposals are published to the live ledger.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -14669,7 +14753,6 @@ pub struct AppComposition {
     #[cfg(feature = "ai")]
     in_flight_delegated_task: Option<InFlightDelegatedTaskRun>,
     delegated_task_plan_contracts: Vec<DelegatedTaskPlanContract>,
-    #[cfg(any(test, feature = "test-helpers"))]
     acp_host_command: Option<AcpHostCommand>,
     legion_workflow_sessions: Vec<LegionWorkflowSession>,
     legion_workflow_plan_artifacts: HashMap<String, LegionWorkflowPlanArtifacts>,
@@ -14681,8 +14764,15 @@ pub struct AppComposition {
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
     search_projection: SearchProjection,
+    search_worker: crate::search::SearchWorker,
+    search_generation: u64,
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
+    git_worker: GitWorker,
+    git_latest_generation: u64,
+    git_applied_generation: u64,
+    git_in_flight: bool,
+    pending_mutation: Option<GitWorkRequest>,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
@@ -14707,6 +14797,39 @@ pub struct AppComposition {
     terminal_workflow: TerminalWorkflow,
     /// Background LSP session lifecycle (PKT-LSP-B T1 / D4).
     lsp_session: crate::language::LspSessionHandle,
+    /// App-owned language startup authority and selected adapter registry.
+    language_startup_authority: crate::language::LanguageStartupAuthority,
+    language_server_registry: legion_lsp::LanguageServerAdapterRegistry,
+    language_server_configured_paths: HashMap<LanguageServerId, std::path::PathBuf>,
+    language_server_downloaded: HashMap<LanguageServerId, LanguageDownloadedStartup>,
+    language_server_local_downloads: HashMap<LanguageServerId, LanguageDownloadedLocalConfig>,
+    typescript_bundles: HashMap<LanguageServerId, TypeScriptBundleStartup>,
+    typescript_node_approval: Option<PathBuf>,
+    /// Persisted metadata for the operator-configured local TypeScript bundle.
+    /// This is configuration only; startup authority and receipts remain
+    /// process-local and are rebuilt after every explicit start.
+    language_toolchain_settings: LanguageToolchainSettingsRecord,
+    document_sync_ledger: HashMap<String, Vec<DesiredDocumentSync>>,
+    /// Direction awaiting a `prepareCallHierarchy` response.
+    ///
+    /// Call hierarchy is two round trips: `prepareCallHierarchy` resolves the
+    /// caret to a symbol item, and only then can callers or callees be asked
+    /// for. The direction is chosen at the first step and needed at the second,
+    /// so it waits here in between. See `language/call_hierarchy.rs`.
+    pending_call_hierarchy: Option<crate::language::PendingCallHierarchy>,
+    /// Accepted write-side LSP requests awaiting their matching server response.
+    pending_lsp_writes: HashMap<String, crate::language::PendingLspWriteOperation>,
+    /// Bounded rename requests admitted while their document sync is queued.
+    deferred_lsp_writes: HashMap<String, crate::language::DeferredLspWrite>,
+    /// Bounded two-step code-action response and selection authority.
+    code_action_authority: crate::language::CodeActionAuthority,
+    code_action_command_sidecars: crate::language::CodeActionCommandSidecars,
+    code_action_diagnostics: crate::language::CodeActionDiagnostics,
+    server_apply_edits: crate::language::ServerApplyEditAuthority,
+    /// Full contexts for command actions currently awaiting a server response.
+    /// Keeping the complete context prevents an inbound applyEdit from being
+    /// authorized solely by a recycled request-id string.
+    pending_code_action_contexts: HashMap<String, crate::language::PendingLspCommandContext>,
     /// Arming instant, buffer, and position for the completion debounce (I1).
     lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
@@ -14732,6 +14855,69 @@ pub struct AppComposition {
     buffer_search_state: legion_editor::BufferSearchState,
     /// Vim modal editing state, carried across keystrokes.
     vim: crate::vim_session::VimSession,
+    /// Verified org policy bundle whose mode ceiling gates mode switches (P9.F2.T3).
+    /// `None` means no org bundle is installed; the type has no unverified
+    /// constructor, so a bundle here has had its signature checked.
+    org_policy_bundle: Option<legion_security::VerifiedPolicyBundle>,
+}
+
+#[derive(Clone)]
+struct LanguageDownloadedStartup {
+    adapter: legion_lsp::LanguageServerAdapterPlan,
+    descriptor: crate::language::ArtifactDescriptor,
+    artifact: crate::language::MaterializedArtifact,
+    approved_node: crate::language::ApprovedNodeRuntime,
+    runtime_request: crate::language::NodeRuntimeApprovalRequest,
+}
+
+#[derive(Clone)]
+struct LanguageDownloadedLocalConfig {
+    adapter: legion_lsp::LanguageServerAdapterPlan,
+    archive: PathBuf,
+    node_path: PathBuf,
+    cache_root: PathBuf,
+}
+
+#[derive(Clone)]
+struct TypeScriptBundleStartup {
+    descriptor: crate::language::TypeScriptBundleDescriptor,
+    server_archive: PathBuf,
+    compiler_archive: PathBuf,
+    node_path: PathBuf,
+    cache_root: PathBuf,
+}
+
+#[derive(Clone)]
+enum DesiredDocumentSync {
+    Open {
+        buffer_id: BufferId,
+        language_id: LanguageId,
+        version: i64,
+        needs_open: bool,
+        sent: bool,
+    },
+    Closed {
+        buffer_id: BufferId,
+    },
+}
+
+#[derive(Clone)]
+enum LanguageStartupSelection {
+    Configured(legion_lsp::LspServerProcessConfig),
+    Downloaded(Box<LanguageDownloadedStartup>),
+    DownloadedLocal(Box<LanguageDownloadedLocalConfig>),
+    TypeScriptBundle(Box<TypeScriptBundleStartup>),
+}
+
+struct LanguageStartupInputs {
+    root: String,
+    authority: crate::language::LanguageStartupAuthority,
+    context: crate::language::LanguageStartupContext,
+    server_id: LanguageServerId,
+    language_id: LanguageId,
+    display_name: String,
+    selection: LanguageStartupSelection,
+    root_uri: String,
 }
 
 struct InlinePredictionRequestArgs<'a> {
@@ -14930,6 +15116,39 @@ mod app_document_resolver_uri_tests {
         resolver.insert_canonical_path("C:\\ws\\src\\main.rs", resolved_doc());
         assert!(resolver.resolve("file:///C:/ws/src/other.rs").is_none());
     }
+
+    #[test]
+    fn canonical_file_uri_strips_verbatim_prefix_and_escapes_reserved_names() {
+        assert_eq!(
+            canonical_path_to_uri(r"\\?\C:\Users\A User\#100%?.λ.txt"),
+            "file:///C:/Users/A%20User/%23100%25%3F.%CE%BB.txt"
+        );
+        assert_eq!(
+            canonical_path_to_uri(r"\\?\UNC\server\share\A #?.txt"),
+            "file://server/share/A%20%23%3F.txt"
+        );
+        assert_eq!(
+            canonical_path_to_uri("/tmp/a\\b.rs"),
+            "file:///tmp/a%5Cb.rs"
+        );
+    }
+
+    #[test]
+    fn resolver_preserves_reserved_name_document_identity() {
+        use crate::language::DocumentResolver as _;
+        let mut resolver = AppDocumentResolver {
+            by_uri: HashMap::new(),
+        };
+        let path = r"C:\ws\A #%.λ.txt";
+        resolver.insert_canonical_path(path, resolved_doc());
+        let uri = canonical_path_to_uri(path);
+        assert!(resolver.resolve(&uri).is_some());
+        assert!(
+            resolver
+                .resolve("file:///C:/ws/A%20%23%25.%ce%bb.txt")
+                .is_some()
+        );
+    }
 }
 
 impl AppComposition {
@@ -14945,6 +15164,14 @@ impl AppComposition {
         ))
     }
 
+    /// Build composition with an injected Git runner for deterministic worker tests.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn new_with_git_runner_for_test(runner: GitInspectionRunner) -> Self {
+        let mut app = Self::new();
+        app.git_worker = GitWorker::new_with_runner(runner);
+        app
+    }
+
     /// Build composition with native platform adapters and an injected event sink.
     pub fn with_event_sink(event_sink: SharedEventSink) -> Self {
         let fs = Arc::new(NativeFileSystem);
@@ -14953,14 +15180,16 @@ impl AppComposition {
             SecurityPolicy::default(),
             CapabilityNamespace("app".to_string()),
         );
+        let language_policy_store = Arc::new(std::sync::Mutex::new(security.clone()));
+        let workspace = Arc::new(WorkspaceActor::with_event_sink(
+            fs,
+            watcher,
+            security,
+            Box::new(event_sink.clone()),
+        ));
 
         Self {
-            workspace: WorkspaceActor::with_event_sink(
-                fs,
-                watcher,
-                security,
-                Box::new(event_sink.clone()),
-            ),
+            workspace: Arc::clone(&workspace),
             editor: EditorEngine::new(),
             proposal_coordinator: AppProposalCoordinator::new(event_sink.clone()),
             active_documents: ActiveDocumentController::new(),
@@ -14969,6 +15198,8 @@ impl AppComposition {
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
+            pending_inline_prediction: None,
+            pending_inline_prediction_cancelled: None,
             palette: PaletteState::default(),
             settings: SettingsProjection::default(),
             correlation_generator: CorrelationGenerator::default(),
@@ -14985,6 +15216,7 @@ impl AppComposition {
             assist_inline_prediction_state: AssistInlinePredictionState::default(),
             plugin_runtime: PluginRuntimeHost::new(),
             plugin_contribution_projections: Vec::new(),
+            extension_catalog: extension_management::ExtensionCatalog::with_bundled_extensions(),
             collaboration: CollaborationComposition::default(),
             remote: RemoteComposition::default(),
             legion_cloud_lane: LegionCloudLaneComposition::default(),
@@ -15001,11 +15233,15 @@ impl AppComposition {
             #[cfg(any(test, feature = "test-helpers"))]
             injected_assist_spawn_failure: false,
             #[cfg(any(test, feature = "test-helpers"))]
+            injected_assist_reply: None,
+            injected_delegate_chat_spawn_failure: false,
+            #[cfg(test)]
+            workspace_edit_preflight_hook: None,
+            #[cfg(any(test, feature = "test-helpers"))]
             interrupt_after_proposal_observation_store: false,
             #[cfg(feature = "ai")]
             in_flight_delegated_task: None,
             delegated_task_plan_contracts: Vec::new(),
-            #[cfg(any(test, feature = "test-helpers"))]
             acp_host_command: None,
             legion_workflow_sessions: Vec::new(),
             legion_workflow_plan_artifacts: HashMap::new(),
@@ -15017,8 +15253,15 @@ impl AppComposition {
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
             search_projection: SearchProjection::idle(),
+            search_worker: crate::search::SearchWorker::new(Arc::clone(&workspace)),
+            search_generation: 0,
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
+            git_worker: GitWorker::new(),
+            git_latest_generation: 0,
+            git_applied_generation: 0,
+            git_in_flight: false,
+            pending_mutation: None,
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             git_remote_policy_audit: Vec::new(),
@@ -15031,6 +15274,26 @@ impl AppComposition {
             language_tooling: LanguageToolingWorkflow::default(),
             terminal_workflow: TerminalWorkflow::default(),
             lsp_session: crate::language::LspSessionHandle::new(),
+            language_startup_authority:
+                crate::language::LanguageStartupAuthority::with_policy_store(Arc::clone(
+                    &language_policy_store,
+                )),
+            language_server_registry: legion_lsp::LanguageServerAdapterRegistry::tier_two(),
+            language_server_configured_paths: HashMap::new(),
+            language_server_downloaded: HashMap::new(),
+            language_server_local_downloads: HashMap::new(),
+            typescript_bundles: HashMap::new(),
+            typescript_node_approval: None,
+            language_toolchain_settings: LanguageToolchainSettingsRecord::default(),
+            document_sync_ledger: HashMap::new(),
+            pending_call_hierarchy: None,
+            pending_lsp_writes: HashMap::new(),
+            deferred_lsp_writes: HashMap::new(),
+            code_action_authority: crate::language::CodeActionAuthority::default(),
+            code_action_command_sidecars: crate::language::CodeActionCommandSidecars::default(),
+            code_action_diagnostics: crate::language::CodeActionDiagnostics::new(),
+            server_apply_edits: crate::language::ServerApplyEditAuthority::default(),
+            pending_code_action_contexts: HashMap::new(),
             lsp_ui_completion_debounce: None,
             lsp_ui_last_completion_count: 0,
             lsp_ui_hover_debounce: None,
@@ -15040,6 +15303,7 @@ impl AppComposition {
             checkpoint_store: CheckpointStore::new(),
             buffer_search_state: legion_editor::BufferSearchState::default(),
             vim: crate::vim_session::VimSession::default(),
+            org_policy_bundle: None,
         }
     }
 
@@ -15552,8 +15816,55 @@ impl AppComposition {
         }
     }
 
+    /// Install a verified org policy bundle whose mode ceiling gates mode switches.
+    ///
+    /// Takes a [`VerifiedPolicyBundle`](legion_security::VerifiedPolicyBundle),
+    /// which has no constructor other than
+    /// [`SignedPolicyBundle::verify`](legion_security::SignedPolicyBundle::verify),
+    /// so an unsigned or tampered bundle cannot be installed here.
+    pub fn set_org_policy_bundle(&mut self, bundle: legion_security::VerifiedPolicyBundle) {
+        self.org_policy_bundle = Some(bundle);
+        // Re-assert the ceiling against the mode already in effect: installing a
+        // bundle that forbids the current mode must lower it, not merely block
+        // future raises.
+        let current = self.product_mode;
+        if self.org_policy_mode_ceiling_denies(current) {
+            self.product_mode = AppProductMode::Manual;
+            self.phase4_projection_state.assisted_ai_projection = None;
+        }
+    }
+
+    /// The product AI policy for `backend`, tightened by any installed org bundle.
+    ///
+    /// `product_ai_security_policy` derives a policy from the backend alone, so
+    /// a signed org bundle that permits Delegate mode but forbids a provider was
+    /// never consulted on this route: the mode ceiling was checked and the
+    /// provider restriction was not, and the buffer excerpt could go to a
+    /// provider the organization had refused.
+    ///
+    /// Combined as a **ceiling**, never a permission. Every field takes the more
+    /// restrictive of the two, so an installed bundle can only ever narrow what
+    /// the product policy already allowed — a bundle that said `air_gap = false`
+    /// must not be able to switch off an air gap the product asked for.
+    /// Whether the installed org policy bundle's mode ceiling refuses `mode`.
+    ///
+    /// `false` when no bundle is installed — an absent bundle imposes no ceiling,
+    /// which is different from an unverifiable one, which is never installed.
+    pub fn org_policy_mode_ceiling_denies(&self, mode: AppProductMode) -> bool {
+        self.org_policy_bundle
+            .as_ref()
+            .is_some_and(|bundle| !bundle.bundle().allows_mode(mode.to_product_mode()))
+    }
+
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        // Org policy bundle mode ceiling (P9.F2.T3) is checked before any other
+        // lane. A ceiling that only applied after the worker/stream checks below
+        // would let an above-ceiling mode take effect whenever those lanes
+        // happened to be idle.
+        if self.org_policy_mode_ceiling_denies(mode) {
+            return;
+        }
         self.reconcile_completed_workflow_drain();
         if let Some(worker) = &self.active_worker
             && !Self::mode_allows_active_worker(mode, &worker.identity)
@@ -15627,12 +15938,18 @@ impl AppComposition {
         self.live_product_ai_stream.is_in_flight()
     }
 
+    /// Whether a search worker request is still settling.
+    pub fn search_worker_in_flight(&self) -> bool {
+        self.search_projection.status.kind == SearchStatusKindProjection::Running
+    }
+
     /// Poll live stream into `last_product_ai_stream` and apply finished background jobs.
     ///
     /// Returns `true` when the retained stream, chat projection, or Assist proposal
     /// ledger changed (desktop should repaint).
     pub fn poll_product_ai_stream(&mut self) -> bool {
         let mut changed = self.poll_scheduled_proposal_observation_retries();
+        changed |= self.retry_pending_route_audits();
         let snap = self.live_product_ai_stream.snapshot();
         if (!snap.chunks.is_empty() || snap.in_flight || !snap.provider_id.is_empty())
             && self.last_product_ai_stream.as_ref() != Some(&snap)
@@ -15641,6 +15958,82 @@ impl AppComposition {
             changed = true;
         }
         for result in self.live_product_ai_stream.take_background_results() {
+            // How a background Delegate turn ended, written where it becomes
+            // known.
+            //
+            // The record persisted when the worker started says `Streaming`,
+            // which is honest at that moment and permanent without this: a
+            // successful turn, an empty one and a failed one were all audited as
+            // streaming forever.
+            if let Some(route) = result.delegate_route.clone() {
+                let state = if result.live_failed {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
+                let replay_manifest = legion_protocol::AgentReplayManifest {
+                    run_id: route.run_id.clone(),
+                    transitions: Vec::new(),
+                    context_manifests: Vec::new(),
+                    provider_route_ids: vec![route.route_id.clone()],
+                    proposal_ids: Vec::new(),
+                    correlation_id: route.event_context.correlation_id,
+                    causality_id: route.event_context.causality_id,
+                    event_sequence: self.event_sequence_generator.next(),
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let outcome_label = if result.live_failed {
+                    "phase4.provider.route.failed"
+                } else {
+                    "phase4.provider.route.completed"
+                };
+                if self
+                    .persist_phase4_runtime_records(
+                        &route.run_id,
+                        &route.route_id,
+                        state,
+                        outcome_label,
+                        route.event_context,
+                        &replay_manifest,
+                        &[],
+                    )
+                    .is_err()
+                {
+                    // The result that carries this ending is consumed here and
+                    // nowhere else, so dropping the failure leaves the route
+                    // recorded as `Streaming` for good. Kept for the next poll.
+                    self.queue_route_audit(PendingRouteAudit {
+                        run_id: route.run_id.clone(),
+                        route_id: route.route_id.clone(),
+                        state,
+                        outcome_label,
+                        event_context: route.event_context,
+                    });
+                } else {
+                    // The ending is on disk. A `Streaming` record queued when
+                    // this run started writes to the same audit id, so leaving
+                    // it queued would overwrite the ending on the next poll and
+                    // a finished turn would read as permanently in flight.
+                    self.forget_queued_route_audit(&route.run_id, &route.route_id);
+                }
+                // And the projection the transcript reads, which holds the same
+                // fact in a second place.
+                //
+                // The durable record answers an auditor later; this answers the
+                // person looking at the reply now, and it was left saying
+                // `Streaming` for good once the worker finished. Two copies of
+                // one answer is why they are written together.
+                if let Some(projected) = self
+                    .delegate_workflow
+                    .provider_routes
+                    .iter_mut()
+                    .find(|projected| projected.route_id == route.route_id)
+                {
+                    projected.invocation_state = state;
+                }
+                changed = true;
+            }
             if let Some(stream) = result.stream {
                 self.last_product_ai_stream = Some(stream);
             }
@@ -15654,9 +16047,63 @@ impl AppComposition {
                 message.content_label = result.content_label;
                 changed = true;
             }
+            if let Some(prediction) = result.inline_prediction {
+                self.pending_inline_prediction = None;
+                self.merge_inline_prediction_result(prediction);
+                changed = true;
+            } else if let Some(metadata) = self.pending_inline_prediction.take() {
+                // The worker finished with nothing to show -- an unreachable
+                // provider, or a completion that came back empty. Answer with
+                // the deterministic prediction, here on the app thread, rather
+                // than leaving the request with no result: that is what the
+                // synchronous path did, and losing it would trade a frozen UI
+                // for ghost text that silently stops appearing.
+                let failed_request_id = metadata.request_id.clone();
+                match self.invoke_inline_prediction_provider(metadata) {
+                    Ok(prediction) => {
+                        self.merge_inline_prediction_result(prediction);
+                    }
+                    Err(_error) => {
+                        // Nothing to show and nothing to say. Clearing the flag
+                        // is the part that matters -- leaving it set strands the
+                        // Cancel control with nothing to cancel -- but only for
+                        // the request that actually failed, since a newer one
+                        // may already own this state.
+                        if self
+                            .assist_inline_prediction_state
+                            .active_request_id
+                            .as_ref()
+                            == Some(&failed_request_id)
+                        {
+                            self.assist_inline_prediction_state.request_in_flight = false;
+                            self.assist_inline_prediction_state.active_request_id = None;
+                        }
+                    }
+                }
+                changed = true;
+            }
             if let Some(proposal_source) = result.assist_proposal
-                && let Some(job) = self.pending_assist_proposal.take()
+                && let Some(mut job) = self.pending_assist_proposal.take()
             {
+                // The route record agrees with the proposal about what happened.
+                //
+                // `route_response` is built and marked `Completed` before the
+                // worker runs, because that is when policy approves the route.
+                // Leaving it there when the provider never answered persists
+                // `phase4.provider.route.completed` beside a proposal saying the
+                // opposite -- an audit trail that contradicts the artifact it
+                // describes is worse than one that says nothing.
+                if result.live_failed {
+                    // Every field that says how the run ended, not just the
+                    // outermost one. The nested decision is copied into the
+                    // reviewer-facing contract and the outcome label is what is
+                    // persisted, so leaving either at `Completed` reproduced the
+                    // contradiction one layer down.
+                    job.route_response.invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                    job.route_response.route_decision.provider_invocation =
+                        legion_protocol::AssistedAiProviderInvocationState::Failed;
+                }
                 match self.finish_assisted_edit_proposal_registration(job, proposal_source) {
                     Ok(_outcome) => {
                         changed = true;
@@ -15681,6 +16128,84 @@ impl AppComposition {
                 .next_attempt_at
                 .saturating_duration_since(Instant::now())
         })
+    }
+
+    /// Whether the audit trail still owes a route record a write.
+    ///
+    /// The desktop repaints while this is true, because a failed write is only
+    /// retried by another poll and a poll only happens on a repaint: without
+    /// this the queue could sit untouched until unrelated input arrived, and a
+    /// finished turn would stay recorded as `Streaming` in the meantime.
+    pub fn has_pending_route_audits(&self) -> bool {
+        !self.phase4_projection_state.pending_route_audits.is_empty()
+    }
+
+    /// Queue a route record for retry, replacing any older one for the same run.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place: a `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight. There is
+    /// one true answer per run, and it is the most recent.
+    fn queue_route_audit(&mut self, audit: PendingRouteAudit) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != audit.run_id || queued.route_id != audit.route_id);
+        self.phase4_projection_state
+            .pending_route_audits
+            .push(audit);
+    }
+
+    /// Drop any queued record that a written one has superseded.
+    fn forget_queued_route_audit(&mut self, run_id: &legion_protocol::AgentRunId, route_id: &str) {
+        self.phase4_projection_state
+            .pending_route_audits
+            .retain(|queued| queued.run_id != *run_id || queued.route_id != route_id);
+    }
+
+    /// Try again to write the terminal route records that failed.
+    ///
+    /// One attempt per poll, in order, and a record stays queued until it is
+    /// written -- an audit trail that cannot say how a run ended is the failure
+    /// this whole area keeps producing, and a dropped write is the quietest way
+    /// to produce it.
+    fn retry_pending_route_audits(&mut self) -> bool {
+        if self.phase4_projection_state.pending_route_audits.is_empty() {
+            return false;
+        }
+        let pending = std::mem::take(&mut self.phase4_projection_state.pending_route_audits);
+        let mut changed = false;
+        for audit in pending {
+            let replay_manifest = legion_protocol::AgentReplayManifest {
+                run_id: audit.run_id.clone(),
+                transitions: Vec::new(),
+                context_manifests: Vec::new(),
+                provider_route_ids: vec![audit.route_id.clone()],
+                proposal_ids: Vec::new(),
+                correlation_id: audit.event_context.correlation_id,
+                causality_id: audit.event_context.causality_id,
+                event_sequence: self.event_sequence_generator.next(),
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            };
+            if self
+                .persist_phase4_runtime_records(
+                    &audit.run_id,
+                    &audit.route_id,
+                    audit.state,
+                    audit.outcome_label,
+                    audit.event_context,
+                    &replay_manifest,
+                    &[],
+                )
+                .is_err()
+            {
+                self.queue_route_audit(audit);
+            } else {
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn poll_scheduled_proposal_observation_retries(&mut self) -> bool {
@@ -15719,9 +16244,13 @@ impl AppComposition {
     }
 
     /// Configure the optional ACP host command used by delegated tasks.
-    #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_acp_host_command(&mut self, program: impl Into<PathBuf>, args: Vec<String>) {
         self.acp_host_command = Some(AcpHostCommand::new(program, args));
+    }
+
+    /// Clear the optional ACP host command and return to manual behavior.
+    pub fn clear_acp_host_command(&mut self) {
+        self.acp_host_command = None;
     }
 
     /// Removes delegated-task sandbox directories left behind by crashed or
@@ -16024,6 +16553,12 @@ impl AppComposition {
         trust: WorkspaceTrustState,
         principal: PrincipalId,
     ) -> Result<WorkspaceOpened, AppCompositionError> {
+        let switching_workspace = self
+            .active_documents
+            .workspace_root_path
+            .as_deref()
+            .map(|current| current != root.as_ref().to_string_lossy().as_ref())
+            .unwrap_or(false);
         let root_path = CanonicalPath(root.as_ref().to_string_lossy().into_owned());
         let request = WorkspaceOpenRequest {
             correlation_id: self.correlation_generator.next(),
@@ -16047,7 +16582,24 @@ impl AppComposition {
         };
         self.active_documents
             .bind_workspace(opened.clone(), root_path, principal, trust.clone());
+        if switching_workspace {
+            self.terminalize_pending_lsp_writes(
+                None,
+                LanguageToolingStatusKind::Stale,
+                "workspace changed while an LSP write was pending",
+            );
+            self.lsp_session.reset_to_idle();
+            self.clear_typescript_toolchain();
+        }
+        self.language_server_registry = legion_lsp::LanguageServerAdapterRegistry::tier_two()
+            .for_workspace(opened.workspace_id)
+            .unwrap_or_default();
         self.debug_workflow.clear_workspace_state();
+        self.language_tooling.clear_workspace_state();
+        self.clear_code_actions();
+        self.code_action_diagnostics.clear_session();
+        self.server_apply_edits.clear();
+        self.pending_code_action_contexts.clear();
         self.assist_inline_prediction_state = AssistInlinePredictionState::default();
         self.palette = PaletteState::default();
 
@@ -16061,7 +16613,177 @@ impl AppComposition {
         // (and any switch back to untrusted) remain fail-closed.
         self.batch_apply_policy.enabled = trust == WorkspaceTrustState::Trusted;
 
+        self.reload_local_history_store();
+
         Ok(opened)
+    }
+
+    /// Configure one exact language-server executable path for explicit
+    /// operator-approved startup. Paths are canonicalized before storage;
+    /// there is no PATH lookup or wildcard expansion.
+    pub fn configure_language_server_binary(
+        &mut self,
+        server_id: LanguageServerId,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), AppCompositionError> {
+        let path = std::fs::canonicalize(path.as_ref()).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "language_server_binary_invalid".to_string(),
+                message: error.to_string(),
+            })
+        })?;
+        if !path.is_file() {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "language_server_binary_invalid".to_string(),
+                message: "configured language-server path is not a regular file".to_string(),
+            }));
+        }
+        self.language_startup_authority
+            .allow_exact_binary(&path)
+            .map_err(|error| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "language_server_binary_invalid".to_string(),
+                    message: error.to_string(),
+                })
+            })?;
+        self.language_server_configured_paths
+            .insert(server_id, path);
+        Ok(())
+    }
+
+    /// Bind a verified local artifact and approved Node identity to one
+    /// downloaded adapter. The receipt is revalidated for every startup
+    /// preparation; it is never treated as a download grant.
+    pub fn configure_downloaded_language_server(
+        &mut self,
+        adapter: legion_lsp::LanguageServerAdapterPlan,
+        descriptor: crate::language::ArtifactDescriptor,
+        artifact: crate::language::MaterializedArtifact,
+        approved_node: crate::language::ApprovedNodeRuntime,
+        runtime_request: crate::language::NodeRuntimeApprovalRequest,
+    ) {
+        self.language_server_downloaded.insert(
+            adapter.server_id,
+            LanguageDownloadedStartup {
+                adapter,
+                descriptor,
+                artifact,
+                approved_node,
+                runtime_request,
+            },
+        );
+    }
+
+    /// Configure an offline local archive and explicit Node executable. The
+    /// startup worker performs materialization and runtime approval itself.
+    pub fn configure_downloaded_language_server_local(
+        &mut self,
+        adapter: legion_lsp::LanguageServerAdapterPlan,
+        archive: impl Into<PathBuf>,
+        node_path: impl Into<PathBuf>,
+        cache_root: impl Into<PathBuf>,
+    ) -> Result<(), AppCompositionError> {
+        let node_path = std::fs::canonicalize(node_path.into()).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "language_server_binary_invalid".to_string(),
+                message: error.to_string(),
+            })
+        })?;
+        if !node_path.is_file() {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "language_server_binary_invalid".to_string(),
+                message: "Node executable must be a regular file".to_string(),
+            }));
+        }
+        self.language_startup_authority
+            .allow_exact_binary(&node_path)
+            .map_err(|error| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "language_server_binary_invalid".to_string(),
+                    message: error.to_string(),
+                })
+            })?;
+        self.language_server_local_downloads.insert(
+            adapter.server_id,
+            LanguageDownloadedLocalConfig {
+                adapter,
+                archive: archive.into(),
+                node_path,
+                cache_root: cache_root.into(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Configure the pinned offline TypeScript server/compiler bundle.
+    pub fn configure_typescript_bundle(
+        &mut self,
+        server_id: LanguageServerId,
+        server_archive: impl Into<PathBuf>,
+        compiler_archive: impl Into<PathBuf>,
+        node_path: impl Into<PathBuf>,
+        cache_root: impl Into<PathBuf>,
+    ) -> Result<(), AppCompositionError> {
+        let node_path = std::fs::canonicalize(node_path.into()).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "typescript_node_invalid".into(),
+                message: error.to_string(),
+            })
+        })?;
+        if !node_path.is_file() {
+            return Err(AppCompositionError::Protocol(ProtocolError {
+                code: "typescript_node_invalid".into(),
+                message: "Node path is not a file".into(),
+            }));
+        }
+        let replaced_node = self
+            .typescript_bundles
+            .get(&server_id)
+            .map(|bundle| bundle.node_path.clone())
+            .or_else(|| self.typescript_node_approval.clone());
+        self.language_startup_authority
+            .allow_exact_binary(&node_path)
+            .map_err(|error| {
+                AppCompositionError::Protocol(ProtocolError {
+                    code: "typescript_node_invalid".into(),
+                    message: error.to_string(),
+                })
+            })?;
+        self.typescript_node_approval = Some(node_path.clone());
+        self.typescript_bundles.insert(
+            server_id,
+            TypeScriptBundleStartup {
+                descriptor: crate::language::TypeScriptBundleDescriptor::pinned(),
+                server_archive: server_archive.into(),
+                compiler_archive: compiler_archive.into(),
+                node_path: node_path.clone(),
+                cache_root: cache_root.into(),
+            },
+        );
+        if let Some(replaced_node) = replaced_node
+            && replaced_node != node_path
+            && !self
+                .typescript_bundles
+                .values()
+                .any(|bundle| bundle.node_path.as_path() == replaced_node.as_path())
+            && !self
+                .language_server_configured_paths
+                .values()
+                .any(|path| path == &replaced_node)
+            && !self
+                .language_server_local_downloads
+                .values()
+                .any(|config| config.node_path.as_path() == replaced_node.as_path())
+            && !self
+                .language_server_downloaded
+                .values()
+                .any(|config| config.approved_node.canonical_path() == replaced_node.as_path())
+        {
+            let _ = self
+                .language_startup_authority
+                .revoke_exact_binary(&replaced_node);
+        }
+        Ok(())
     }
 
     /// Test-only: starts the LSP session using an explicit server binary path,
@@ -16070,14 +16792,12 @@ impl AppComposition {
     /// parallel test execution).
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn force_lsp_start_with_server_path_for_test(&mut self, server_path: std::path::PathBuf) {
-        let Some(root) = self.active_documents.workspace_root_path.clone() else {
-            return;
-        };
-        self.lsp_session.start_for_workspace_with_server_path(
-            std::path::Path::new(&root),
-            true,
-            Some(server_path),
-        );
+        if self
+            .configure_language_server_binary(LanguageServerId(101), server_path)
+            .is_ok()
+        {
+            self.try_start_lsp_session_for_current_workspace();
+        }
     }
 
     /// Test-only: inject a live health record with given capabilities, so tests
@@ -16088,6 +16808,52 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn set_lsp_health_for_test(&mut self, health: legion_protocol::LspServerHealthRecord) {
         self.lsp_session.set_live_health_for_test(health);
+    }
+
+    /// Test-only: install a live LSP session and return its production request
+    /// queue receiver for observing fire-and-forget edit notifications.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_lsp_request_receiver_for_test(
+        &mut self,
+        health: legion_protocol::LspServerHealthRecord,
+    ) -> std::sync::mpsc::Receiver<LspWorkerRequest> {
+        let rx = self
+            .lsp_session
+            .set_live_with_request_receiver_for_test(health);
+        // Edit-observer tests assert the next `didChange`, not the injected
+        // handshake. Mark open buffers ready and drain the cap-one queue so
+        // the replacement they dispatch is the first message they see.
+        self.mark_injected_lsp_documents_ready_for_test();
+        while rx.try_recv().is_ok() {}
+        rx
+    }
+
+    /// Test-only: install a cap-one live session and retain its result sender
+    /// so draining does not mistake a dropped harness channel for worker death.
+    ///
+    /// Does not flush document sync: harness tests own `didOpen` / `didClose`
+    /// ordering and the pre-ready rejection gate.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn set_lsp_request_harness_for_test(
+        &mut self,
+        health: legion_protocol::LspServerHealthRecord,
+    ) -> (
+        std::sync::mpsc::Receiver<LspWorkerRequest>,
+        std::sync::mpsc::SyncSender<crate::language::LspWorkerResult>,
+    ) {
+        self.lsp_session
+            .set_live_with_request_and_result_sender_for_test(health)
+    }
+
+    /// Test-only: run a one-shot callback after workspace-edit preflight and
+    /// before the first mutation. This gives atomicity tests a deterministic
+    /// late external-change point without exposing a production seam.
+    #[cfg(test)]
+    pub(crate) fn set_workspace_edit_preflight_hook_for_test<F>(&mut self, hook: F)
+    where
+        F: FnOnce() + 'static,
+    {
+        self.workspace_edit_preflight_hook = Some(Box::new(hook));
     }
 
     /// Test-only: inject a pre-created cancellation flag so that tests can
@@ -16116,6 +16882,22 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn inject_assist_spawn_failure_for_test(&mut self) {
         self.injected_assist_spawn_failure = true;
+    }
+
+    /// Test-only: resolve the next Assist run against this answer.
+    ///
+    /// Consumed once, and only by the synchronous path -- the one the fixture
+    /// preference takes. The answer goes through the same resolver a live
+    /// model's does, so a test that injects a malformed block, a duplicated
+    /// anchor or an identity edit is exercising the real placement rules.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn inject_assist_reply_for_test(&mut self, answer: impl Into<String>) {
+        self.injected_assist_reply = Some(answer.into());
+    }
+
+    /// Make the next Delegate chat worker spawn fail.
+    pub fn inject_delegate_chat_spawn_failure_for_test(&mut self) {
+        self.injected_delegate_chat_spawn_failure = true;
     }
 
     /// Test-only: report whether an Assist proposal job remains app-owned.
@@ -16215,6 +16997,15 @@ impl AppComposition {
         self.lsp_session.is_idle()
     }
 
+    /// Test-only: number of files currently held in the lexical retrieval index.
+    ///
+    /// Used to prove file-open, save, and first projection do not wait on
+    /// `LexicalIndexer` (GAP-09.3). Production code must never call this.
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub fn retrieval_indexed_file_count_for_test(&self) -> usize {
+        self.language_tooling.semantic_index.files().len()
+    }
+
     /// Test-only: returns `true` if the LSP session handle is in the
     /// `Starting` state.
     #[cfg(any(test, feature = "test-helpers"))]
@@ -16261,7 +17052,19 @@ impl AppComposition {
     /// opening an actual `.rs` file.  PKT-LSP-C T1 / T5.
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn force_lsp_start_for_test(&mut self) {
-        self.try_start_lsp_session_for_current_workspace();
+        if let Some(root) = self.active_documents.workspace_root_path.clone()
+            && !Path::new(&root).join("Cargo.toml").exists()
+        {
+            let trusted = self
+                .active_documents
+                .active_workspace_trust
+                .as_ref()
+                .is_some_and(|trust| *trust == WorkspaceTrustState::Trusted);
+            self.lsp_session
+                .start_for_workspace(Path::new(&root), trusted);
+        } else {
+            self.try_start_lsp_session_for_current_workspace();
+        }
     }
 
     /// Attempt to start the LSP session for the currently-open workspace.
@@ -16271,18 +17074,167 @@ impl AppComposition {
     /// If the workspace is untrusted the session immediately enters Refused.
     /// PKT-LSP-C T1.
     fn try_start_lsp_session_for_current_workspace(&mut self) {
-        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+        let Some(inputs) = self.language_startup_inputs() else {
+            let Some(root) = self.active_documents.workspace_root_path.clone() else {
+                return;
+            };
+            let language_id = self
+                .active_documents
+                .active_file_path
+                .as_ref()
+                .map(|path| language_id_for_path(&CanonicalPath(path.clone())))
+                .unwrap_or_else(|| LanguageId("unknown".to_string()));
+            self.lsp_session.start_preparing(
+                PathBuf::from(root),
+                crate::language::LspSelectedServerMetadata {
+                    server_id: LanguageServerId(0),
+                    language_id,
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+                    artifact_hash: None,
+                    version: None,
+                    download_decision_id: None,
+                },
+                |_cancel| {
+                Err(crate::language::LanguageSessionError::InvalidConfiguration(
+                    "no explicitly configured language-server binary or verified local artifact for the active language".to_string(),
+                ))
+                },
+            );
             return;
         };
-        let trust = self
-            .active_documents
-            .active_workspace_trust
-            .as_ref()
-            .cloned()
-            .unwrap_or(WorkspaceTrustState::Untrusted);
-        let trusted = trust == WorkspaceTrustState::Trusted;
+        let LanguageStartupInputs {
+            root,
+            authority,
+            context,
+            server_id,
+            language_id,
+            display_name,
+            selection,
+            root_uri,
+        } = inputs;
+        let correlation_generator = self.correlation_generator.clone();
+        let preparation_selection = selection.clone();
+        let preparation_language_id = language_id.clone();
+        let preparation_display_name = display_name.clone();
+        let preparation_root_uri = root_uri.clone();
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
+        let preparation = move |cancel: Arc<std::sync::atomic::AtomicBool>| {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::language::LanguageSessionError::InvalidConfiguration(
+                    "language startup preparation cancelled".to_string(),
+                ));
+            }
+            let correlation_id = correlation_generator.next();
+            let mut context = context.clone();
+            context.correlation_id = correlation_id;
+            context.causality_id = CausalityId(uuid::Uuid::now_v7());
+            match &preparation_selection {
+                LanguageStartupSelection::Configured(process) => authority.prepare_configured(
+                    &context,
+                    server_id,
+                    preparation_language_id.clone(),
+                    preparation_display_name.clone(),
+                    process.clone(),
+                    preparation_root_uri.clone(),
+                    initialization_options.clone(),
+                    None,
+                ),
+                LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
+                    &context,
+                    &downloaded.adapter,
+                    &downloaded.descriptor,
+                    &downloaded.artifact,
+                    &downloaded.approved_node,
+                    &crate::language::NodeRuntimeApprovalRequest {
+                        correlation_id: context.correlation_id,
+                        causality_id: context.causality_id,
+                        ..downloaded.runtime_request.clone()
+                    },
+                    Arc::clone(&cancel),
+                    preparation_root_uri.clone(),
+                    initialization_options.clone(),
+                    None,
+                ),
+                LanguageStartupSelection::DownloadedLocal(local) => authority
+                    .prepare_downloaded_local(
+                        &context,
+                        &local.adapter,
+                        &local.archive,
+                        &local.cache_root,
+                        &local.node_path,
+                        Arc::clone(&cancel),
+                        preparation_root_uri.clone(),
+                        initialization_options.clone(),
+                    ),
+                LanguageStartupSelection::TypeScriptBundle(bundle) => authority
+                    .prepare_typescript_bundle(
+                        &context,
+                        &bundle.descriptor,
+                        &bundle.server_archive,
+                        &bundle.compiler_archive,
+                        &bundle.node_path,
+                        &bundle.cache_root,
+                        Arc::clone(&cancel),
+                        preparation_root_uri.clone(),
+                        preparation_language_id.clone(),
+                        server_id,
+                    ),
+            }
+        };
+        let metadata = match &selection {
+            LanguageStartupSelection::Configured(_) => crate::language::LspSelectedServerMetadata {
+                server_id,
+                language_id: language_id.clone(),
+                binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+                artifact_hash: None,
+                version: None,
+                download_decision_id: None,
+            },
+            LanguageStartupSelection::Downloaded(downloaded) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: Some(legion_protocol::FileFingerprint {
+                        algorithm: "sha256-content-v1".to_string(),
+                        value: downloaded.artifact.sha256.clone(),
+                    }),
+                    version: Some(format!(
+                        "{}.{}.{}",
+                        downloaded.approved_node.observed_version().major,
+                        downloaded.approved_node.observed_version().minor,
+                        downloaded.approved_node.observed_version().patch,
+                    )),
+                    download_decision_id: None,
+                }
+            }
+            LanguageStartupSelection::DownloadedLocal(_) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: None,
+                    version: None,
+                    download_decision_id: None,
+                }
+            }
+            LanguageStartupSelection::TypeScriptBundle(_) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: None,
+                    version: Some("6.0.0".into()),
+                    download_decision_id: None,
+                }
+            }
+        };
         self.lsp_session
-            .start_for_workspace(std::path::Path::new(&root), trusted);
+            .start_preparing_with_factory(PathBuf::from(root), metadata, preparation);
     }
 
     /// Restart the LSP session for the currently-open workspace, resetting
@@ -16291,18 +17243,241 @@ impl AppComposition {
     ///
     /// Called from the "Restart language server" palette command (PKT-LSP-C T1/T3).
     fn restart_lsp_session_for_current_workspace(&mut self) {
-        let Some(root) = self.active_documents.workspace_root_path.clone() else {
+        self.clear_code_actions();
+        self.code_action_diagnostics.clear_session();
+        self.server_apply_edits.clear();
+        self.pending_code_action_contexts.clear();
+        self.terminalize_pending_lsp_writes(
+            None,
+            LanguageToolingStatusKind::Cancelled,
+            "language server restarted while an LSP write was pending",
+        );
+        let Some(inputs) = self.language_startup_inputs() else {
+            let Some(root) = self.active_documents.workspace_root_path.clone() else {
+                return;
+            };
+            let language_id = self
+                .active_documents
+                .active_file_path
+                .as_ref()
+                .map(|path| language_id_for_path(&CanonicalPath(path.clone())))
+                .unwrap_or_else(|| LanguageId("unknown".to_string()));
+            self.lsp_session.restart_for_workspace_preparing(
+                PathBuf::from(root),
+                crate::language::LspSelectedServerMetadata {
+                    server_id: LanguageServerId(0),
+                    language_id,
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+                    artifact_hash: None,
+                    version: None,
+                    download_decision_id: None,
+                },
+                |_cancel| {
+                Err(crate::language::LanguageSessionError::InvalidConfiguration(
+                    "no explicitly configured language-server binary or verified local artifact for the active language".to_string(),
+                ))
+                },
+            );
             return;
         };
+        let LanguageStartupInputs {
+            root,
+            authority,
+            context,
+            server_id,
+            language_id,
+            display_name,
+            selection,
+            root_uri,
+        } = inputs;
+        let correlation_id = self.correlation_generator.next();
+        let mut context = context;
+        context.correlation_id = correlation_id;
+        context.causality_id = CausalityId(uuid::Uuid::now_v7());
+        let initialization_options = if language_id.0 == "python" {
+            self.pyright_configuration_payload()
+        } else {
+            None
+        };
+        let metadata = match &selection {
+            LanguageStartupSelection::Configured(_) => crate::language::LspSelectedServerMetadata {
+                server_id,
+                language_id: language_id.clone(),
+                binary_provenance: legion_protocol::LspServerBinaryProvenance::Configured,
+                artifact_hash: None,
+                version: None,
+                download_decision_id: None,
+            },
+            LanguageStartupSelection::Downloaded(downloaded) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: Some(legion_protocol::FileFingerprint {
+                        algorithm: "sha256-content-v1".to_string(),
+                        value: downloaded.artifact.sha256.clone(),
+                    }),
+                    version: Some(format!(
+                        "{}.{}.{}",
+                        downloaded.approved_node.observed_version().major,
+                        downloaded.approved_node.observed_version().minor,
+                        downloaded.approved_node.observed_version().patch,
+                    )),
+                    download_decision_id: None,
+                }
+            }
+            LanguageStartupSelection::DownloadedLocal(_) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: None,
+                    version: None,
+                    download_decision_id: None,
+                }
+            }
+            LanguageStartupSelection::TypeScriptBundle(_) => {
+                crate::language::LspSelectedServerMetadata {
+                    server_id,
+                    language_id: language_id.clone(),
+                    binary_provenance: legion_protocol::LspServerBinaryProvenance::Downloaded,
+                    artifact_hash: None,
+                    version: Some("6.0.0".into()),
+                    download_decision_id: None,
+                }
+            }
+        };
+        let preparation = move |cancel: Arc<std::sync::atomic::AtomicBool>| {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::language::LanguageSessionError::InvalidConfiguration(
+                    "language startup preparation cancelled".to_string(),
+                ));
+            }
+            match selection {
+                LanguageStartupSelection::Configured(process) => authority.prepare_configured(
+                    &context,
+                    server_id,
+                    language_id,
+                    display_name,
+                    process,
+                    root_uri,
+                    initialization_options.clone(),
+                    None,
+                ),
+                LanguageStartupSelection::Downloaded(downloaded) => authority.prepare_downloaded(
+                    &context,
+                    &downloaded.adapter,
+                    &downloaded.descriptor,
+                    &downloaded.artifact,
+                    &downloaded.approved_node,
+                    &crate::language::NodeRuntimeApprovalRequest {
+                        correlation_id: context.correlation_id,
+                        causality_id: context.causality_id,
+                        ..downloaded.runtime_request
+                    },
+                    Arc::clone(&cancel),
+                    root_uri,
+                    initialization_options.clone(),
+                    None,
+                ),
+                LanguageStartupSelection::DownloadedLocal(local) => authority
+                    .prepare_downloaded_local(
+                        &context,
+                        &local.adapter,
+                        &local.archive,
+                        &local.cache_root,
+                        &local.node_path,
+                        Arc::clone(&cancel),
+                        root_uri,
+                        initialization_options,
+                    ),
+                LanguageStartupSelection::TypeScriptBundle(bundle) => authority
+                    .prepare_typescript_bundle(
+                        &context,
+                        &bundle.descriptor,
+                        &bundle.server_archive,
+                        &bundle.compiler_archive,
+                        &bundle.node_path,
+                        &bundle.cache_root,
+                        Arc::clone(&cancel),
+                        root_uri,
+                        language_id,
+                        server_id,
+                    ),
+            }
+        };
+        self.lsp_session.restart_for_workspace_preparing(
+            PathBuf::from(root),
+            metadata,
+            preparation,
+        );
+    }
+
+    /// Captures the app-owned language selection and real workspace identity
+    /// for one explicit start/restart request. No filesystem or process work
+    /// occurs here; the resulting preparation closure runs on the startup
+    /// worker.
+    fn language_startup_inputs(&self) -> Option<LanguageStartupInputs> {
+        let root = self.active_documents.workspace_root_path.clone()?;
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| PathBuf::from(&root));
+        let canonical_root_str = canonical_root.to_string_lossy().into_owned();
+        let opened = self.active_documents.opened_workspace.clone()?;
+        let principal_id = self.active_documents.active_principal_id.clone()?;
         let trust = self
             .active_documents
             .active_workspace_trust
-            .as_ref()
-            .cloned()
+            .clone()
             .unwrap_or(WorkspaceTrustState::Untrusted);
-        let trusted = trust == WorkspaceTrustState::Trusted;
-        self.lsp_session
-            .restart_for_workspace(std::path::Path::new(&root), trusted);
+        let language_id = self
+            .active_documents
+            .active_file_path
+            .as_ref()
+            .map(|path| language_id_for_path(&CanonicalPath(path.clone())))
+            .unwrap_or_else(|| LanguageId("rust".to_string()));
+        let adapter = self
+            .language_server_registry
+            .adapters_for_workspace_language(opened.workspace_id, &language_id)
+            .ok()?
+            .into_iter()
+            .find(|adapter| adapter.is_primary)?;
+        let selection = if let Some(bundle) = self.typescript_bundles.get(&adapter.server_id) {
+            LanguageStartupSelection::TypeScriptBundle(Box::new(bundle.clone()))
+        } else if let Some(local) = self.language_server_local_downloads.get(&adapter.server_id) {
+            let mut local = local.clone();
+            local.adapter = adapter.clone();
+            LanguageStartupSelection::DownloadedLocal(Box::new(local))
+        } else if let Some(downloaded) = self.language_server_downloaded.get(&adapter.server_id) {
+            let mut downloaded = downloaded.clone();
+            downloaded.adapter = adapter.clone();
+            LanguageStartupSelection::Downloaded(Box::new(downloaded))
+        } else {
+            let configured_path = self
+                .language_server_configured_paths
+                .get(&adapter.server_id)
+                .cloned()?;
+            let mut process = adapter.process.clone();
+            process.command = configured_path.to_str()?.to_string();
+            process.cwd = Some(canonical_root.clone());
+            LanguageStartupSelection::Configured(process)
+        };
+        Some(LanguageStartupInputs {
+            root: canonical_root_str.clone(),
+            authority: self.language_startup_authority.clone(),
+            context: crate::language::LanguageStartupContext {
+                workspace_id: opened.workspace_id,
+                root_id: opened.root_id,
+                workspace_root: canonical_root,
+                principal_id,
+                trust,
+                correlation_id: CorrelationId(1),
+                causality_id: CausalityId(uuid::Uuid::now_v7()),
+            },
+            server_id: adapter.server_id,
+            language_id,
+            display_name: adapter.display_name.clone(),
+            selection,
+            root_uri: canonical_path_to_uri(&canonical_root_str),
+        })
     }
 
     /// Sends `textDocument/didChange` to the live LSP session after a buffer
@@ -16312,15 +17487,265 @@ impl AppComposition {
         buffer_id: BufferId,
         descriptor: &legion_protocol::TextTransactionDescriptor,
     ) {
+        self.clear_code_actions();
+        self.code_action_diagnostics.clear_buffer(buffer_id);
+        self.server_apply_edits.clear();
+        self.pending_code_action_contexts.clear();
         let Some(meta) = self.active_documents.metadata_for_buffer(buffer_id) else {
             return;
         };
         let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
         let version = descriptor.post_buffer_version.0 as i64;
-        if let Ok(text) = self.editor.text(buffer_id) {
-            self.lsp_session
-                .send_did_change(uri, version, text.to_string());
+        if let Some(entries) = self.document_sync_ledger.get_mut(&uri) {
+            // A URI has at most one current open intent.  Keep a pending
+            // close marker, but discard superseded open intents so repeated
+            // edits cannot grow this offline ledger.
+            entries.retain(|entry| {
+                matches!(entry, DesiredDocumentSync::Closed { .. })
+                    || matches!(entry, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id)
+            });
+            if let Some(DesiredDocumentSync::Open {
+                buffer_id: entry_buffer,
+                version: desired_version,
+                needs_open,
+                sent,
+                ..
+            }) = entries.iter_mut().rev().find(|entry| {
+                matches!(entry, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id)
+            }) {
+                *desired_version = version;
+                if *sent {
+                    *needs_open = false;
+                }
+                *sent = false;
+                *entry_buffer = buffer_id;
+            } else {
+                entries.push(DesiredDocumentSync::Open {
+                    buffer_id,
+                    language_id: language_id_for_path(&CanonicalPath(
+                        meta.identity.canonical_path.0.clone(),
+                    )),
+                    version,
+                    needs_open: true,
+                    sent: false,
+                });
+            }
+        } else {
+            self.document_sync_ledger.insert(
+                uri.clone(),
+                vec![DesiredDocumentSync::Open {
+                    buffer_id,
+                    language_id: language_id_for_path(&CanonicalPath(
+                        meta.identity.canonical_path.0.clone(),
+                    )),
+                    version,
+                    needs_open: true,
+                    sent: false,
+                }],
+            );
         }
+        self.flush_document_sync_uri(&uri);
+    }
+
+    /// Sends the current contents to a live language session after a buffer is
+    /// opened. Existing buffers are replayed when startup transitions to Live.
+    fn notify_lsp_did_open(&mut self, buffer_id: BufferId) {
+        let Some(meta) = self.active_documents.metadata_for_buffer(buffer_id) else {
+            return;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let language_id =
+            language_id_for_path(&CanonicalPath(meta.identity.canonical_path.0.clone()));
+        let Ok(version) = self.editor.buffer_version(buffer_id) else {
+            return;
+        };
+        let entries = self.document_sync_ledger.entry(uri.clone()).or_default();
+        entries.retain(|entry| {
+            matches!(entry, DesiredDocumentSync::Closed { .. })
+                || matches!(entry, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id)
+        });
+        if let Some(DesiredDocumentSync::Open {
+            version: desired,
+            sent,
+            language_id: id,
+            needs_open,
+            ..
+        }) = entries.iter_mut().rev().find(|entry| {
+            matches!(entry, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id)
+        })
+        {
+            *desired = version.0 as i64;
+            *id = language_id.clone();
+            *needs_open = true;
+            *sent = false;
+        } else {
+            entries.push(DesiredDocumentSync::Open {
+                buffer_id,
+                language_id,
+                version: version.0 as i64,
+                needs_open: true,
+                sent: false,
+            });
+        }
+        self.flush_document_sync_uri(&uri);
+    }
+
+    fn flush_document_sync_uri(&mut self, uri: &str) {
+        let Some(entries) = self.document_sync_ledger.get(uri).cloned() else {
+            return;
+        };
+        for entry in entries {
+            match entry {
+                DesiredDocumentSync::Closed { buffer_id } => {
+                    if self.lsp_session.send_did_close(uri.to_string()) {
+                        if let Some(items) = self.document_sync_ledger.get_mut(uri) {
+                            items.retain(|item| !matches!(item, DesiredDocumentSync::Closed { buffer_id: id } if *id == buffer_id));
+                        }
+                    } else {
+                        // Preserve per-URI ordering: a later open must not
+                        // overtake a close that is still queued for retry.
+                        break;
+                    }
+                }
+                DesiredDocumentSync::Open {
+                    buffer_id,
+                    language_id,
+                    version: _,
+                    needs_open,
+                    sent,
+                } if !sent => {
+                    let Ok(current_version) = self.editor.buffer_version(buffer_id) else {
+                        break;
+                    };
+                    let current_version = current_version.0 as i64;
+                    let event_context = self.next_event_context();
+                    let snapshot_id = self
+                        .editor
+                        .current_snapshot(buffer_id)
+                        .ok()
+                        .map(|snapshot| snapshot.snapshot_id);
+                    let operation_context = snapshot_id.and_then(|snapshot_id| {
+                        self.lsp_operation_context(buffer_id, snapshot_id, event_context)
+                    });
+                    let editor = &self.editor;
+                    let delivered = if needs_open {
+                        self.lsp_session.send_did_open_deferred_with_context(
+                            uri.to_string(),
+                            language_id.0,
+                            current_version,
+                            buffer_id,
+                            || editor.text(buffer_id).ok().map(|text| text.to_string()),
+                            operation_context,
+                        )
+                    } else {
+                        self.lsp_session.send_did_change_deferred_with_context(
+                            uri.to_string(),
+                            current_version,
+                            || editor.text(buffer_id).ok().map(|text| text.to_string()),
+                            operation_context,
+                        )
+                    };
+                    if delivered
+                        && let Some(items) = self.document_sync_ledger.get_mut(uri)
+                        && let Some(DesiredDocumentSync::Open {
+                            version,
+                            needs_open,
+                            sent,
+                            ..
+                        }) = items.iter_mut().rev().find(|item| matches!(item, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id))
+                    {
+                        *version = current_version;
+                        *needs_open = false;
+                        *sent = true;
+                    } else if !delivered {
+                        // The cap-one worker queue is full or no longer live;
+                        // retry this URI before considering later entries.
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if self
+            .document_sync_ledger
+            .get(uri)
+            .is_some_and(|items| items.is_empty())
+        {
+            self.document_sync_ledger.remove(uri);
+        }
+    }
+
+    fn flush_document_sync_ledger(&mut self) {
+        let uris = self
+            .document_sync_ledger
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for uri in uris {
+            self.flush_document_sync_uri(&uri);
+        }
+    }
+
+    fn reset_document_sync_for_new_session(&mut self) {
+        for entries in self.document_sync_ledger.values_mut() {
+            for entry in entries {
+                if let DesiredDocumentSync::Open {
+                    needs_open, sent, ..
+                } = entry
+                {
+                    *needs_open = true;
+                    *sent = false;
+                }
+            }
+        }
+    }
+
+    /// LSP reads must observe a document only after its latest desired sync
+    /// has entered the worker queue.  The ledger stores metadata only; text is
+    /// read from the authoritative editor when the sync is flushed.
+    fn lsp_document_sync_ready(&self, buffer_id: BufferId) -> bool {
+        let Some(meta) = self.active_documents.metadata_for_buffer(buffer_id) else {
+            return false;
+        };
+        let uri = canonical_path_to_uri(&meta.identity.canonical_path.0);
+        let Some(entries) = self.document_sync_ledger.get(&uri) else {
+            return false;
+        };
+        let Some(DesiredDocumentSync::Open {
+            version,
+            sent: true,
+            buffer_id: entry_buffer,
+            ..
+        }) = entries.iter().rev().find(|entry| {
+            matches!(entry, DesiredDocumentSync::Open { buffer_id: candidate, .. } if *candidate == buffer_id)
+        }) else {
+            return false;
+        };
+        let Ok(current_version) = self.editor.buffer_version(buffer_id) else {
+            return false;
+        };
+        *entry_buffer == buffer_id && *version == current_version.0 as i64
+    }
+
+    /// Workspace-sensitive LSP reads must wait until every open document has
+    /// entered the worker queue and no close is waiting to overtake an open.
+    /// The worker request channel is intentionally bounded to one item, so a
+    /// per-buffer check can otherwise let a workspace read race another tab's
+    /// pending `didOpen`.
+    pub(crate) fn lsp_workspace_sync_ready(&self) -> bool {
+        if self.document_sync_ledger.values().flatten().any(|entry| {
+            matches!(
+                entry,
+                DesiredDocumentSync::Closed { .. } | DesiredDocumentSync::Open { sent: false, .. }
+            )
+        }) {
+            return false;
+        }
+        self.active_documents
+            .open_tabs
+            .iter()
+            .copied()
+            .all(|buffer_id| self.lsp_document_sync_ready(buffer_id))
     }
 
     /// Returns the current LSP server health record, if available.
@@ -16351,6 +17776,45 @@ impl AppComposition {
     /// to inspect the product-session rust-analyzer's stderr at wedge time.
     pub fn lsp_session_log_projection(&self) -> Option<legion_protocol::LspSessionLogProjection> {
         self.lsp_session.stderr_log_projection()
+    }
+
+    /// Acquire a bounded read lease for the desktop UI snapshot path.
+    pub fn lease_ui_snapshot(
+        &mut self,
+        buffer_id: BufferId,
+    ) -> Result<SnapshotLeaseDescriptor, EditorError> {
+        self.editor
+            .lease_snapshot(buffer_id, SnapshotConsumerKind::Ui)
+    }
+
+    /// Convert an exact UI lease descriptor into an editor-owned, revocable
+    /// handle suitable for a desktop worker.  The editor remains the authority
+    /// for lease identity, expiry, and snapshot lifetime.
+    pub fn owned_ui_snapshot(
+        &mut self,
+        lease: &SnapshotLeaseDescriptor,
+    ) -> Result<OwnedSnapshotLease, EditorError> {
+        if lease.consumer_kind != SnapshotConsumerKind::Ui {
+            return Err(EditorError::InvalidEdit("UI snapshot lease required"));
+        }
+        self.editor.owned_snapshot_lease(lease)
+    }
+
+    /// Read one bounded logical-line chunk through a UI snapshot lease.
+    pub fn read_ui_snapshot_line_chunk(
+        &self,
+        lease: &SnapshotLeaseDescriptor,
+        line: usize,
+        start_byte: usize,
+        max_bytes: usize,
+    ) -> Result<SnapshotLeaseLineChunk, EditorError> {
+        self.editor
+            .read_snapshot_lease_line_chunk(lease, line, start_byte, max_bytes)
+    }
+
+    /// Release a desktop UI snapshot lease.
+    pub fn release_ui_snapshot(&mut self, lease_id: uuid::Uuid) -> Option<SnapshotLeaseDescriptor> {
+        self.editor.release_snapshot_lease(lease_id)
     }
 
     // ── LSP UI debounce authority (I1) ──────────────────────────────────────
@@ -16498,24 +17962,10 @@ impl AppComposition {
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
-
-        // Skip full-text language-tooling indexing for streaming (large) files to avoid an
-        // additional 100MB+ String clone. Large files are already in degraded mode where
-        // semantic overlays, completions, and retrieval are deferred.
-        if !use_streaming {
-            let document = SourceDocument::with_versions(
-                identity.workspace_id,
-                identity.file_id,
-                identity.canonical_path.clone(),
-                language_id_for_path(&identity.canonical_path),
-                opened.file_content_version,
-                opened.workspace_generation,
-                None,
-                SemanticPrivacyScope::Workspace,
-                opened.text.clone(),
-            );
-            self.language_tooling.refresh_retrieval_document(&document);
-        }
+        self.notify_lsp_did_open(buffer_id);
+        // Lexical retrieval indexing is not on the open path (GAP-09.3). Language
+        // reads, Delegate retrieval, and the symbol palette index on demand. Save
+        // and first paint must not wait on LexicalIndexer.
         self.assist_inline_prediction_state
             .clear_for_buffer(buffer_id);
 
@@ -16532,6 +17982,7 @@ impl AppComposition {
         let descriptor =
             self.apply_edit_to_buffer_with_correlation(buffer_id, edit.clone(), correlation_id)?;
         self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(buffer_id, &descriptor);
         let _ = self.maybe_request_next_edit_prediction_after_edit(
             buffer_id,
             edit.range.start.line as u32,
@@ -16656,6 +18107,37 @@ impl AppComposition {
                 self.handle_proposal_request(ProposalRequest::Validate(proposal.clone()))?;
             if !matches!(validated, ProposalResponse::Validated(_)) {
                 return Ok(validated);
+            }
+        }
+        // Approving a freshly created proposal walks it through the same steps
+        // `Preview` gets above, instead of failing on a lifecycle it was never
+        // given a chance to satisfy.
+        //
+        // An Assist rail command registers its proposal in `Created` and nothing
+        // advances it: `OpenProposalDetails` maps to no request, so the panel
+        // offered an Approve whose only outcome was a refusal, which then landed
+        // the proposal in a terminal state. That is the "approve turns into
+        // rejected" behaviour recorded in the interactive-GUI journal, and it is
+        // a lifecycle gap rather than an approval policy -- validation and
+        // preview are precisely the checks approval is supposed to come after,
+        // so running them is not weakening the gate, it is honouring it.
+        if let ProposalRequest::Approve(command) = &request {
+            let proposal_id = command.proposal_id;
+            let state = self
+                .proposal_coordinator
+                .current_lifecycle_state(proposal_id);
+            if matches!(state, Some(ProposalLifecycleState::Created))
+                && let Some(proposal) = self.proposal_coordinator.proposal(proposal_id)
+            {
+                let validated =
+                    self.handle_proposal_request(ProposalRequest::Validate(proposal.clone()))?;
+                if !matches!(validated, ProposalResponse::Validated(_)) {
+                    return Ok(validated);
+                }
+                let previewed = self.handle_proposal_request(ProposalRequest::Preview(proposal))?;
+                if !matches!(previewed, ProposalResponse::Previewed { .. }) {
+                    return Ok(previewed);
+                }
             }
         }
         self.handle_proposal_request(request)
@@ -17059,8 +18541,50 @@ impl AppComposition {
         self.settings_projection()
     }
 
+    fn ensure_open_files_indexed_for_retrieval(&mut self) {
+        let threshold = self.editor.thresholds().large_file_threshold_bytes;
+        let buffer_ids = self.active_documents.open_tabs.clone();
+        for buffer_id in buffer_ids {
+            let Some(metadata) = self
+                .active_documents
+                .metadata_for_buffer(buffer_id)
+                .cloned()
+            else {
+                continue;
+            };
+            if self
+                .language_tooling
+                .has_indexed_file(metadata.identity.workspace_id, metadata.identity.file_id)
+            {
+                continue;
+            }
+            let file_byte_len = metadata.file_length.unwrap_or(0) as usize;
+            if file_byte_len > threshold {
+                continue;
+            }
+            let Ok(text) = self.editor.text(buffer_id) else {
+                continue;
+            };
+            let document = SourceDocument::with_versions(
+                metadata.identity.workspace_id,
+                metadata.identity.file_id,
+                metadata.identity.canonical_path.clone(),
+                language_id_for_path(&metadata.identity.canonical_path),
+                metadata.file_content_version,
+                metadata.workspace_generation,
+                None,
+                SemanticPrivacyScope::Workspace,
+                text.to_string(),
+            );
+            self.language_tooling.refresh_retrieval_document(&document);
+        }
+    }
+
     fn refresh_palette_results(&mut self) -> Result<(), AppCompositionError> {
         let mode = palette_mode_for_query(&self.palette.query).unwrap_or(self.palette.mode);
+        if mode == PaletteMode::Symbol {
+            self.ensure_open_files_indexed_for_retrieval();
+        }
         let query = palette_query_body(mode, &self.palette.query);
         let results = match mode {
             PaletteMode::File => self.palette_file_results(query)?,
@@ -17087,7 +18611,7 @@ impl AppComposition {
         };
 
         let recent_bonus = self.palette_recent_path_bonus_map();
-        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?
+        let mut paths = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?
             .into_iter()
             .filter(workspace_node_is_regular_file)
             .map(|node| node.identity.canonical_path.0)
@@ -17416,6 +18940,9 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "git-stage-focused-hunk" => {
+                            Some(CommandDispatchIntent::StageFocusedGitHunk)
+                        }
                         "git-switch-branch" => {
                             match parse_palette_command_operands(
                                 command_id,
@@ -17460,6 +18987,17 @@ impl AppComposition {
                                 _ => None,
                             }
                         }
+                        "acp-attach-host" => {
+                            match parse_palette_command_operands(
+                                command_id,
+                                palette_query_body(PaletteMode::Command, &self.palette.query),
+                            ) {
+                                Some(Ok(PaletteCommandOperands::AcpHost { program, args })) => {
+                                    Some(CommandDispatchIntent::AttachAcpHost { program, args })
+                                }
+                                _ => None,
+                            }
+                        }
                         "git-prune-worktrees" => Some(CommandDispatchIntent::PruneGitWorktrees),
                         "git-remove-worktree" => {
                             match parse_palette_command_operands(
@@ -17496,6 +19034,54 @@ impl AppComposition {
                             (!path.is_empty()).then_some(
                                 CommandDispatchIntent::RequestLocalHistoryEntries { path },
                             )
+                        }
+                        "language-format" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestFormattingProposal { buffer_id }
+                            })
+                        }
+                        "language-organize-imports" => {
+                            self.active_documents.active_buffer_id.map(|buffer_id| {
+                                CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
+                            })
+                        }
+                        "language-rename" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let Some(Ok(PaletteCommandOperands::RenameName(new_name))) =
+                                parse_palette_command_operands(
+                                    command_id,
+                                    palette_query_body(PaletteMode::Command, &self.palette.query),
+                                )
+                            else {
+                                return None;
+                            };
+                            let cursor = self.editor.primary_cursor(buffer_id).ok()?;
+                            let text = self.editor.text(buffer_id).ok()?.to_string();
+                            let line_start = text
+                                .split_inclusive('\n')
+                                .take(cursor.line)
+                                .map(str::len)
+                                .sum::<usize>();
+                            let byte_offset = line_start.saturating_add(cursor.column);
+                            let character = text
+                                .get(line_start..byte_offset)
+                                .map(|line| line.chars().count() as u32)
+                                .unwrap_or(0);
+                            Some(CommandDispatchIntent::RequestRenameProposal {
+                                buffer_id,
+                                position: TextCoordinate {
+                                    line: cursor.line as u32,
+                                    character,
+                                    byte_offset: Some(byte_offset as u64),
+                                    utf16_offset: None,
+                                },
+                                new_name,
+                            })
+                        }
+                        "language-code-action" => {
+                            let buffer_id = self.active_documents.active_buffer_id?;
+                            let range = self.active_code_action_range(buffer_id)?;
+                            Some(CommandDispatchIntent::RequestCodeActions { buffer_id, range })
                         }
                         _ => palette_command_intent(command_id),
                     })
@@ -17602,6 +19188,39 @@ impl AppComposition {
                 .collect(),
         )?;
         Ok(Some(outcome))
+    }
+
+    /// Route a native directional deletion through editor authority.
+    fn dispatch_directed_caret_delete(
+        &mut self,
+        intent: &CommandDispatchIntent,
+        event_context: &EventContext,
+    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
+        let CommandDispatchIntent::DeleteDirectedCarets {
+            buffer_id,
+            backward,
+        } = intent
+        else {
+            return Ok(None);
+        };
+        self.active_documents.ensure_active_buffer(*buffer_id)?;
+        let direction = if *backward {
+            legion_editor::DeleteDirection::Backward
+        } else {
+            legion_editor::DeleteDirection::Forward
+        };
+        let Some(record) = self.editor.delete_directed_carets(
+            *buffer_id,
+            direction,
+            Some(event_context.correlation_id),
+        )?
+        else {
+            return Ok(Some(AppCommandOutcome::Noop));
+        };
+        let descriptor = record.to_protocol_descriptor();
+        self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(*buffer_id, &descriptor);
+        Ok(Some(AppCommandOutcome::Edited(descriptor)))
     }
 
     /// Handle a multi-cursor intent, or return `None` if it is not one.
@@ -18005,11 +19624,101 @@ impl AppComposition {
         self.buffer_search_state.find_bar_visible
     }
 
+    /// Project the exact ordered editor carets and freshness metadata for visual navigation.
+    pub fn visual_navigation_projection(
+        &self,
+        buffer_id: BufferId,
+    ) -> Result<VisualNavigationProjection, AppCompositionError> {
+        let snapshot = self.editor.current_snapshot(buffer_id)?;
+        let carets = self
+            .editor
+            .directed_carets(buffer_id)?
+            .into_iter()
+            .map(visual_navigation_caret_from_editor)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(VisualNavigationProjection {
+            snapshot_id: snapshot.snapshot_id,
+            buffer_version: snapshot.buffer_version,
+            logical_line_count: u32::try_from(snapshot.line_count).map_err(|_| {
+                AppCompositionError::Editor(EditorError::InvalidEdit(
+                    "visual navigation line count overflows wire coordinate",
+                ))
+            })?,
+            carets,
+        })
+    }
+
+    /// Return a bounded primary-caret text window for renderer shaping.
+    ///
+    /// The editor/text authority supplies the fragment and true grapheme
+    /// boundaries; the app only attaches freshness metadata and performs
+    /// checked wire-coordinate conversion.
+    pub fn visual_navigation_window(
+        &self,
+        buffer_id: BufferId,
+        position: VisualNavigationPosition,
+        max_bytes: usize,
+    ) -> Result<VisualNavigationWindow, AppCompositionError> {
+        const MAX_WINDOW_BYTES: usize = 96 * 1024;
+        if max_bytes == 0 || max_bytes > MAX_WINDOW_BYTES {
+            return Err(AppCompositionError::Editor(EditorError::InvalidEdit(
+                "visual navigation window exceeds 96 KiB bound",
+            )));
+        }
+        let snapshot = self.editor.current_snapshot(buffer_id)?;
+        let line = usize::try_from(position.line).map_err(|_| {
+            AppCompositionError::Editor(EditorError::InvalidEdit(
+                "visual navigation line overflows host coordinate",
+            ))
+        })?;
+        let column = usize::try_from(position.byte_column).map_err(|_| {
+            AppCompositionError::Editor(EditorError::InvalidEdit(
+                "visual navigation byte offset overflows host coordinate",
+            ))
+        })?;
+        let caret_byte = self
+            .editor
+            .buffer_byte_offset(buffer_id, TextPosition::new(line, column))?;
+        let window = self
+            .editor
+            .line_window_around_byte(buffer_id, caret_byte, max_bytes)?;
+        let wire = |value: usize| {
+            u64::try_from(value).map_err(|_| {
+                AppCompositionError::Editor(EditorError::InvalidEdit(
+                    "visual navigation window offset overflows wire coordinate",
+                ))
+            })
+        };
+        Ok(VisualNavigationWindow {
+            snapshot_id: snapshot.snapshot_id,
+            buffer_version: snapshot.buffer_version,
+            line: u32::try_from(window.line).map_err(|_| {
+                AppCompositionError::Editor(EditorError::InvalidEdit(
+                    "visual navigation line overflows wire coordinate",
+                ))
+            })?,
+            line_start_byte: wire(window.line_start_byte)?,
+            caret_byte: wire(window.caret_byte)?,
+            start_byte: wire(window.start_byte)?,
+            end_byte: wire(window.end_byte)?,
+            logical_end_byte: wire(window.logical_end_byte)?,
+            complete_logical_start: window.complete_logical_start,
+            complete_logical_end: window.complete_logical_end,
+            grapheme_boundaries: window
+                .grapheme_boundaries
+                .into_iter()
+                .map(wire)
+                .collect::<Result<Vec<_>, _>>()?,
+            text: window.text,
+        })
+    }
+
     /// Route a UI dispatch intent through editor and workspace authorities.
     pub fn dispatch_ui_intent(
         &mut self,
         intent: CommandDispatchIntent,
     ) -> Result<AppCommandOutcome, AppCompositionError> {
+        self.drain_git_inspection();
         let event_context = self.next_event_context();
         if Self::proposal_intent_id(&intent).is_some() {
             return self.dispatch_proposal_ui_intent(intent, event_context);
@@ -18022,6 +19731,24 @@ impl AppComposition {
         }
         if let Some(outcome) = self.dispatch_multi_cursor_insert(&intent, &event_context)? {
             return Ok(outcome);
+        }
+        if let Some(outcome) = self.dispatch_directed_caret_delete(&intent, &event_context)? {
+            return Ok(outcome);
+        }
+
+        if let CommandDispatchIntent::ReplaceDirectedCarets { buffer_id, text } = &intent {
+            self.active_documents.ensure_active_buffer(*buffer_id)?;
+            let descriptor = self
+                .editor
+                .replace_directed_carets(
+                    *buffer_id,
+                    text.clone(),
+                    Some(event_context.correlation_id),
+                )?
+                .to_protocol_descriptor();
+            self.emit_transaction_event(&descriptor);
+            self.notify_lsp_did_change(*buffer_id, &descriptor);
+            return Ok(AppCommandOutcome::Edited(descriptor));
         }
 
         // Vim intents need the buffer's text and cursor, which the pure
@@ -18111,14 +19838,13 @@ impl AppComposition {
                         let replacement = self.buffer_search_state.replace_text.clone();
                         let edit =
                             TextEdit::new(CommandDispatcher::editor_range(range), replacement);
-                        if self
-                            .apply_edit_to_buffer_with_correlation(
-                                buffer_id,
-                                edit,
-                                event_context.correlation_id,
-                            )
-                            .is_ok()
-                        {
+                        if let Ok(descriptor) = self.apply_edit_to_buffer_with_correlation(
+                            buffer_id,
+                            edit,
+                            event_context.correlation_id,
+                        ) {
+                            self.emit_transaction_event(&descriptor);
+                            self.notify_lsp_did_change(buffer_id, &descriptor);
                             self.refresh_buffer_search_matches(buffer_id);
                         }
                     }
@@ -18155,14 +19881,18 @@ impl AppComposition {
                             )
                         })
                         .collect();
-                    if !edits.is_empty() {
-                        let _ = self.editor.apply_edits(
+                    if !edits.is_empty()
+                        && let Ok(record) = self.editor.apply_edits(
                             buffer_id,
                             edits,
                             TransactionSource::User,
                             None,
                             Some(event_context.correlation_id),
-                        );
+                        )
+                    {
+                        let descriptor = record.to_protocol_descriptor();
+                        self.emit_transaction_event(&descriptor);
+                        self.notify_lsp_did_change(buffer_id, &descriptor);
                     }
                     self.refresh_buffer_search_matches(buffer_id);
                 }
@@ -18204,6 +19934,15 @@ impl AppComposition {
             _ => {}
         }
 
+        // Explicit range deletion keeps the editor-mapped directed caret vector
+        // when multiple carets are active. The primary-only post-edit cursor
+        // helper is retained for ordinary single-caret compatibility.
+        let preserve_mapped_delete_carets =
+            if let CommandDispatchIntent::Delete { buffer_id, .. } = &intent {
+                self.editor.cursors(*buffer_id)?.len() > 1
+            } else {
+                false
+            };
         let request = CommandDispatcher::route_intent(
             intent,
             AppCommandRouteContext::from_active(&self.active_documents),
@@ -18217,7 +19956,9 @@ impl AppComposition {
                     edit.clone(),
                     event_context.correlation_id,
                 )?;
-                self.set_cursor_after_edit(*buffer_id, edit)?;
+                if !preserve_mapped_delete_carets {
+                    self.set_cursor_after_edit(*buffer_id, edit)?;
+                }
                 self.emit_transaction_event(&descriptor);
                 // PKT-LSP-B T3: notify live LSP session of the buffer change.
                 // `did_change` is a fire-and-forget notification; the underlying
@@ -18243,12 +19984,19 @@ impl AppComposition {
                     )?;
                     self.collapse_selection_to_cursor(*buffer_id, selection.start)?;
                     self.emit_transaction_event(&descriptor);
+                    self.notify_lsp_did_change(*buffer_id, &descriptor);
                 }
                 return Ok(AppCommandOutcome::ClipboardUpdated(metadata));
             }
             AppCommandRequest::SelectAll { buffer_id } => {
                 self.select_all_buffer(*buffer_id)?;
                 return Ok(AppCommandOutcome::SelectionSet(*buffer_id));
+            }
+            AppCommandRequest::MoveVertically { buffer_id, request } => {
+                self.active_documents.ensure_active_buffer(*buffer_id)?;
+                let request = visual_navigation_request(request)?;
+                self.editor.move_vertically(*buffer_id, request)?;
+                return Ok(AppCommandOutcome::CursorSet(*buffer_id));
             }
             _ => {}
         }
@@ -18257,7 +20005,7 @@ impl AppComposition {
         if let Some(outcome) = CommandExecutionService::execute(
             &request,
             &mut self.editor,
-            &self.workspace,
+            &*self.workspace,
             &mut state,
         )? {
             state.apply_to_active(&mut self.active_documents);
@@ -18310,6 +20058,102 @@ impl AppComposition {
                 self.set_buffer_selection(buffer_id, range)?;
                 Ok(AppCommandOutcome::SelectionSet(buffer_id))
             }
+            AppCommandRequest::SetVisualCursor {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                cursor,
+                affinity,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                self.editor.set_visual_directed_carets(
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    vec![
+                        legion_editor::DirectedCaret::new(
+                            CommandDispatcher::editor_position(cursor),
+                            None,
+                        )
+                        .with_affinity(affinity),
+                    ],
+                )?;
+                Ok(AppCommandOutcome::CursorSet(buffer_id))
+            }
+            AppCommandRequest::SetVisualDirectedSelection {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                anchor,
+                head,
+                head_affinity,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                self.editor.set_visual_directed_carets(
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    vec![
+                        legion_editor::DirectedCaret::new(
+                            CommandDispatcher::editor_position(head),
+                            Some(CommandDispatcher::editor_position(anchor)),
+                        )
+                        .with_affinity(head_affinity),
+                    ],
+                )?;
+                Ok(AppCommandOutcome::SelectionSet(buffer_id))
+            }
+            AppCommandRequest::MoveToBoundary {
+                buffer_id,
+                boundary,
+                extend,
+            } => {
+                let boundary = match boundary {
+                    legion_ui::EditorBoundaryKind::LineStart => {
+                        legion_editor::BoundaryKind::LineStart
+                    }
+                    legion_ui::EditorBoundaryKind::LineEnd => legion_editor::BoundaryKind::LineEnd,
+                    legion_ui::EditorBoundaryKind::DocumentStart => {
+                        legion_editor::BoundaryKind::DocumentStart
+                    }
+                    legion_ui::EditorBoundaryKind::DocumentEnd => {
+                        legion_editor::BoundaryKind::DocumentEnd
+                    }
+                };
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                self.editor.move_to_boundary(buffer_id, boundary, extend)?;
+                Ok(AppCommandOutcome::CursorSet(buffer_id))
+            }
+            AppCommandRequest::MoveHorizontally {
+                buffer_id,
+                left,
+                extend,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                let direction = if left {
+                    legion_editor::HorizontalDirection::Left
+                } else {
+                    legion_editor::HorizontalDirection::Right
+                };
+                self.editor
+                    .move_horizontally(buffer_id, direction, extend)?;
+                Ok(AppCommandOutcome::CursorSet(buffer_id))
+            }
+            AppCommandRequest::SetDirectedSelection {
+                buffer_id,
+                anchor,
+                head,
+            } => {
+                self.active_documents.ensure_active_buffer(buffer_id)?;
+                self.editor.set_directed_carets(
+                    buffer_id,
+                    vec![legion_editor::DirectedCaret::new(
+                        CommandDispatcher::editor_position(head),
+                        Some(CommandDispatcher::editor_position(anchor)),
+                    )],
+                )?;
+                Ok(AppCommandOutcome::SelectionSet(buffer_id))
+            }
             AppCommandRequest::SetViewportScroll { buffer_id, scroll } => {
                 self.set_viewport_scroll(buffer_id, scroll)?;
                 Ok(AppCommandOutcome::ViewportScrollSet(buffer_id))
@@ -18340,6 +20184,15 @@ impl AppComposition {
             ),
             AppCommandRequest::OpenSettings => {
                 Ok(AppCommandOutcome::SettingsUpdated(self.open_settings()))
+            }
+            AppCommandRequest::OpenAbout => Ok(AppCommandOutcome::AboutOpened),
+            AppCommandRequest::ExportSupportBundle => {
+                let path = self.export_support_bundle()?;
+                Ok(AppCommandOutcome::SupportBundleExported(path))
+            }
+            AppCommandRequest::AttachAcpHost { program, args } => {
+                self.set_acp_host_command(program.clone(), args.clone());
+                Ok(AppCommandOutcome::Noop)
             }
             AppCommandRequest::SetThemePreference { preference } => Ok(
                 AppCommandOutcome::SettingsUpdated(self.set_theme_preference(preference)),
@@ -18437,8 +20290,22 @@ impl AppComposition {
             AppCommandRequest::StageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
             )),
+            AppCommandRequest::StageFocusedGitHunk => {
+                let Some(hunk_id) = self.focused_git_hunk_id.clone() else {
+                    return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
+                };
+                Ok(AppCommandOutcome::GitUpdated(
+                    self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Unstaged)?,
+                ))
+            }
             AppCommandRequest::UnstageGitHunk { hunk_id } => Ok(AppCommandOutcome::GitUpdated(
                 self.stage_or_unstage_git_hunk(&hunk_id, GitHunkStage::Staged)?,
+            )),
+            AppCommandRequest::StageGitPath { path } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_path(&path, true)?,
+            )),
+            AppCommandRequest::UnstageGitPath { path } => Ok(AppCommandOutcome::GitUpdated(
+                self.stage_or_unstage_git_path(&path, false)?,
             )),
             AppCommandRequest::ResolveGitConflict { path, choice } => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -18509,12 +20376,15 @@ impl AppComposition {
                     self.git_projection.commit_validation_warnings = validation.warnings;
                     return Ok(AppCommandOutcome::GitUpdated(self.git_projection.clone()));
                 }
-                commit_git_changes(Path::new(root_path), &message)
-                    .map_err(git_inspection_protocol_error)?;
                 // Clear stale validation state after a successful commit.
                 self.git_projection.commit_validation_errors = Vec::new();
                 self.git_projection.commit_validation_warnings = Vec::new();
-                Ok(AppCommandOutcome::GitUpdated(self.refresh_git_projection()))
+                Ok(AppCommandOutcome::GitUpdated(self.enqueue_git_mutation(
+                    GitMutateOp::Commit {
+                        root: PathBuf::from(root_path),
+                        message,
+                    },
+                )?))
             }
             AppCommandRequest::SwitchGitBranch { branch } => {
                 let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
@@ -18650,7 +20520,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP hover (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_hover_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Hover, position)?,
                 ))
             }
@@ -18660,7 +20530,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP completion (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_completion_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Completion, position)?,
                 ))
             }
@@ -18698,7 +20568,7 @@ impl AppComposition {
             } => {
                 // Issue async LSP definition (non-blocking; result arrives next frame via drain).
                 self.issue_lsp_definition_request(buffer_id, position);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::Definition, position)?,
                 ))
             }
@@ -18710,15 +20580,35 @@ impl AppComposition {
                 // frame via drain). The index answer below is returned now so
                 // the panel is never empty while the server thinks.
                 self.issue_lsp_references_request(buffer_id, position, true);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(buffer_id, LanguageReadKind::References, position)?,
                 ))
             }
+            AppCommandRequest::PrepareCallHierarchy {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(buffer_id, position, None),
+            AppCommandRequest::ShowIncomingCalls {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Incoming),
+            ),
+            AppCommandRequest::ShowOutgoingCalls {
+                buffer_id,
+                position,
+            } => self.call_hierarchy_outcome(
+                buffer_id,
+                position,
+                Some(CallHierarchyDirection::Outgoing),
+            ),
             AppCommandRequest::RefreshOutline { buffer_id } => {
                 // Issue async LSP documentSymbol (non-blocking; result arrives
                 // next frame via drain).
                 self.issue_lsp_document_symbol_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::Outline,
@@ -18741,7 +20631,7 @@ impl AppComposition {
                 if let Some(range) = self.whole_document_utf16_range(buffer_id) {
                     self.issue_lsp_inlay_hint_request(buffer_id, range);
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::InlayHints,
@@ -18756,7 +20646,7 @@ impl AppComposition {
             }
             AppCommandRequest::RefreshCodeLenses { buffer_id } => {
                 self.issue_lsp_code_lens_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                Ok(AppCommandOutcome::language_tooling(
                     self.run_language_read(
                         buffer_id,
                         LanguageReadKind::CodeLens,
@@ -18770,19 +20660,23 @@ impl AppComposition {
                 ))
             }
             AppCommandRequest::RequestFormattingProposal { buffer_id } => {
-                self.issue_lsp_formatting_request(buffer_id);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
-                    self.run_language_proposal(
-                        buffer_id,
+                if self.issue_lsp_formatting_request(buffer_id) {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                }
+                let Some(input) = self.language_request_input_for_failure(buffer_id) else {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                };
+                Ok(AppCommandOutcome::language_tooling(
+                    self.language_tooling.record_proposal_failure(
+                        &input,
                         LanguageProposalKind::Formatting,
-                        TextCoordinate {
-                            line: 0,
-                            character: 0,
-                            byte_offset: Some(0),
-                            utf16_offset: Some(0),
-                        },
-                        "format".to_string(),
-                    )?,
+                        "formatting unavailable until a live capable language server is ready"
+                            .to_string(),
+                    ),
                 ))
             }
             AppCommandRequest::RequestRenameProposal {
@@ -18790,59 +20684,111 @@ impl AppComposition {
                 position,
                 new_name,
             } => {
-                // Ask the language server too. Its answer arrives on a later
-                // drain as its own proposal; the index-backed one below returns
-                // now so the surface is never blank. Neither writes anything —
-                // both stop at Previewed.
-                self.issue_lsp_rename_request(buffer_id, position, new_name.clone());
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
-                    self.run_language_proposal(
-                        buffer_id,
-                        LanguageProposalKind::Rename,
-                        position,
-                        new_name,
-                    )?,
-                ))
-            }
-            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => {
-                if let Some(range) = self.whole_document_utf16_range(buffer_id) {
-                    self.issue_lsp_code_action_request(buffer_id, range, true);
+                if self.issue_lsp_rename_request(buffer_id, position, new_name.clone()) {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
                 }
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
-                    self.run_language_proposal(
-                        buffer_id,
-                        LanguageProposalKind::OrganizeImports,
-                        TextCoordinate {
-                            line: 0,
-                            character: 0,
-                            byte_offset: Some(0),
-                            utf16_offset: Some(0),
-                        },
-                        "organize-imports".to_string(),
-                    )?,
+                let Some(input) = self.language_request_input_for_failure(buffer_id) else {
+                    return Ok(AppCommandOutcome::language_tooling(
+                        self.language_tooling.projection(),
+                    ));
+                };
+                Ok(AppCommandOutcome::language_tooling(
+                    self.language_tooling.record_proposal_failure(
+                        &input,
+                        LanguageProposalKind::Rename,
+                        self.lsp_rename_unavailable_message(buffer_id).to_string(),
+                    ),
                 ))
             }
+            AppCommandRequest::RequestOrganizeImportsProposal { buffer_id } => Ok(
+                AppCommandOutcome::language_tooling(self.run_organize_imports_proposal(buffer_id)?),
+            ),
             AppCommandRequest::RequestCodeActionProposal {
                 buffer_id,
-                action_id,
-            } => Ok(AppCommandOutcome::LanguageToolingUpdated(
-                self.run_language_proposal(
+                action_id: _,
+            } => Ok(AppCommandOutcome::language_tooling(
+                self.record_language_proposal_unavailable(
                     buffer_id,
                     LanguageProposalKind::CodeAction,
-                    TextCoordinate {
-                        line: 0,
-                        character: 0,
-                        byte_offset: Some(0),
-                        utf16_offset: Some(0),
-                    },
-                    action_id,
                 )?,
             )),
+            AppCommandRequest::RequestCodeActions { buffer_id, range } => {
+                let issued = self.request_code_actions(buffer_id, range);
+                if !issued && let Some(input) = self.language_request_input_for_failure(buffer_id) {
+                    let _ = self.language_tooling.record_proposal_failure(
+                        &input,
+                        LanguageProposalKind::CodeAction,
+                        "code actions unavailable until a live capable language server is ready"
+                            .to_string(),
+                    );
+                }
+                Ok(AppCommandOutcome::language_tooling(
+                    self.language_tooling.projection(),
+                ))
+            }
+            AppCommandRequest::SelectCodeAction {
+                response_id,
+                action_id,
+            } => {
+                let response_id = if response_id.is_empty() {
+                    self.code_action_authority
+                        .current_response_id()
+                        .unwrap_or_default()
+                        .to_string()
+                } else {
+                    response_id
+                };
+                let failure_buffer = self
+                    .code_action_authority
+                    .candidate_buffer_id(&response_id, &action_id);
+                let failure_kind = self
+                    .code_action_authority
+                    .candidate_is_organize_imports(&response_id, &action_id)
+                    .map(|organize| {
+                        if organize {
+                            LanguageProposalKind::OrganizeImports
+                        } else {
+                            LanguageProposalKind::CodeAction
+                        }
+                    });
+                if let Err(error) = self.select_code_action_and_propose(&response_id, &action_id)
+                    && let Some(buffer_id) =
+                        failure_buffer.or(self.active_documents.active_buffer_id)
+                    && let Some(input) = self.language_request_input_for_failure(buffer_id)
+                {
+                    let _ = self.language_tooling.record_proposal_failure(
+                        &input,
+                        failure_kind.unwrap_or(LanguageProposalKind::CodeAction),
+                        format!("code action selection refused: {error}"),
+                    );
+                }
+                Ok(AppCommandOutcome::language_tooling(
+                    self.language_tooling.projection(),
+                ))
+            }
             AppCommandRequest::CancelLanguageOperation { operation_id } => {
+                if !self
+                    .code_action_authority
+                    .remove_resolve_attempt(&operation_id)
+                {
+                    self.clear_code_actions();
+                }
                 let event_context = self.next_event_context();
-                self.language_tooling
-                    .cancel_operation(operation_id, event_context);
-                Ok(AppCommandOutcome::LanguageToolingUpdated(
+                self.deferred_lsp_writes.remove(&operation_id);
+                if let Some(pending) = self.pending_lsp_writes.remove(&operation_id) {
+                    let _ = self.language_tooling.upsert_write_operation(
+                        &pending,
+                        LanguageToolingStatusKind::Cancelled,
+                        "cancelled by app authority".to_string(),
+                        None,
+                    );
+                } else {
+                    self.language_tooling
+                        .cancel_operation(operation_id, event_context);
+                }
+                Ok(AppCommandOutcome::language_tooling(
                     self.language_tooling.projection(),
                 ))
             }
@@ -19074,9 +21020,34 @@ impl AppComposition {
                 Ok(AppCommandOutcome::Opened(self.open_file(path)?))
             }
             AppCommandRequest::OpenPathAtPosition { path, position } => {
+                let previous_buffer = self.active_documents.active_buffer_id;
+                let previous_cursors =
+                    previous_buffer.and_then(|buffer_id| self.editor.cursors(buffer_id).ok());
                 let outcome = self.open_file(path)?;
                 if let Some(buffer_id) = self.active_documents.active_buffer_id {
-                    self.set_buffer_cursor(buffer_id, position)?;
+                    let cursor = match self.editor.protocol_position(
+                        buffer_id,
+                        position.line,
+                        position.character,
+                    ) {
+                        Ok(cursor) => cursor,
+                        Err(error) => {
+                            // Opening the destination is intentionally retained as a tab, but a
+                            // bad protocol coordinate must not strand navigation on that tab.
+                            // Restore the prior authority-selected tab and its caret set before
+                            // returning the validation error.
+                            if let Some(previous_buffer) = previous_buffer {
+                                let _ = self.switch_tab(previous_buffer);
+                                if let Some(previous_cursors) = previous_cursors {
+                                    let _ =
+                                        self.editor.set_cursors(previous_buffer, previous_cursors);
+                                }
+                            }
+                            return Err(error.into());
+                        }
+                    };
+                    self.editor
+                        .set_cursors(buffer_id, vec![legion_editor::Cursor { position: cursor }])?;
                 }
                 // A definition result is a one-shot navigation surface. Do
                 // not carry the source file's picker data into the destination.
@@ -19184,6 +21155,15 @@ impl AppComposition {
             } => Ok(AppCommandOutcome::PluginCommandInvoked(Box::new(
                 self.invoke_plugin_command(plugin_id, command_id, metadata_label)?,
             ))),
+            AppCommandRequest::ExtensionCatalog(request) => Ok(
+                AppCommandOutcome::ExtensionCatalogChanged(self.apply_extension_request(request)?),
+            ),
+            AppCommandRequest::CloudLane(cloud_lane_egress::CloudLaneRequest::CancelTask {
+                task_id,
+                reason_label,
+            }) => Ok(AppCommandOutcome::CloudLaneTaskCancelled(Box::new(
+                self.cancel_legion_cloud_lane_task(&task_id, &reason_label)?,
+            ))),
             AppCommandRequest::JoinCollaborationSession { session_id } => {
                 self.join_collaboration_session(session_id)?;
                 Ok(AppCommandOutcome::CollaborationSessionJoined(session_id))
@@ -19211,8 +21191,45 @@ impl AppComposition {
                 self.restart_lsp_session_for_current_workspace();
                 Ok(AppCommandOutcome::Noop)
             }
+            AppCommandRequest::ConfigureTypeScriptToolchain {
+                server_archive,
+                compiler_archive,
+                node_executable,
+            } => {
+                self.configure_typescript_toolchain(
+                    server_archive,
+                    compiler_archive,
+                    node_executable,
+                )?;
+                Ok(AppCommandOutcome::Noop)
+            }
+            AppCommandRequest::ClearTypeScriptToolchain => {
+                self.clear_typescript_toolchain();
+                Ok(AppCommandOutcome::Noop)
+            }
             _ => unreachable!("command execution service handled non-workflow command"),
         }
+    }
+
+    /// Apply one extension-catalog request through app-owned extension authority.
+    ///
+    /// Verification and per-capability approval both live in
+    /// [`extension_management::ExtensionCatalog`]; this is only the routing seam.
+    pub fn apply_extension_request(
+        &mut self,
+        request: extension_management::ExtensionCatalogRequest,
+    ) -> Result<extension_management::ExtensionCatalogChange, AppCompositionError> {
+        self.extension_catalog.apply(request).map_err(|error| {
+            AppCompositionError::Protocol(ProtocolError {
+                code: "extension_catalog_refused".to_string(),
+                message: error.to_string(),
+            })
+        })
+    }
+
+    /// Extension catalog entries for projection and tests.
+    pub fn extension_catalog_projection(&self) -> Vec<legion_protocol::ExtensionCatalogEntry> {
+        self.extension_catalog.projection()
     }
 
     /// Load a Phase 5 plugin manifest after app-level trust and manifest validation.
@@ -19442,6 +21459,7 @@ impl AppComposition {
         }
         let descriptor = self.apply_collaboration_operation_through_editor(operation)?;
         self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(descriptor.buffer_id, &descriptor);
         let audit = self.collaboration_audit_record(Some(descriptor.correlation_id), None, None)?;
         self.persist_collaboration_audit(audit)?;
         Ok(Some(AppCommandOutcome::CollaborationOperationApplied(
@@ -19637,9 +21655,16 @@ impl AppComposition {
     }
 
     /// Submit a metadata-only Legion Cloud Lane task and project its status.
+    ///
+    /// Requires a [`CloudLaneEgressAcknowledgement`], which only a rendered
+    /// [`CloudLaneEgressManifestView`] can produce, and which is bound to the
+    /// manifest's contents rather than its id. `scope_visible_to_user` on the
+    /// manifest is a claim by the caller; this is the part that costs
+    /// something.
     pub fn submit_legion_cloud_lane_task(
         &mut self,
         request: LegionCloudLaneTaskRequest,
+        acknowledgement: &CloudLaneEgressAcknowledgement,
     ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
         self.require_automate_mode()?;
         let context = self.active_documents.require_workspace_context()?;
@@ -19648,9 +21673,37 @@ impl AppComposition {
                 "cloud lane task workspace does not match active workspace".to_string(),
             ));
         }
+        if !acknowledgement.covers(&request) {
+            return Err(AppCompositionError::Remote(
+                "cloud lane egress manifest was not surfaced for this exact upload".to_string(),
+            ));
+        }
         let event_sequence = self.event_sequence_generator.next();
         self.legion_cloud_lane
             .submit_task(request, &context, event_sequence)
+    }
+
+    /// Build the egress manifest a renderer must show before submitting.
+    pub fn legion_cloud_lane_egress_manifest(
+        request: &LegionCloudLaneTaskRequest,
+    ) -> CloudLaneEgressManifestView {
+        CloudLaneEgressManifestView::from_request(request)
+    }
+
+    /// Cancel an in-flight Legion Cloud Lane task.
+    ///
+    /// The client transport has had `cancel_task` since the substrate landed;
+    /// nothing in the product could reach it, so "cancellable mid-flight" was
+    /// true of the transport and false of the application.
+    pub fn cancel_legion_cloud_lane_task(
+        &mut self,
+        task_id: &LegionCloudLaneTaskId,
+        reason_label: &str,
+    ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
+        self.require_automate_mode()?;
+        let event_sequence = self.event_sequence_generator.next();
+        self.legion_cloud_lane
+            .cancel_task(task_id, reason_label, event_sequence)
     }
 
     /// Return the current metadata-only Legion Cloud Lane projection.
@@ -19837,7 +21890,7 @@ impl AppComposition {
             let _spawn_message_id = self.delegate_workflow.record_system_message(
                 format!(
                     "acp.host.spawn status={} stdout_bytes={} stderr_bytes={}",
-                    host_output.status,
+                    host_output.status_label,
                     host_output.stdout.len(),
                     host_output.stderr.len()
                 ),
@@ -19846,7 +21899,7 @@ impl AppComposition {
                 correlation_id,
                 causality_id,
             );
-            if !host_output.status.success() {
+            if !host_output.success {
                 let _terminate_message_id = self.delegate_workflow.record_system_message(
                     format!(
                         "acp.host.terminate failure stdout={} stderr={}",
@@ -20045,6 +22098,8 @@ impl AppComposition {
         #[cfg(any(test, feature = "test-helpers"))]
         let inject_spawn_failure = std::mem::take(&mut self.injected_delegated_spawn_failure);
         let worker_cancellation = cancellation_flag.clone();
+        let acp_host_command = self.acp_host_command.clone();
+        let worker_task_id = task_id.clone();
         let mut sandbox_guard =
             DelegatedSandboxCleanupGuard::new(orchestrator, implicit_permission);
         let worker = move || {
@@ -20079,6 +22134,7 @@ impl AppComposition {
                         loop_result: Some(
                             legion_agent::agent_loop::DelegatedTaskLoopResult::Cancelled,
                         ),
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: None,
                         sandbox_enforcement_label: None,
                     });
@@ -20087,10 +22143,27 @@ impl AppComposition {
                     return Ok(DelegatedTaskRunCompletion {
                         audit_steps: Vec::new(),
                         loop_result: None,
+                        acp_proposals: Vec::new(),
                         sandbox_allocation_failure: Some(error.to_string()),
                         sandbox_enforcement_label: None,
                     });
                 }
+                let acp_proposals = if let Some(command) = acp_host_command.as_ref() {
+                    let target_file = config.worktree_root.join(format!(
+                        "delegated-task/{}.proposal.txt",
+                        safe_path_component(&worker_task_id, "task")
+                    ));
+                    vec![run_acp_host_proposal(
+                        command,
+                        &config.worktree_root,
+                        &target_file,
+                        &worker_task_id,
+                        correlation_id,
+                        causality_id,
+                    )?]
+                } else {
+                    Vec::new()
+                };
                 let tool_host = AppDelegatedToolHost::new(
                     config.worktree_root.clone(),
                     std::collections::BTreeSet::new(),
@@ -20110,6 +22183,7 @@ impl AppComposition {
                 Ok(DelegatedTaskRunCompletion {
                     audit_steps: audit_sink.steps,
                     loop_result: Some(loop_result),
+                    acp_proposals,
                     sandbox_allocation_failure: None,
                     sandbox_enforcement_label: tool_host.last_enforcement_summary(),
                 })
@@ -20231,6 +22305,7 @@ impl AppComposition {
         Ok(Some(self.finish_background_delegated_task(
             loop_result,
             completion.audit_steps,
+            completion.acp_proposals,
         )?))
     }
 
@@ -20239,6 +22314,7 @@ impl AppComposition {
         &mut self,
         loop_result: legion_agent::agent_loop::DelegatedTaskLoopResult,
         audit_steps: Vec<legion_protocol::DelegatedTaskLoopStepRecord>,
+        acp_proposals: Vec<legion_protocol::AssistedAiEditProposalOutput>,
     ) -> Result<AppDelegatedTaskOutcome, AppCompositionError> {
         use legion_agent::agent_loop::DelegatedTaskLoopResult;
         match &loop_result {
@@ -20254,8 +22330,10 @@ impl AppComposition {
         Ok(match loop_result {
             DelegatedTaskLoopResult::Completed {
                 final_message,
-                proposals,
+                proposals: loop_proposals,
             } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -20278,10 +22356,15 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
                 // Register before reporting: these proposals are reviewable on
                 // the same terms as a completed run's, and the run is still
                 // waiting on a human either way.
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 self.delegate_workflow.set_runtime_activation(
                     DelegatedTaskRuntimeActivationState::WaitingForApproval,
@@ -21077,6 +23160,34 @@ impl AppComposition {
         self.delegate_workflow
             .set_runtime_activation(DelegatedTaskRuntimeActivationState::SandboxAllocated);
         let sandbox_path = sandbox_guard.orchestrator.sandbox_path().to_path_buf();
+        let acp_proposals = if let Some(command) = self.acp_host_command.as_ref() {
+            let target_file = sandbox_path.join(format!(
+                "delegated-task/{}.proposal.txt",
+                safe_path_component(&task_id, "task")
+            ));
+            match run_acp_host_proposal(
+                command,
+                &sandbox_path,
+                &target_file,
+                &task_id,
+                correlation_id,
+                causality_id,
+            ) {
+                Ok(proposal) => vec![proposal],
+                Err(error) => {
+                    let cleanup_result = sandbox_guard.cleanup();
+                    let message = match cleanup_result {
+                        Ok(()) => error.to_string(),
+                        Err(cleanup_error) => format!("{error}; {cleanup_error}"),
+                    };
+                    self.delegate_workflow
+                        .set_runtime_activation(DelegatedTaskRuntimeActivationState::Failed);
+                    return Err(AppCompositionError::AiRuntime(message));
+                }
+            }
+        } else {
+            Vec::new()
+        };
 
         // Build the tool host backed by `spawn_sandboxed`.
         let tool_host =
@@ -21230,7 +23341,9 @@ impl AppComposition {
                 final_message,
                 proposals: loop_proposals,
             } => {
-                let registered = self.register_delegated_task_proposals(loop_proposals)?;
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
+                let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::Completed {
                     final_message,
                     proposals: registered,
@@ -21249,7 +23362,12 @@ impl AppComposition {
                     audit_steps,
                 }
             }
-            DelegatedTaskLoopResult::StoppedNoProgress { reason, proposals } => {
+            DelegatedTaskLoopResult::StoppedNoProgress {
+                reason,
+                proposals: loop_proposals,
+            } => {
+                let mut proposals = acp_proposals;
+                proposals.extend(loop_proposals);
                 let registered = self.register_delegated_task_proposals(proposals)?;
                 AppDelegatedTaskOutcome::StoppedNoProgress {
                     reason,
@@ -24255,7 +26373,6 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::Explain,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
     }
 
@@ -24267,693 +26384,7 @@ impl AppComposition {
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
             instruction_label,
-            legion_protocol::AssistedAiProviderClass::LocalLoopback,
         )
-    }
-
-    fn run_assisted_ai_operation(
-        &mut self,
-        operation_class: legion_protocol::AssistedAiOperationClass,
-        instruction_label: impl Into<String>,
-        provider_class: legion_protocol::AssistedAiProviderClass,
-    ) -> Result<AppAiRunOutcome, AppCompositionError> {
-        self.require_assist_mode()?;
-        let instruction_label = instruction_label.into();
-        let context = self.active_documents.require_active_save_context()?;
-        let event_context = self.next_event_context();
-        let generated_at = TimestampMillis::now();
-        let snapshot = self.editor.current_snapshot(context.buffer_id)?.clone();
-        let run_id =
-            legion_protocol::AgentRunId(format!("phase4-run-{}", event_context.correlation_id.0));
-        let route_id = format!("phase4-route-{}", event_context.correlation_id.0);
-        let snapshot_hash = FileFingerprint {
-            algorithm: "legion-text-snapshot".to_string(),
-            value: snapshot.content_hash.clone(),
-        };
-        let instruction_bundle = instruction_prefix_bundle(
-            context.workspace_id,
-            generated_at,
-            self.active_documents
-                .workspace_root_path
-                .as_ref()
-                .map(|path| std::path::Path::new(path.as_str())),
-            std::env::var_os("HOME")
-                .as_deref()
-                .map(std::path::Path::new),
-        );
-        let context_manifest_projection = Phase4ContextAssemblyService::assemble_context_manifest(
-            &context,
-            &run_id,
-            &route_id,
-            snapshot.snapshot_id,
-            snapshot.buffer_version,
-            snapshot_hash,
-            snapshot.byte_len as u64,
-            snapshot.line_count.min(u32::MAX as usize) as u32,
-            generated_at,
-            instruction_bundle.manifest_items,
-        );
-        let privacy_inspector_projection =
-            legion_protocol::privacy_inspector_from_context_manifest_projection(
-                &context_manifest_projection,
-                format!("phase4:privacy:{}", run_id.0),
-                generated_at,
-                1,
-            );
-        let permission_budget_projection = phase4_permission_budget_projection(
-            &context_manifest_projection,
-            &run_id,
-            generated_at,
-        );
-
-        let mut agent = AgentRuntime::new(run_id.clone());
-        agent
-            .transition(
-                legion_protocol::AgentRunState::Planning,
-                "agent.planning.context_ready",
-                event_context.correlation_id,
-                event_context.causality_id,
-                self.event_sequence_generator.next(),
-            )
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-
-        // Authorize the *actual* backend that will receive buffer text (Ollama /
-        // Anthropic / fixture), not a hard-coded deterministic localhost route.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
-        let (
-            route_provider_id,
-            route_model,
-            route_provider_class,
-            route_network,
-            route_health,
-            route_cost,
-            route_privacy,
-        ) = product_ai_route_fields(live_backend);
-        let provider_route_request = legion_protocol::AssistedAiProviderRouteRequest {
-            route_id: route_id.clone(),
-            provider_id: route_provider_id.clone(),
-            model_label: route_model.clone(),
-            provider_class: route_provider_class,
-            operation_class,
-            context_manifest: trust_reference(
-                &context_manifest_projection.manifest.manifest_id,
-                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-            ),
-            privacy_inspector: trust_reference(
-                &privacy_inspector_projection.inspector_id,
-                legion_protocol::AssistedAiTrustProjectionKind::PrivacyInspector,
-            ),
-            permission_budget: trust_reference(
-                &permission_budget_projection.projection_id,
-                legion_protocol::AssistedAiTrustProjectionKind::PermissionBudget,
-            ),
-            prompt_prefix: instruction_bundle.prompt_prefix,
-            proposal_intent: legion_protocol::AssistedAiProposalTargetIntent {
-                payload_kind: legion_protocol::ProposalPayloadKind::TextEdit,
-                target_coverage: ProposalTargetCoverage {
-                    coverage_kind: ProposalTargetCoverageKind::Complete,
-                    targets: vec![ProposalAffectedTarget {
-                        target_id: format!("file:{}", context.metadata.identity.file_id.0),
-                        kind: ProposalTargetKind::OpenBuffer,
-                        workspace_id: Some(context.workspace_id),
-                        file_id: Some(context.metadata.identity.file_id),
-                        buffer_id: Some(context.buffer_id),
-                        path: Some(context.metadata.identity.canonical_path.clone()),
-                        terminal_session_id: None,
-                        plugin_id: None,
-                        remote_authority: None,
-                        collaboration_session_id: None,
-                        byte_ranges: vec![legion_protocol::ByteRange::new(0, 0)],
-                        redaction_hints: vec![RedactionHint::MetadataOnly],
-                    }],
-                    omitted_target_count: 0,
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                },
-                required_capability: CapabilityId("editor.write".to_string()),
-                risk_label: legion_protocol::ProposalRiskLabel::Low,
-                privacy_label: route_privacy,
-                labels: vec![instruction_label.clone()],
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            },
-            policy_decision_id: None,
-            required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: route_network,
-            cancellation_token: legion_protocol::CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: route_health,
-            cost_labels: route_cost,
-            principal_id: context.principal.clone(),
-            workspace_trust_state: context.trust.clone(),
-            correlation_id: event_context.correlation_id,
-            causality_id: event_context.causality_id,
-            event_sequence: self.event_sequence_generator.next(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let broker = DenyByDefaultBroker::new(
-            product_ai_security_policy(live_backend),
-            CapabilityNamespace("app.ai".to_string()),
-        );
-        // Capability/network decision only — product prose is filled by
-        // complete_product_chat after authorization (registry may lack BYOK key).
-        let route_response = {
-            let decision = broker
-                .handle(CapabilityRequest::Request {
-                    principal_id: context.principal.clone(),
-                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
-                    workspace_trust_state: context.trust.clone(),
-                    target_path: None,
-                    decision_id: None,
-                    context: legion_protocol::CapabilityRequestContext {
-                        network_target: provider_route_request.network_target.clone(),
-                        ..Default::default()
-                    },
-                    correlation_id: event_context.correlation_id,
-                })
-                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
-            let granted = matches!(
-                decision,
-                CapabilityResponse::Decision(ref d) if d.granted
-            ) || matches!(decision, CapabilityResponse::Granted(_));
-            if !granted {
-                let event_sequence = provider_route_request.event_sequence;
-                let refusal = legion_protocol::AssistedAiRefusalMetadata {
-                    reason_code: "capability.denied".to_string(),
-                    label: "provider capability denied by policy".to_string(),
-                    provider_id: Some(route_provider_id.clone()),
-                    operation_class: Some(operation_class),
-                    privacy_scope: None,
-                    capability: Some(CapabilityId("ai.provider.invoke".to_string())),
-                    budget_id: None,
-                    risk_label: legion_protocol::ProposalRiskLabel::High,
-                    reasons: vec!["capability.denied".to_string()],
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                };
-                return self.finish_assisted_ai_metadata_only_run(
-                    run_id,
-                    route_id,
-                    operation_class,
-                    provider_class,
-                    provider_route_request.clone(),
-                    legion_protocol::AssistedAiProviderRouteResponse {
-                        route_id: provider_route_request.route_id.clone(),
-                        invocation_state:
-                            legion_protocol::AssistedAiProviderInvocationState::Refused,
-                        route_decision: legion_protocol::AssistedAiRouteDecision {
-                            disposition: legion_protocol::AssistedAiRequestDisposition::Refused,
-                            provider_invocation:
-                                legion_protocol::AssistedAiProviderInvocationState::Refused,
-                            refusal: Some(refusal.clone()),
-                            reasons: vec!["capability.denied".to_string()],
-                            redaction_hints: vec![RedactionHint::MetadataOnly],
-                            schema_version: 1,
-                        },
-                        provider_id: route_provider_id.clone(),
-                        model_label: route_model.clone(),
-                        output_labels: vec!["output.not_encoded".to_string()],
-                        refusal: Some(refusal),
-                        correlation_id: event_context.correlation_id,
-                        causality_id: event_context.causality_id,
-                        event_sequence,
-                        redaction_hints: vec![RedactionHint::MetadataOnly],
-                        schema_version: 1,
-                    },
-                    context_manifest_projection,
-                    privacy_inspector_projection,
-                    permission_budget_projection,
-                    generated_at,
-                    event_context,
-                    &mut agent,
-                );
-            }
-            // Still exercise the deterministic router for offline fixture metadata
-            // when no live backend is selected; live backends skip registry complete
-            // (credentials live in the product keyring path, not the registry).
-            if live_backend.is_none() {
-                ProviderRouter::new(&self.ai_registry, &broker)
-                    .route_completion(provider_route_request.clone())
-                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?
-            } else {
-                legion_protocol::AssistedAiProviderRouteResponse {
-                    route_id: provider_route_request.route_id.clone(),
-                    invocation_state: legion_protocol::AssistedAiProviderInvocationState::Completed,
-                    route_decision: legion_protocol::AssistedAiRouteDecision {
-                        disposition:
-                            legion_protocol::AssistedAiRequestDisposition::MetadataOnlyReady,
-                        provider_invocation:
-                            legion_protocol::AssistedAiProviderInvocationState::Completed,
-                        refusal: None,
-                        reasons: vec!["provider.authorized.product_edge".to_string()],
-                        redaction_hints: vec![RedactionHint::MetadataOnly],
-                        schema_version: 1,
-                    },
-                    provider_id: route_provider_id,
-                    model_label: route_model,
-                    output_labels: vec!["route.authorized".to_string()],
-                    refusal: None,
-                    correlation_id: event_context.correlation_id,
-                    causality_id: event_context.causality_id,
-                    event_sequence: provider_route_request.event_sequence,
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                    schema_version: 1,
-                }
-            }
-        };
-        if route_response.invocation_state
-            != legion_protocol::AssistedAiProviderInvocationState::Completed
-            || operation_class == legion_protocol::AssistedAiOperationClass::Explain
-        {
-            return self.finish_assisted_ai_metadata_only_run(
-                run_id,
-                route_id,
-                operation_class,
-                provider_class,
-                provider_route_request,
-                route_response,
-                context_manifest_projection,
-                privacy_inspector_projection,
-                permission_budget_projection,
-                generated_at,
-                event_context,
-                &mut agent,
-            );
-        }
-
-        agent
-            .transition(
-                legion_protocol::AgentRunState::Proposing,
-                "agent.proposing.provider_completed",
-                event_context.correlation_id,
-                event_context.causality_id,
-                self.event_sequence_generator.next(),
-            )
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-
-        // Live completion only after the capability/network decision above.
-        // Uses the authorized backend only (no silent Ollama→Anthropic fallback).
-        let buffer_excerpt = self
-            .editor
-            .text(context.buffer_id)
-            .unwrap_or("")
-            .chars()
-            .take(4_000)
-            .collect::<String>();
-        let preconditions = ProposalVersionPreconditions {
-            file_version: Some(context.metadata.file_content_version),
-            buffer_version: Some(snapshot.buffer_version),
-            snapshot_id: Some(snapshot.snapshot_id),
-            generation: Some(context.metadata.workspace_generation),
-            file_content_version: Some(context.metadata.file_content_version),
-            workspace_generation: Some(context.metadata.workspace_generation),
-            expected_fingerprint: Some(context.metadata.fingerprint.clone()),
-            expected_file_length: context.metadata.file_length,
-            expected_modified_at: context.metadata.modified_at,
-        };
-        let pending_job = PendingAssistProposalJob {
-            run_id: run_id.clone(),
-            route_id: route_id.clone(),
-            operation_class,
-            provider_class,
-            provider_route_request: provider_route_request.clone(),
-            route_response: route_response.clone(),
-            context_manifest_projection: context_manifest_projection.clone(),
-            privacy_inspector_projection: privacy_inspector_projection.clone(),
-            permission_budget_projection: permission_budget_projection.clone(),
-            generated_at,
-            event_context,
-            principal: context.principal.clone(),
-            file_id: context.metadata.identity.file_id,
-            preconditions,
-            agent,
-        };
-
-        // Live path: stream on a worker thread so the UI can poll progressive
-        // deltas; proposal registration runs on poll_product_ai_stream when the
-        // worker finishes (Delegate-chat parity). Offline/fixture stays sync so
-        // tests keep receiving proposal_id in the same call.
-        let inject_assist_spawn_failure = {
-            #[cfg(any(test, feature = "test-helpers"))]
-            {
-                std::mem::take(&mut self.injected_assist_spawn_failure)
-            }
-            #[cfg(not(any(test, feature = "test-helpers")))]
-            {
-                false
-            }
-        };
-        #[cfg(feature = "ai")]
-        let use_background_live =
-            product_ai_will_attempt_live(self.preferred_ai_provider) || inject_assist_spawn_failure;
-        #[cfg(not(feature = "ai"))]
-        let use_background_live = false;
-        let lane_reservation = ProductAiLaneReservation::try_acquire(
-            self.live_product_ai_stream.clone(),
-            "assist.proposal",
-            "pending",
-            "",
-        )
-        .ok_or_else(|| {
-            AppCompositionError::AiRuntime(
-                "product AI provider lane is busy; poll the active result before dispatching another request"
-                    .to_string(),
-            )
-        })?;
-
-        #[cfg(feature = "ai")]
-        if use_background_live {
-            let preference = self.preferred_ai_provider;
-            let file_path = context.metadata.identity.canonical_path.0.clone();
-            let instruction_for_worker = instruction_label.clone();
-            let excerpt_for_worker = buffer_excerpt.clone();
-            let streaming_replay = legion_protocol::AgentReplayManifest {
-                run_id: run_id.clone(),
-                transitions: pending_job.agent.transitions().to_vec(),
-                context_manifests: vec![trust_reference(
-                    &context_manifest_projection.manifest.manifest_id,
-                    legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-                )],
-                provider_route_ids: vec![route_id.clone()],
-                proposal_ids: Vec::new(),
-                correlation_id: pending_job.event_context.correlation_id,
-                causality_id: pending_job.event_context.causality_id,
-                event_sequence: self.event_sequence_generator.next(),
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-                schema_version: 1,
-            };
-            let sink_delta = lane_reservation.sink();
-            let worker = move || {
-                let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-                let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-                    preference,
-                    &instruction_for_worker,
-                    &excerpt_for_worker,
-                    &file_path,
-                    Some(&mut on_delta),
-                );
-                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-                    provider_id: stream.provider_id.clone(),
-                    model: stream.model.clone(),
-                    text: stream.text_preview.clone(),
-                    stream_chunks: stream.chunks.clone(),
-                    streamed: stream.streamed,
-                });
-                lane_reservation.finish_background(
-                    ProductAiBackgroundResult {
-                        assistant_message_id: String::new(),
-                        content_label: String::new(),
-                        stream,
-                        assist_proposal: Some(proposal_source),
-                    },
-                    completion.as_ref(),
-                );
-            };
-            #[cfg(any(test, feature = "test-helpers"))]
-            let spawn_result = if inject_assist_spawn_failure {
-                Err(std::io::Error::other(
-                    "injected Assist background worker spawn failure",
-                ))
-            } else {
-                std::thread::Builder::new()
-                    .name("legion-assist-proposal".to_string())
-                    .spawn(worker)
-            };
-            #[cfg(not(any(test, feature = "test-helpers")))]
-            let spawn_result = std::thread::Builder::new()
-                .name("legion-assist-proposal".to_string())
-                .spawn(worker);
-            spawn_result.map_err(|error| {
-                AppCompositionError::AiRuntime(format!(
-                    "failed to spawn Assist background worker: {error}"
-                ))
-            })?;
-            self.pending_assist_proposal = Some(pending_job);
-            // Partial phase-4 projections are published only after the worker
-            // exists, so a failed spawn cannot leave a phantom in-flight run.
-            self.phase4_projection_state.context_manifest_projection =
-                Some(context_manifest_projection.clone());
-            self.phase4_projection_state.privacy_inspector_projection =
-                Some(privacy_inspector_projection.clone());
-            self.phase4_projection_state.permission_budget_projection =
-                Some(permission_budget_projection.clone());
-            // Streaming outcome: proposal_id arrives on the next poll cycle(s).
-            return Ok(AppAiRunOutcome {
-                run_id,
-                proposal_id: None,
-                proposal_created: None,
-                route_response,
-                context_manifest_projection,
-                privacy_inspector_projection,
-                permission_budget_projection,
-                refusal: None,
-                replay_manifest: streaming_replay,
-            });
-        }
-        // Silence unused when `ai` feature is off (background path is feature-gated).
-        #[cfg(not(feature = "ai"))]
-        let _ = use_background_live;
-
-        let sink_delta = lane_reservation.sink();
-        let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-        let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-            self.preferred_ai_provider,
-            &instruction_label,
-            &buffer_excerpt,
-            &context.metadata.identity.canonical_path.0,
-            Some(&mut on_delta),
-        );
-        let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-            provider_id: stream.provider_id.clone(),
-            model: stream.model.clone(),
-            text: stream.text_preview.clone(),
-            stream_chunks: stream.chunks.clone(),
-            streamed: stream.streamed,
-        });
-        lane_reservation.finish(completion.as_ref());
-        if let Some(stream) = stream {
-            self.last_product_ai_stream = Some(stream);
-        }
-
-        self.finish_assisted_edit_proposal_registration(pending_job, proposal_source)
-    }
-
-    /// Register the Assist edit proposal after live or fixture text is available.
-    fn finish_assisted_edit_proposal_registration(
-        &mut self,
-        mut job: PendingAssistProposalJob,
-        proposal_source: AssistedEditProposalSource,
-    ) -> Result<AppAiRunOutcome, AppCompositionError> {
-        let PendingAssistProposalJob {
-            run_id,
-            route_id,
-            operation_class,
-            provider_class,
-            provider_route_request,
-            route_response,
-            context_manifest_projection,
-            privacy_inspector_projection,
-            permission_budget_projection,
-            generated_at,
-            event_context,
-            principal,
-            file_id,
-            preconditions,
-            ref mut agent,
-        } = job;
-
-        let proposal_id = self.proposal_coordinator.next_id();
-        let output = legion_protocol::AssistedAiEditProposalOutput {
-            output_id: format!("phase4-output-{}", event_context.correlation_id.0),
-            request_id: format!("phase4-request-{}", event_context.correlation_id.0),
-            provider_id: proposal_source.provider_id.clone(),
-            proposal_id,
-            principal: principal.clone(),
-            capability: CapabilityId("editor.write".to_string()),
-            correlation_id: event_context.correlation_id,
-            causality_id: event_context.causality_id,
-            payload: ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
-                file_id,
-                edits: legion_protocol::EditBatch {
-                    edits: vec![legion_protocol::TextEdit {
-                        range: legion_protocol::TextRange::byte(0, 0),
-                        replacement: proposal_source.replacement.clone(),
-                    }],
-                },
-            }),
-            preconditions,
-            preview: PreviewSummary {
-                summary: proposal_source.summary.clone(),
-                details: proposal_source.details.clone(),
-            },
-            expires_at: None,
-            created_at: generated_at,
-            context_manifest: trust_reference(
-                &context_manifest_projection.manifest.manifest_id,
-                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-            ),
-            approval_checklist: trust_reference(
-                &format!("phase4:approval:{}", run_id.0),
-                legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
-            ),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let proposal = output
-            .to_workspace_proposal()
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        let proposal_created = self.register_proposal_lifecycle(&proposal)?;
-        let ledger_projection = self
-            .proposal_coordinator
-            .proposal_ledger_projection(generated_at);
-        let checkpoint_rollback_projection =
-            legion_protocol::checkpoint_rollback_projection_from_proposal(
-                format!("phase4:checkpoint:{}", run_id.0),
-                &proposal,
-                ProposalLifecycleState::Created,
-                Some(&ledger_projection),
-                legion_protocol::CheckpointRollbackAuditStatus::Available,
-                Some(event_context.causality_id),
-                generated_at,
-                1,
-            );
-        let approval_checklist_projection =
-            legion_protocol::approval_checklist_from_trust_projections(
-                format!("phase4:approval:{}", run_id.0),
-                &proposal,
-                ProposalLifecycleState::Created,
-                Some(&ledger_projection),
-                Some(&context_manifest_projection),
-                Some(&privacy_inspector_projection),
-                Some(&permission_budget_projection),
-                Some(&checkpoint_rollback_projection),
-                true,
-                Some(event_context.causality_id),
-                generated_at,
-                1,
-            );
-        let provider_capability = phase4_provider_capability(provider_class, None);
-        let request_contract = assisted_ai_request_contract_from_metadata(
-            output.request_id.clone(),
-            &provider_capability,
-            operation_class,
-            &context_manifest_projection,
-            &privacy_inspector_projection,
-            &permission_budget_projection,
-            &approval_checklist_projection,
-            Some(&checkpoint_rollback_projection),
-            event_context,
-            provider_route_request.proposal_intent.clone(),
-            route_response.route_decision.clone(),
-            generated_at,
-        );
-        let assisted_ai_projection = legion_protocol::assisted_ai_projection_from_metadata(
-            format!("phase4:assisted:{}", run_id.0),
-            vec![provider_capability],
-            vec![request_contract],
-            vec![output.clone()],
-            Some(&ledger_projection),
-            Some(&context_manifest_projection),
-            Some(&privacy_inspector_projection),
-            Some(&permission_budget_projection),
-            Some(&approval_checklist_projection),
-            Some(&checkpoint_rollback_projection),
-            generated_at,
-            1,
-        );
-
-        agent
-            .transition(
-                legion_protocol::AgentRunState::WaitingForApproval,
-                "agent.waiting_for_approval.proposal_registered",
-                event_context.correlation_id,
-                event_context.causality_id,
-                self.event_sequence_generator.next(),
-            )
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        let replay_manifest = legion_protocol::AgentReplayManifest {
-            run_id: run_id.clone(),
-            transitions: agent.transitions().to_vec(),
-            context_manifests: vec![trust_reference(
-                &context_manifest_projection.manifest.manifest_id,
-                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-            )],
-            provider_route_ids: vec![route_id.clone()],
-            proposal_ids: vec![proposal_id],
-            correlation_id: event_context.correlation_id,
-            causality_id: event_context.causality_id,
-            event_sequence: self.event_sequence_generator.next(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        self.persist_phase4_runtime_records(
-            &run_id,
-            &route_id,
-            route_response.invocation_state,
-            "phase4.provider.route.completed",
-            event_context,
-            &replay_manifest,
-        )?;
-        self.tracker_ledger
-            .append(TrackerRunLedgerRecord {
-                run_id: run_id.clone(),
-                state: legion_protocol::AgentRunState::WaitingForApproval,
-                proposal_id: Some(proposal_id),
-                transitions: replay_manifest.transitions.clone(),
-                correlation_id: event_context.correlation_id,
-                causality_id: event_context.causality_id,
-                event_sequence: self.event_sequence_generator.next(),
-                labels: vec!["tracker.phase4.run.waiting_for_approval".to_string()],
-            })
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        let _ = self
-            .memory_service
-            .propose_candidate(MemoryCandidateRecord {
-                candidate_id: format!("phase4-memory-candidate-{}", run_id.0),
-                run_id: Some(run_id.clone()),
-                consent: MemoryConsentState::NotGranted,
-                labels: vec!["memory.candidate.review_required".to_string()],
-                correlation_id: event_context.correlation_id,
-                causality_id: event_context.causality_id,
-                event_sequence: self.event_sequence_generator.next(),
-            })
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-
-        self.phase4_projection_state.context_manifest_projection =
-            Some(context_manifest_projection.clone());
-        self.phase4_projection_state.privacy_inspector_projection =
-            Some(privacy_inspector_projection.clone());
-        self.phase4_projection_state.permission_budget_projection =
-            Some(permission_budget_projection.clone());
-        self.phase4_projection_state.approval_checklist_projection =
-            Some(approval_checklist_projection);
-        self.phase4_projection_state.checkpoint_rollback_projection =
-            Some(checkpoint_rollback_projection);
-        self.phase4_projection_state.assisted_ai_projection = Some(assisted_ai_projection.clone());
-        self.phase4_projection_state
-            .replay_manifests
-            .insert(run_id.clone(), replay_manifest.clone());
-        self.phase4_projection_state.inspection_snapshots.insert(
-            run_id.clone(),
-            AppAiInspectionSnapshot {
-                run_id: run_id.clone(),
-                context_manifest_projection: context_manifest_projection.clone(),
-                privacy_inspector_projection: privacy_inspector_projection.clone(),
-                permission_budget_projection: permission_budget_projection.clone(),
-                assisted_ai_projection: assisted_ai_projection.clone(),
-            },
-        );
-
-        Ok(AppAiRunOutcome {
-            run_id,
-            proposal_id: Some(proposal_id),
-            proposal_created: Some(proposal_created),
-            route_response,
-            context_manifest_projection,
-            privacy_inspector_projection,
-            permission_budget_projection,
-            refusal: None,
-            replay_manifest,
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -24970,20 +26401,50 @@ impl AppComposition {
         permission_budget_projection: legion_protocol::PermissionBudgetProjection,
         generated_at: TimestampMillis,
         event_context: EventContext,
+        diagnostic: Option<String>,
         agent: &mut AgentRuntime,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
         let refused = route_response.invocation_state
             != legion_protocol::AssistedAiProviderInvocationState::Completed;
-        let agent_state = if refused {
-            legion_protocol::AgentRunState::Blocked
+        // The state and the label are one decision, taken once.
+        //
+        // The label said `phase5.explain.metadata_ready` for every completed run
+        // that reached here, which was true while Explain was the only operation
+        // that could produce no proposal. A ProposeEdit run whose reply carried
+        // no applicable edit now arrives here too, and calling that an Explain
+        // tells an audit the run was never trying to edit anything.
+        //
+        // That run is also `Blocked`, not `Proposing`. It already transitioned to
+        // `Proposing` on its way here, so `Proposing` is not a legal move -- and
+        // it would be the wrong one regardless, because nothing is going to be
+        // proposed. `Blocked` is the state that says a run stopped short of
+        // approval and needs something to change before it can go further.
+        //
+        // Derived from the operation rather than passed in: a parameter is a
+        // second place for the state and the label to come apart.
+        let (agent_state, outcome_label) = if refused {
+            (
+                legion_protocol::AgentRunState::Blocked,
+                "phase5.provider.route.refused",
+            )
+        } else if operation_class == legion_protocol::AssistedAiOperationClass::Explain {
+            (
+                legion_protocol::AgentRunState::Proposing,
+                "phase5.explain.metadata_ready",
+            )
         } else {
-            legion_protocol::AgentRunState::Proposing
+            (
+                legion_protocol::AgentRunState::Blocked,
+                "phase5.assist.edit_unresolved",
+            )
         };
-        let outcome_label = if refused {
-            "phase5.provider.route.refused"
-        } else {
-            "phase5.explain.metadata_ready"
-        };
+        // Why no proposal exists, carried into the durable records.
+        //
+        // Metadata-only holds: the reasons are counts, line numbers and
+        // similarity scores ("appears 3 times", "closest line is 214 (71%
+        // similar)"), never the buffer text or the model's reply.
+        let mut labels = vec![outcome_label.to_string()];
+        labels.extend(diagnostic);
         agent
             .transition(
                 agent_state,
@@ -24994,8 +26455,11 @@ impl AppComposition {
             )
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
-        let provider_capability =
-            phase4_provider_capability(provider_class, route_response.refusal.clone());
+        let provider_capability = phase4_provider_capability(
+            provider_class,
+            &provider_route_request.provider_id,
+            route_response.refusal.clone(),
+        );
         let approval_checklist_projection = empty_approval_checklist_projection();
         let checkpoint_rollback_projection = empty_checkpoint_rollback_projection();
         let request_contract = assisted_ai_request_contract_from_metadata(
@@ -25048,6 +26512,7 @@ impl AppComposition {
             outcome_label,
             event_context,
             &replay_manifest,
+            &labels[1..],
         )?;
         self.tracker_ledger
             .append(TrackerRunLedgerRecord {
@@ -25058,7 +26523,7 @@ impl AppComposition {
                 correlation_id: event_context.correlation_id,
                 causality_id: event_context.causality_id,
                 event_sequence: self.event_sequence_generator.next(),
-                labels: vec![outcome_label.to_string()],
+                labels: labels.clone(),
             })
             .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
 
@@ -25173,6 +26638,7 @@ impl AppComposition {
             .ok_or(AppCompositionError::AiRunMissing { run_id: run_id.0 })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_phase4_runtime_records(
         &self,
         run_id: &legion_protocol::AgentRunId,
@@ -25181,7 +26647,10 @@ impl AppComposition {
         outcome_label: &str,
         event_context: EventContext,
         replay_manifest: &legion_protocol::AgentReplayManifest,
+        extra_labels: &[String],
     ) -> Result<(), AppCompositionError> {
+        let mut labels = vec!["phase4.runtime.metadata_only".to_string()];
+        labels.extend_from_slice(extra_labels);
         let record = legion_protocol::Phase4RuntimeAuditRecord {
             audit_id: format!("phase4-runtime:{}:{}", run_id.0, route_id),
             run_id: Some(run_id.clone()),
@@ -25189,7 +26658,7 @@ impl AppComposition {
             provider_route_id: Some(route_id.to_string()),
             invocation_state,
             outcome_label: outcome_label.to_string(),
-            labels: vec!["phase4.runtime.metadata_only".to_string()],
+            labels,
             correlation_id: event_context.correlation_id,
             causality_id: event_context.causality_id,
             event_sequence: replay_manifest.event_sequence,
@@ -25274,6 +26743,7 @@ impl AppComposition {
             }
             Err(failure) => {
                 if let Some(committed) = failure.committed {
+                    let path = committed.applied.identity.canonical_path.clone();
                     // The on-disk write already committed before the post-commit
                     // audit failed. Reconcile editor state with disk (mark the
                     // buffer saved) so we never leave a dirty buffer over content
@@ -25286,6 +26756,16 @@ impl AppComposition {
                         .bind_saved_buffer(committed.save.buffer_id, committed.applied);
                     self.active_documents
                         .clear_dirty_prompt_for(committed.save.buffer_id);
+                    // Reported as its own outcome rather than as `Rejected`.
+                    // This function has just marked the buffer clean over
+                    // content that is on disk; returning "rejected" from the
+                    // same branch leaves the caller describing the opposite of
+                    // what happened here.
+                    return Ok(AppSaveOutcome::CommittedThenAuditFailed {
+                        save: committed.save,
+                        path,
+                        response: Box::new(failure.response),
+                    });
                 } else if failure.request_id != uuid::Uuid::nil() {
                     self.editor.acknowledge_save_outcome(
                         failure.request_id,
@@ -25337,16 +26817,26 @@ impl AppComposition {
             let file_id = Some(metadata.identity.file_id);
             let file_path = Some(metadata.identity.canonical_path);
             let outcome = self.save_buffer(buffer_id)?;
+            // A write that committed counts as saved, because the file
+            // changed. It previously counted as *rejected*, so save-all
+            // reported a file it had just written as one it had refused to.
+            // The audit failure is not dropped: it rides along as the item's
+            // rejection metadata, which is what renders the reason.
             let status = match &outcome {
-                AppSaveOutcome::Saved(_) => AppSaveAllItemStatus::Saved,
+                AppSaveOutcome::Saved(_) | AppSaveOutcome::CommittedThenAuditFailed { .. } => {
+                    AppSaveAllItemStatus::Saved
+                }
                 AppSaveOutcome::Rejected(_) => AppSaveAllItemStatus::Rejected,
             };
             let rejection_metadata = match &outcome {
                 AppSaveOutcome::Saved(_) => None,
-                AppSaveOutcome::Rejected(response) => Some(save_all_rejection_metadata(response)),
+                AppSaveOutcome::CommittedThenAuditFailed { response, .. }
+                | AppSaveOutcome::Rejected(response) => Some(save_all_rejection_metadata(response)),
             };
             match &outcome {
-                AppSaveOutcome::Saved(_) => saved_count += 1,
+                AppSaveOutcome::Saved(_) | AppSaveOutcome::CommittedThenAuditFailed { .. } => {
+                    saved_count += 1
+                }
                 AppSaveOutcome::Rejected(_) => rejected_count += 1,
             }
             results.push(AppSaveAllItemOutcome {
@@ -25417,15 +26907,27 @@ impl AppComposition {
             });
         }
 
+        self.clear_code_actions();
+        self.code_action_diagnostics.clear_buffer(buffer_id);
+
         let lsp_uri = self
             .active_documents
             .metadata_for_buffer(buffer_id)
             .map(|metadata| canonical_path_to_uri(&metadata.identity.canonical_path.0));
+        self.terminalize_pending_lsp_writes(
+            Some(buffer_id),
+            LanguageToolingStatusKind::Stale,
+            "buffer closed while an LSP write was pending",
+        );
         self.editor.close_buffer(buffer_id)?;
         if let Some(uri) = lsp_uri {
-            // Keep the language server's open-document set in sync with the
-            // editor.  This is best-effort and non-blocking, like didChange.
-            let _ = self.lsp_session.send_did_close(uri);
+            let entries = self.document_sync_ledger.entry(uri.clone()).or_default();
+            // A close supersedes an unsent open for this buffer.  Retain the
+            // close marker so a later reopen of the same URI is ordered as
+            // close(old buffer) then open(new buffer).
+            entries.clear();
+            entries.push(DesiredDocumentSync::Closed { buffer_id });
+            self.flush_document_sync_uri(&uri);
         }
         self.active_documents.remove_open_tab(buffer_id);
         self.assist_inline_prediction_state
@@ -25697,6 +27199,7 @@ impl AppComposition {
                     "cargo test discovery requires a trusted workspace".to_string(),
                 ));
             }
+            test_explorer::invalidate_published_discovery_cache(Path::new(root_path));
             test_explorer::discover_cargo_tests(
                 Path::new(root_path),
                 test_explorer::DEFAULT_DISCOVER_TIMEOUT,
@@ -25919,120 +27422,6 @@ impl AppComposition {
         Ok(added)
     }
 
-    /// Refresh app-owned git projection data for the active workspace.
-    pub fn refresh_git_projection(&mut self) -> GitProjection {
-        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
-            self.git_hunk_cache.clear();
-            self.git_projection = GitProjection {
-                diagnostics: vec!["git.workspace_not_open".to_string()],
-                generated_at: TimestampMillis::now(),
-                worktrees: Vec::new(),
-                ..GitProjection::idle()
-            };
-            return self.git_projection.clone();
-        };
-        let active_file = self
-            .active_documents
-            .active_file_path
-            .as_deref()
-            .map(PathBuf::from);
-        match collect_git_snapshot(
-            Path::new(root_path),
-            active_file.as_deref(),
-            GitSnapshotOptions::default(),
-        ) {
-            Ok(snapshot) => {
-                self.git_hunk_cache = snapshot
-                    .hunks
-                    .iter()
-                    .map(|hunk| (hunk.hunk_id.clone(), hunk.clone()))
-                    .collect();
-                self.git_projection = git_projection_from_project(snapshot);
-            }
-            Err(error) => {
-                self.git_hunk_cache.clear();
-                self.git_projection = GitProjection {
-                    root_label: Some(root_path.to_string()),
-                    diagnostics: vec![format!("git.refresh_failed: {error}")],
-                    generated_at: TimestampMillis::now(),
-                    worktrees: Vec::new(),
-                    ..GitProjection::idle()
-                };
-            }
-        }
-        // Inject app-side navigation state — focused_hunk_id lives in AppComposition,
-        // not in the project snapshot, so it must be injected after each build.
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        // Same for the remote-policy audit trail: a denied push refreshes the
-        // projection, and the user must still be able to read why it was denied.
-        self.git_projection.remote_policy_audit = self.git_remote_policy_audit.clone();
-        // Propagate any local-history blob-write degradation as a diagnostic.
-        if let Some(ref err) = self.local_history_last_write_error {
-            self.git_projection
-                .diagnostics
-                .push(format!("local_history.write_degraded: {err}"));
-        }
-        self.git_projection.clone()
-    }
-
-    /// Navigate to the next or previous hunk in the diff review surface.
-    ///
-    /// `forward` — true = next, false = prev.
-    /// `by_file` — true = jump to first hunk of next/prev file, false = adjacent hunk.
-    fn navigate_git_hunk(&mut self, forward: bool, by_file: bool) -> GitProjection {
-        let hunks = &self.git_projection.hunks;
-        if hunks.is_empty() {
-            return self.git_projection.clone();
-        }
-
-        let current_idx = self
-            .focused_git_hunk_id
-            .as_deref()
-            .and_then(|id| hunks.iter().position(|h| h.hunk_id == id));
-
-        let new_id = if by_file {
-            // Jump to the first hunk of the next/prev file.
-            let current_path = current_idx
-                .and_then(|i| hunks.get(i))
-                .map(|h| h.path.as_str());
-            if forward {
-                // Find the first hunk whose path differs and comes after current.
-                let start = current_idx.map(|i| i + 1).unwrap_or(0);
-                hunks[start..]
-                    .iter()
-                    .find(|h| current_path.is_none_or(|p| h.path != p))
-                    .map(|h| h.hunk_id.clone())
-                    .or_else(|| hunks.first().map(|h| h.hunk_id.clone()))
-            } else {
-                // Find the last hunk whose path differs and comes before current.
-                let end = current_idx.unwrap_or(hunks.len());
-                hunks[..end]
-                    .iter()
-                    .rev()
-                    .find(|h| current_path.is_none_or(|p| h.path != p))
-                    .and_then(|h| {
-                        // Jump to the *first* hunk of that file.
-                        let target_path = h.path.clone();
-                        hunks.iter().find(|hh| hh.path == target_path)
-                    })
-                    .map(|h| h.hunk_id.clone())
-                    .or_else(|| hunks.last().map(|h| h.hunk_id.clone()))
-            }
-        } else if forward {
-            let next_idx = current_idx.map(|i| (i + 1) % hunks.len()).unwrap_or(0);
-            hunks.get(next_idx).map(|h| h.hunk_id.clone())
-        } else {
-            let prev_idx = current_idx
-                .map(|i| if i == 0 { hunks.len() - 1 } else { i - 1 })
-                .unwrap_or_else(|| hunks.len() - 1);
-            hunks.get(prev_idx).map(|h| h.hunk_id.clone())
-        };
-
-        self.focused_git_hunk_id = new_id;
-        self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
-        self.git_projection.clone()
-    }
-
     /// Return local history entries for the given canonical path, newest first.
     fn local_history_entries_for_file(
         &self,
@@ -26068,10 +27457,11 @@ impl AppComposition {
             .local_history_store
             .prune(&canonical, max_count, u64::MAX);
         if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
-            let path_key = canonical.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path_key =
+                legion_storage::local_history::LocalHistoryMetadataStore::path_key(&canonical);
             let blob_dir = std::path::PathBuf::from(root)
                 .join(".legion")
-                .join("local-history")
+                .join(legion_storage::local_history::LOCAL_HISTORY_DIR_NAME)
                 .join(&path_key);
             for hash in &evicted {
                 let _ = std::fs::remove_file(blob_dir.join(format!("{hash}.blob")));
@@ -26084,6 +27474,21 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn test_local_history_last_write_error(&self) -> Option<&str> {
         self.local_history_last_write_error.as_deref()
+    }
+
+    fn reload_local_history_store(&mut self) {
+        self.local_history_store = legion_storage::local_history::LocalHistoryMetadataStore::new();
+        self.local_history_last_write_error = None;
+        let Some(root) = self.active_documents.workspace_root_path.as_deref() else {
+            return;
+        };
+        let dir = legion_storage::local_history::LocalHistoryMetadataStore::dir_for_workspace(
+            std::path::Path::new(root),
+        );
+        match legion_storage::local_history::LocalHistoryMetadataStore::load(&dir) {
+            Ok(store) => self.local_history_store = store,
+            Err(err) => self.local_history_last_write_error = Some(err.to_string()),
+        }
     }
 
     /// Record a local history entry for the given file save.
@@ -26118,12 +27523,16 @@ impl AppComposition {
         let blob_dir = if let Some(root) = self.active_documents.workspace_root_path.as_deref() {
             // Strip the UNC prefix (\\?\) before sanitizing so that the resulting
             // directory name does not contain '?' which is illegal in Windows filenames.
-            let canonical_without_unc = strip_unc_prefix(canonical_path);
-            let path_key =
-                canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
+            let path_key = legion_storage::local_history::LocalHistoryMetadataStore::path_key(
+                strip_unc_prefix(canonical_path),
+            );
             match create_workspace_state_dir(
                 std::path::Path::new(root),
-                &[".legion", "local-history", &path_key],
+                &[
+                    ".legion",
+                    legion_storage::local_history::LOCAL_HISTORY_DIR_NAME,
+                    &path_key,
+                ],
             ) {
                 Ok(directory) => directory,
                 Err(error) => {
@@ -26147,6 +27556,7 @@ impl AppComposition {
         // Write blob; capture errors for degraded-mode diagnostic — do not fail the save.
         let blob_path = blob_dir.join(format!("{content_hash}.blob"));
         let write_err = write_workspace_state_file(&blob_path, content.as_bytes()).err();
+        let blob_write_failed = write_err.is_some();
         if let Some(err) = write_err {
             self.local_history_last_write_error = Some(err.to_string());
         } else {
@@ -26172,15 +27582,50 @@ impl AppComposition {
             schema_version: legion_storage::local_history::LOCAL_HISTORY_SCHEMA_VERSION,
         };
 
-        self.local_history_store.push_record(record);
-        // Prune returns evicted content hashes; delete the corresponding blob files.
+        self.local_history_store.push_record(record.clone());
+        // Prune returns evicted content hashes; delete those blobs only after
+        // the manifest commit so a persist failure can reload the last durable
+        // index without losing still-indexed snapshots.
         let blob_dir_for_prune = blob_dir.clone();
         let evicted_hashes = self
             .local_history_store
             .prune(canonical_path, 50, 50 * 1024 * 1024);
-        for hash in evicted_hashes {
-            let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
-            let _ = std::fs::remove_file(&evicted_blob);
+        if let Some(history_dir) = blob_dir.parent() {
+            match self.local_history_store.persist(history_dir) {
+                Ok(()) => {
+                    if !blob_write_failed {
+                        self.local_history_last_write_error = None;
+                    }
+                    for hash in evicted_hashes {
+                        let evicted_blob = blob_dir_for_prune.join(format!("{hash}.blob"));
+                        let _ = std::fs::remove_file(&evicted_blob);
+                    }
+                }
+                Err(err) => {
+                    // persist() already retries once. Reload the last durable
+                    // index so this session does not offer a ghost entry that
+                    // a restart cannot restore.
+                    self.local_history_last_write_error = Some(err.to_string());
+                    match legion_storage::local_history::LocalHistoryMetadataStore::load(
+                        history_dir,
+                    ) {
+                        Ok(store) => self.local_history_store = store,
+                        Err(load_err) => {
+                            self.local_history_last_write_error = Some(format!(
+                                "{err}; reload after persist failure also failed: {load_err}"
+                            ));
+                        }
+                    }
+                    let still_referenced = self
+                        .local_history_store
+                        .records_for_file(canonical_path, usize::MAX)
+                        .iter()
+                        .any(|existing| existing.content_hash == record.content_hash);
+                    if !still_referenced {
+                        let _ = std::fs::remove_file(&blob_path);
+                    }
+                }
+            }
         }
     }
 
@@ -26210,15 +27655,22 @@ impl AppComposition {
             .ok_or(AppCompositionError::WorkspaceNotOpen)?
             .to_string();
 
-        // Strip UNC prefix before sanitizing to avoid '?' in directory names on Windows.
-        let canonical_without_unc = strip_unc_prefix(canonical_path);
-        let path_key =
-            canonical_without_unc.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_");
-        let blob_path = std::path::PathBuf::from(&root_path)
-            .join(".legion")
-            .join("local-history")
-            .join(&path_key)
-            .join(format!("{}.blob", record.content_hash));
+        let history_dir =
+            legion_storage::local_history::LocalHistoryMetadataStore::dir_for_workspace(
+                std::path::Path::new(&root_path),
+            );
+        let blob_path =
+            legion_storage::local_history::LocalHistoryMetadataStore::trusted_blob_path(
+                &history_dir,
+                &record.canonical_path,
+                &record.content_hash,
+            )
+            .map_err(|e| {
+                git_protocol_error(
+                    "local_history.blob_untrusted",
+                    format!("refusing to restore untrusted history blob: {e}"),
+                )
+            })?;
 
         let restored_text = std::fs::read_to_string(&blob_path).map_err(|e| {
             git_protocol_error(
@@ -26364,6 +27816,46 @@ impl AppComposition {
         Ok(evidence_path.to_string_lossy().into_owned())
     }
 
+    /// Stage or unstage one path, refusing anything the projection does not know.
+    ///
+    /// The path is checked against the current status projection rather than
+    /// passed through. `git add` is happy to take any path in the repository, so
+    /// without this the renderer could stage a file the person never saw listed
+    /// — and a Source Control panel that stages something off-screen is worse
+    /// than one that stages nothing.
+    fn stage_or_unstage_git_path(
+        &mut self,
+        path: &str,
+        stage: bool,
+    ) -> Result<GitProjection, AppCompositionError> {
+        let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
+            return Err(AppCompositionError::WorkspaceNotOpen);
+        };
+        if !self
+            .git_projection
+            .changed_files
+            .iter()
+            .any(|file| file.path == path)
+        {
+            return Err(git_protocol_error(
+                "git_path_not_changed",
+                format!("`{path}` is not a changed file in the current projection"),
+            ));
+        }
+        // Run from the repository root, not the workspace root.
+        //
+        // The projection reports repository-relative paths, so when the opened
+        // workspace is a subdirectory (`/repo/sub`) a status entry reads
+        // `sub/blob.bin` and `git add -- sub/blob.bin` executed there resolves to
+        // `/repo/sub/sub/blob.bin`. The control then failed for every file in
+        // such a workspace, which is an ordinary way to open one.
+        self.enqueue_git_mutation(GitMutateOp::Path {
+            root: PathBuf::from(root_path),
+            path: path.to_string(),
+            stage,
+        })
+    }
+
     fn stage_or_unstage_git_hunk(
         &mut self,
         hunk_id: &str,
@@ -26387,13 +27879,11 @@ impl AppComposition {
                 ),
             ));
         }
-        match expected_stage {
-            GitHunkStage::Unstaged => stage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-            GitHunkStage::Staged => unstage_git_hunk(Path::new(root_path), &hunk)
-                .map_err(git_inspection_protocol_error)?,
-        }
-        Ok(self.refresh_git_projection())
+        self.enqueue_git_mutation(GitMutateOp::Hunk {
+            root: PathBuf::from(root_path),
+            hunk,
+            stage: matches!(expected_stage, GitHunkStage::Unstaged),
+        })
     }
 
     /// Enable the real terminal runtime for app integration tests.
@@ -26492,6 +27982,7 @@ impl AppComposition {
                 },
                 command,
                 args,
+                cwd: None,
                 env: None,
             })
             .map_err(|err| AppCompositionError::Terminal(format!("raw launch failed: {err}")))
@@ -26500,6 +27991,8 @@ impl AppComposition {
     /// Enable the DAP debug runtime for app integration tests.
     pub fn enable_debug_runtime_for_tests(&mut self) {
         self.debug_workflow.enable_runtime();
+        self.debug_workflow
+            .set_dap_mode_for_tests(legion_debug::DapMode::Fixture);
     }
 
     /// Compatibility alias for older debug integration tests.
@@ -26519,7 +28012,22 @@ impl AppComposition {
 
     /// Return the current app-owned language tooling projection.
     pub fn language_tooling_projection(&self) -> LanguageToolingProjection {
-        self.language_tooling.projection()
+        let mut projection = self.language_tooling.projection();
+        projection.typescript_toolchain = TypeScriptToolchainProjection {
+            settings: self.language_toolchain_settings.typescript.clone(),
+            status: match self.language_toolchain_configuration_state() {
+                LanguageToolchainConfigurationState::Unconfigured => {
+                    LanguageToolchainConfigurationStatus::Unconfigured
+                }
+                LanguageToolchainConfigurationState::Draft => {
+                    LanguageToolchainConfigurationStatus::Draft
+                }
+                LanguageToolchainConfigurationState::Configured => {
+                    LanguageToolchainConfigurationStatus::Configured
+                }
+            },
+        };
+        projection
     }
 
     /// Build an LSP `textDocument/completion` request for an already-open buffer.
@@ -26706,6 +28214,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Completion,
                 hover: None,
                 completions,
@@ -26734,6 +28243,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Hover,
                 hover,
                 completions: Vec::new(),
@@ -26761,6 +28271,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Definition,
                 hover: None,
                 completions: Vec::new(),
@@ -26788,6 +28299,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::References,
                 hover: None,
                 completions: Vec::new(),
@@ -26815,6 +28327,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::Outline,
                 hover: None,
                 completions: Vec::new(),
@@ -26843,6 +28356,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::InlayHints,
                 hover: None,
                 completions: Vec::new(),
@@ -26871,6 +28385,7 @@ impl AppComposition {
         Ok(self.language_tooling.ingest_lsp_read_projection(
             &input,
             LspReadProjectionIngest {
+                call_hierarchy: Vec::new(),
                 kind: LanguageReadKind::CodeLens,
                 hover: None,
                 completions: Vec::new(),
@@ -26895,12 +28410,18 @@ impl AppComposition {
     }
 
     /// Send a Delegate chat turn using local, metadata-only codebase retrieval citations.
+    ///
+    /// The prompt is bounded to [`DELEGATE_CHAT_PROMPT_MAX_CHARS`]. That bound is
+    /// deliberate -- what crosses this boundary is a *label*, not raw prompt
+    /// text -- so any composer feeding it must cap at the same number. A field
+    /// that accepted more would discard the remainder here, silently, after
+    /// clearing the draft the user typed.
     pub fn send_delegate_chat(
         &mut self,
         prompt_label: impl Into<String>,
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
-        let prompt_label = bounded_label(prompt_label.into(), 240);
+        let prompt_label = bounded_label(prompt_label.into(), DELEGATE_CHAT_PROMPT_MAX_CHARS);
         let lane_reservation = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
             "delegate.chat",
@@ -26918,7 +28439,36 @@ impl AppComposition {
         let event_context = self.next_event_context();
         let input = self.language_request_input(buffer_id, event_context)?;
         let language_id = language_id_for_path(&input.metadata.identity.canonical_path);
-        let buffer_excerpt = input.text.chars().take(3_000).collect::<String>();
+        // The same bound the Delegate declaration counts, in the same unit.
+        let buffer_excerpt = assist_buffer_excerpt(&input.text, ASSIST_EXCERPT_MAX_BYTES);
+        // Resolved before the route request so the capability decision, the
+        // audit record and the bytes all describe the same destination.
+        // The backend is resolved once and drives three things that have to
+        // agree: the route request, the broker policy, and the bytes. Naming
+        // Anthropic in the request while building the broker from
+        // `SecurityPolicy::default()` -- which is air-gapped, local-provider
+        // only, and allowlists localhost -- makes the router refuse the very
+        // route the audit describes, so an honest record buys a broken feature.
+        // Resolved **once**, here, and used for every decision downstream.
+        //
+        // `product_ai_selected_live_backend` probes the host -- is Ollama
+        // listening, is there a key -- so calling it again later can answer
+        // differently. It did: the worker re-resolved from the preference, so an
+        // `Auto` run that authorized Ollama could find it gone by the time the
+        // request was sent and hand the buffer excerpt to Anthropic instead --
+        // a destination the broker never approved. One resolution, threaded
+        // through, is the only version of this that cannot drift.
+        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
+        let (route_target, route_health, route_cost, route_privacy) =
+            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
+        // Identity from the same backend as the destination. These were
+        // hard-coded to the deterministic provider while the target followed the
+        // live one, so provider-allowlist policy was evaluated against
+        // `deterministic-local` and the audit recorded a local call for traffic
+        // going to Anthropic.
+        let (route_provider_id, route_model_label, route_provider_class, ..) =
+            product_ai_route_fields(live_backend);
+        let route_provider_id_for_decision = route_provider_id.clone();
         let document = SourceDocument::with_versions(
             input.workspace_id,
             input.metadata.identity.file_id,
@@ -26987,9 +28537,9 @@ impl AppComposition {
                 input.workspace_id.0,
                 self.event_sequence_generator.next().0
             ),
-            provider_id: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
-            model_label: "deterministic-local-delegate".to_string(),
-            provider_class: AssistedAiProviderClass::Local,
+            provider_id: route_provider_id,
+            model_label: route_model_label,
+            provider_class: route_provider_class,
             operation_class: AssistedAiOperationClass::Explain,
             context_manifest: context_reference,
             privacy_inspector: privacy_reference,
@@ -27018,7 +28568,7 @@ impl AppComposition {
                 },
                 required_capability: CapabilityId("ai.provider.invoke".to_string()),
                 risk_label: ProposalRiskLabel::Low,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
+                privacy_label: route_privacy,
                 labels: vec![
                     "delegate.chat.provider_route".to_string(),
                     format!("delegate.prompt:{}", prompt_fingerprint.value),
@@ -27030,14 +28580,13 @@ impl AppComposition {
             },
             policy_decision_id: None,
             required_capability: CapabilityId("ai.provider.invoke".to_string()),
-            network_target: Some(legion_protocol::NetworkTarget {
-                scheme: "http".to_string(),
-                host: "localhost".to_string(),
-                port: Some(11434),
-            }),
+            // Kept on the request because it is the audit record's copy of the
+            // destination; the authorization decision below is handed the same
+            // target directly rather than reading it back out of here.
+            network_target: Some(route_target.clone()),
             cancellation_token: CancellationTokenId(uuid::Uuid::now_v7()),
-            health_labels: vec!["delegate.local.deterministic".to_string()],
-            cost_labels: vec!["local.free".to_string()],
+            health_labels: vec![route_health.to_string()],
+            cost_labels: vec![route_cost.to_string()],
             principal_id: input.principal.clone(),
             workspace_trust_state: context.trust.clone(),
             correlation_id: event_context.correlation_id,
@@ -27046,22 +28595,85 @@ impl AppComposition {
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
         };
+        let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
-            SecurityPolicy::default(),
+            self.product_ai_policy_with_org_ceiling(live_backend),
             CapabilityNamespace("app.delegate".to_string()),
         );
-        let provider_route_response = ProviderRouter::new(&self.ai_registry, &broker)
-            .route_completion(provider_route_request)
-            .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-        // Policy router is metadata-only; product chat text comes from a live
-        // provider when credentials exist, else a deterministic fixture label.
-        let route_completed = provider_route_response.invocation_state
-            == AssistedAiProviderInvocationState::Completed;
+        // Authorization only. `route_completion` *invokes* the registry provider
+        // named in the request, which was harmless while that name was the
+        // deterministic fixture and became a real call the moment the request
+        // started naming the live backend honestly. With an environment
+        // credential that is a synchronous paid completion here, followed by a
+        // second one in the worker for the reply the person actually sees; with
+        // a keyring credential the registry client has no key at all and the
+        // chat fails before reaching `anthropic_client_with_keyring_fallback`.
+        //
+        // The Assist and inline-prediction paths ask the broker for the
+        // capability and nothing more. This does the same, so naming the true
+        // provider costs a policy decision rather than a provider call.
+        let route_id = provider_route_request.route_id.clone();
+        let route_labels = provider_route_request.proposal_intent.labels.clone();
+        let decision = broker
+            .handle(CapabilityRequest::Request {
+                principal_id: input.principal.clone(),
+                capability_id: CapabilityId("ai.provider.invoke".to_string()),
+                workspace_trust_state: context.trust.clone(),
+                target_path: None,
+                decision_id: None,
+                context: legion_protocol::CapabilityRequestContext {
+                    network_target: Some(route_target_for_decision),
+                    // Declared so a provider restriction can actually be
+                    // evaluated. Without it the broker sees a destination and no
+                    // identity, and an org bundle forbidding a specific provider
+                    // has nothing to match against.
+                    ai_provider_id: Some(route_provider_id_for_decision),
+                    // Declared against the same total Assist uses, which is
+                    // only honest because the Delegate worker bounds the path
+                    // it sends by the same constant. Declaring a bound the
+                    // caller does not apply is the shape of defect this whole
+                    // sequence has been about.
+                    budget_request_tokens: Some(declared_request_tokens(
+                        ASSIST_PROMPT_MAX_BYTES,
+                        crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
+                    )),
+                    budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
+                    ..Default::default()
+                },
+                correlation_id: event_context.correlation_id,
+            })
+            .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
+        let refusal_reason = match &decision {
+            CapabilityResponse::Decision(decision) if !decision.granted => decision.reason.clone(),
+            CapabilityResponse::Denied(denial) => Some(denial.reason.clone()),
+            _ => None,
+        };
+        let route_completed = refusal_reason.is_none()
+            && (matches!(decision, CapabilityResponse::Decision(ref d) if d.granted)
+                || matches!(decision, CapabilityResponse::Granted(_)));
+        // Read before either `use_background_live` binding, and outside both,
+        // so the `#[cfg]` below stays attached to the binding it describes.
+        // Placed between them it silently became the gated item and the binding
+        // it was meant to gate became unconditional -- which the no-`ai` build
+        // catches and the ordinary one does not.
+        let inject_delegate_chat_spawn_failure = {
+            #[cfg(any(test, feature = "test-helpers"))]
+            {
+                std::mem::take(&mut self.injected_delegate_chat_spawn_failure)
+            }
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            {
+                false
+            }
+        };
         #[cfg(feature = "ai")]
         let use_background_live =
-            route_completed && product_ai_will_attempt_live(self.preferred_ai_provider);
+            route_completed && (live_backend.is_some() || inject_delegate_chat_spawn_failure);
         #[cfg(not(feature = "ai"))]
-        let use_background_live = false;
+        let use_background_live = {
+            let _ = inject_delegate_chat_spawn_failure;
+            false
+        };
         let user_message_id = self
             .delegate_workflow
             .next_message_id(DelegatedTaskChatRole::User);
@@ -27086,81 +28698,153 @@ impl AppComposition {
                 schema_version: 1,
             });
 
+        // What the provider invocation actually did, as opposed to what policy
+        // allowed it to do.
+        //
+        // The broker grant is the beginning of the story and was being recorded
+        // as its end: a live provider that failed, answered with nothing, or
+        // whose worker never started still persisted
+        // `phase4.provider.route.completed` beside an assistant message saying
+        // no answer was produced.
+        let mut invocation_state = legion_protocol::AssistedAiProviderInvocationState::Refused;
         let assistant_content_label = if !route_completed {
             lane_reservation.finish(None);
             format!(
                 "Delegate provider refused; citation(s)={} route={} reason={}",
                 citation_ids.len(),
-                provider_route_response.route_id,
-                provider_route_response
-                    .refusal
-                    .as_ref()
-                    .map(|refusal| refusal.reason_code.as_str())
-                    .unwrap_or("unknown")
+                route_id,
+                refusal_reason.as_deref().unwrap_or("unknown")
             )
         } else if use_background_live {
             // Non-blocking path: stream on a worker thread; poll_product_ai_stream
             // finalizes the assistant message when generation completes.
-            let preference = self.preferred_ai_provider;
-            let file_path = input.metadata.identity.canonical_path.0.clone();
-            let route_id = provider_route_response.route_id.clone();
-            let route_labels = provider_route_response.output_labels.clone();
+            // The worker captures `live_backend`, not the preference. That is
+            // the structural half of the fix: with no preference in scope there
+            // is nothing for it to re-resolve, so the destination it contacts is
+            // the one the broker approved above and cannot become another.
+            // Bounded by the same constant the declaration counts, like the
+            // Assist worker. The Delegate lane declares `ASSIST_PROMPT_MAX_BYTES`
+            // and was cloning the path unbounded, so a deeply nested file or a
+            // Windows long path sent more than the broker had been told about.
+            let file_path = bounded_assist_path(&input.metadata.identity.canonical_path.0);
+            let route_id = route_id.clone();
+            let route_labels = route_labels.clone();
             let citation_count = citation_ids.len();
             let assistant_id = assistant_message_id.clone();
             let prompt_for_worker = prompt_label.clone();
             let excerpt_for_worker = buffer_excerpt.clone();
-            let sink_delta = lane_reservation.sink();
-            std::thread::Builder::new()
+            // Copies for the worker: the terminal route record is written when
+            // its result is polled, and by then none of this is in scope.
+            let worker_run_id = legion_protocol::AgentRunId(format!(
+                "delegate-chat-run:{}",
+                event_context.correlation_id.0
+            ));
+            let worker_route_id = provider_route_request.route_id.clone();
+            let worker_event_context = event_context;
+            // Captured now rather than read on the worker: the picker is still
+            // changeable while a reply streams, and the explanation has to name
+            // the preference this run was dispatched under.
+            let preference_for_worker = self.preferred_ai_provider;
+            let anthropic_for_worker = anthropic_key_state.clone();
+            let sink_delta = lane_reservation.delta_writer();
+            let worker = move || {
+                let mut on_delta = move |delta: &str| sink_delta.push(delta);
+                let (label, stream) = resolve_delegate_chat_reply(
+                    live_backend,
+                    preference_for_worker,
+                    anthropic_for_worker,
+                    &prompt_for_worker,
+                    &excerpt_for_worker,
+                    &file_path,
+                    citation_count,
+                    &route_id,
+                    &route_labels,
+                    Some(&mut on_delta),
+                );
+                let completion = stream.as_ref().map(|stream| ProductChatCompletion {
+                    provider_id: stream.provider_id.clone(),
+                    model: stream.model.clone(),
+                    text: stream.text_preview.clone(),
+                    stream_chunks: stream.chunks.clone(),
+                    streamed: stream.streamed,
+                });
+                lane_reservation.finish_background(
+                    ProductAiBackgroundResult {
+                        assistant_message_id: assistant_id,
+                        content_label: label,
+                        // A live backend that produced no stream did not answer.
+                        live_failed: stream.is_none(),
+                        stream,
+                        assist_proposal: None,
+                        inline_prediction: None,
+                        // How this turn ended is only knowable here, and the
+                        // route record persisted at spawn says `Streaming`
+                        // until somebody writes the ending.
+                        delegate_route: Some(crate::product_ai_lane::DelegateRouteRecord {
+                            run_id: worker_run_id,
+                            route_id: worker_route_id,
+                            event_context: worker_event_context,
+                        }),
+                    },
+                    completion.as_ref(),
+                );
+            };
+            #[cfg(any(test, feature = "test-helpers"))]
+            let spawned = if inject_delegate_chat_spawn_failure {
+                Err(std::io::Error::other(
+                    "injected Delegate chat worker spawn failure",
+                ))
+            } else {
+                std::thread::Builder::new()
+                    .name("legion-delegate-chat".to_string())
+                    .spawn(worker)
+            };
+            #[cfg(not(any(test, feature = "test-helpers")))]
+            let spawned = std::thread::Builder::new()
                 .name("legion-delegate-chat".to_string())
-                .spawn(move || {
-                    let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
-                    let (label, stream) = resolve_delegate_chat_reply(
-                        preference,
-                        &prompt_for_worker,
-                        &excerpt_for_worker,
-                        &file_path,
-                        citation_count,
-                        &route_id,
-                        &route_labels,
-                        Some(&mut on_delta),
-                    );
-                    let completion = stream.as_ref().map(|stream| ProductChatCompletion {
-                        provider_id: stream.provider_id.clone(),
-                        model: stream.model.clone(),
-                        text: stream.text_preview.clone(),
-                        stream_chunks: stream.chunks.clone(),
-                        streamed: stream.streamed,
-                    });
-                    lane_reservation.finish_background(
-                        ProductAiBackgroundResult {
-                            assistant_message_id: assistant_id,
-                            content_label: label,
-                            stream,
-                            assist_proposal: None,
-                        },
-                        completion.as_ref(),
-                    );
-                })
-                .map_err(|error| {
-                    AppCompositionError::AiRuntime(format!(
-                        "failed to spawn Delegate chat worker: {error}"
-                    ))
-                })?;
-            "Streaming response…".to_string()
+                .spawn(worker);
+            match spawned {
+                Err(error) => {
+                    // A failed spawn used to return an error from here, and by
+                    // here the turn is half written: the question, its citations
+                    // and the permission record are already in the transcript,
+                    // and the assistant message that answers them is added
+                    // below. Returning left the question standing with no reply
+                    // and no explanation, and asking again appended a second
+                    // copy of all of it.
+                    //
+                    // The lane frees itself: the reservation was moved into the
+                    // closure the spawn refused, so dropping it fires the
+                    // release. Without that the next turn would be rejected as
+                    // "already in flight" by a run that never started.
+                    invocation_state = legion_protocol::AssistedAiProviderInvocationState::Failed;
+                    format!("Delegate could not start a worker for this turn: {error}")
+                }
+                Ok(_handle) => {
+                    // The worker owns the ending from here; the terminal state
+                    // arrives with its result.
+                    invocation_state =
+                        legion_protocol::AssistedAiProviderInvocationState::Streaming;
+                    "Streaming response…".to_string()
+                }
+            }
         } else {
-            let sink_delta = lane_reservation.sink();
-            let mut on_delta = move |delta: &str| sink_delta.push_delta(delta);
+            let sink_delta = lane_reservation.delta_writer();
+            let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
+                live_backend,
                 self.preferred_ai_provider,
+                anthropic_key_state.clone(),
                 &prompt_label,
                 &buffer_excerpt,
                 &input.metadata.identity.canonical_path.0,
                 citation_ids.len(),
-                &provider_route_response.route_id,
-                &provider_route_response.output_labels,
+                &route_id,
+                &route_labels,
                 Some(&mut on_delta),
             );
             if let Some(stream) = stream {
+                invocation_state = legion_protocol::AssistedAiProviderInvocationState::Completed;
                 lane_reservation.finish(Some(&ProductChatCompletion {
                     provider_id: stream.provider_id.clone(),
                     model: stream.model.clone(),
@@ -27170,6 +28854,18 @@ impl AppComposition {
                 }));
                 self.last_product_ai_stream = Some(stream);
             } else {
+                // No stream is not the same as no answer.
+                //
+                // The deterministic fixture answers without one, and that turn
+                // completed. A *live* backend that returns no stream is the
+                // failure the label already reports ("did not answer; showing
+                // the offline reply instead") and the route record used to
+                // contradict.
+                invocation_state = if live_backend.is_some() {
+                    legion_protocol::AssistedAiProviderInvocationState::Failed
+                } else {
+                    legion_protocol::AssistedAiProviderInvocationState::Completed
+                };
                 lane_reservation.finish(None);
             }
             label
@@ -27191,12 +28887,125 @@ impl AppComposition {
                 redaction_hints: vec![RedactionHint::MetadataOnly],
                 schema_version: 1,
             });
+        // The route this turn actually took, kept rather than dropped -- the
+        // evidence the Assist path already keeps and this one did not.
+        //
+        // `Streaming` is the honest state for a background turn at this point:
+        // the worker exists and its result has not arrived. Recording
+        // `Completed` here would be the same contradiction, one path over.
+        let delegate_run_id = legion_protocol::AgentRunId(format!(
+            "delegate-chat-run:{}",
+            event_context.correlation_id.0
+        ));
+        let replay_manifest = legion_protocol::AgentReplayManifest {
+            run_id: delegate_run_id.clone(),
+            transitions: Vec::new(),
+            context_manifests: Vec::new(),
+            provider_route_ids: vec![provider_route_request.route_id.clone()],
+            proposal_ids: Vec::new(),
+            correlation_id: event_context.correlation_id,
+            causality_id: event_context.causality_id,
+            event_sequence: self.event_sequence_generator.next(),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let outcome_label = match invocation_state {
+            legion_protocol::AssistedAiProviderInvocationState::Completed => {
+                "phase4.provider.route.completed"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Streaming => {
+                "phase4.provider.route.streaming"
+            }
+            legion_protocol::AssistedAiProviderInvocationState::Failed => {
+                "phase4.provider.route.failed"
+            }
+            _ => "phase4.provider.route.refused",
+        };
+        // Queued rather than returned, for the same reason the spawn failure is.
+        //
+        // By here the citations, the permission decision, both chat messages and
+        // possibly a live worker are all committed. Returning an error leaves a
+        // turn that happened looking like one that failed -- retrying duplicates
+        // it, and a worker already running finishes into the request the person
+        // was told had failed. The write is owed, not the turn.
+        if self
+            .persist_phase4_runtime_records(
+                &delegate_run_id,
+                &provider_route_request.route_id,
+                invocation_state,
+                outcome_label,
+                event_context,
+                &replay_manifest,
+                &[],
+            )
+            .is_err()
+        {
+            self.queue_route_audit(PendingRouteAudit {
+                run_id: delegate_run_id.clone(),
+                route_id: provider_route_request.route_id.clone(),
+                state: invocation_state,
+                outcome_label,
+                event_context,
+            });
+        }
+
+        // The same evidence, kept where the transcript can show it.
+        //
+        // The audit record survives the session and answers an auditor; this
+        // answers the person reading the reply, who is the one deciding whether
+        // to trust it. Bounded, because a long conversation should not grow an
+        // unbounded list of routes in a projection rebuilt every frame.
+        const DELEGATE_ROUTE_HISTORY: usize = 32;
+        self.delegate_workflow
+            .provider_routes
+            .push(legion_protocol::DelegatedTaskProviderRoute {
+                route_id: provider_route_request.route_id.clone(),
+                provider_id: provider_route_request.provider_id.clone(),
+                model_label: provider_route_request.model_label.clone(),
+                egress_label: if provider_class_sends_the_buffer(
+                    provider_route_request.provider_class,
+                ) {
+                    "sends workspace text off this machine".to_string()
+                } else {
+                    "stays on this machine".to_string()
+                },
+                // The whole authority, port included, and IPv6 bracketed.
+                //
+                // `scheme://host` alone reported a different destination from
+                // the one authorized and contacted whenever a port was
+                // configured, and produced `http://::1` for a loopback literal
+                // -- a label that is neither a URL nor the address.
+                destination_label: provider_route_request.network_target.as_ref().map_or_else(
+                    || "not encoded".to_string(),
+                    |target| {
+                        let host = if target.host.contains(':') && !target.host.starts_with('[') {
+                            format!("[{}]", target.host)
+                        } else {
+                            target.host.clone()
+                        };
+                        match target.port {
+                            Some(port) => format!("{}://{host}:{port}", target.scheme),
+                            None => format!("{}://{host}", target.scheme),
+                        }
+                    },
+                ),
+                invocation_state,
+                redaction_hints: vec![RedactionHint::MetadataOnly],
+                schema_version: 1,
+            });
+        if self.delegate_workflow.provider_routes.len() > DELEGATE_ROUTE_HISTORY {
+            let excess = self.delegate_workflow.provider_routes.len() - DELEGATE_ROUTE_HISTORY;
+            self.delegate_workflow.provider_routes.drain(..excess);
+        }
+
         let projection = self.current_delegated_task_projection(TimestampMillis::now());
         Ok(AppDelegateChatOutcome {
             projection,
             user_message_id,
             assistant_message_id,
             citation_count: citation_ids.len(),
+            provider_route_request,
+            invocation_state,
         })
     }
 
@@ -27299,6 +29108,7 @@ impl AppComposition {
             .active_principal_id
             .clone()
             .ok_or(AppCompositionError::WorkspaceNotOpen)?;
+        let open_files = self.active_documents.open_file_ids();
         Ok(LanguageRequestInput {
             workspace_id: metadata.identity.workspace_id,
             buffer_id,
@@ -27308,6 +29118,7 @@ impl AppComposition {
             snapshot_id,
             buffer_version,
             event_context,
+            open_files,
         })
     }
 
@@ -27353,6 +29164,26 @@ impl AppComposition {
         self.assist_inline_prediction_state
             .requests
             .insert(metadata.request_id.clone(), metadata.clone());
+
+        // A live provider call does not run here.
+        //
+        // This is the UI thread. The blocking transport allows a request 120
+        // seconds, and for all of it eframe can neither repaint nor read input
+        // -- so the `request_in_flight` state set two lines above, and the
+        // Cancel control that depends on it, could never actually be seen. The
+        // deterministic path stays inline because it returns immediately and
+        // running it through a thread would only add a frame of latency.
+        match self.spawn_live_inline_prediction(&metadata) {
+            Ok(true) => {
+                return Ok(self.assist_inline_prediction_projection(TimestampMillis::now()));
+            }
+            Ok(false) => {}
+            Err(error) => {
+                self.assist_inline_prediction_state.request_in_flight = false;
+                self.assist_inline_prediction_state.active_request_id = None;
+                return Err(error);
+            }
+        }
 
         let result = match self.invoke_inline_prediction_provider(metadata) {
             Ok(result) => result,
@@ -27421,6 +29252,7 @@ impl AppComposition {
             })?;
         let descriptor = record.to_protocol_descriptor();
         self.emit_transaction_event(&descriptor);
+        self.notify_lsp_did_change(buffer_id, &descriptor);
         self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Accepted)?;
         Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
     }
@@ -27448,6 +29280,35 @@ impl AppComposition {
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
+        // Release the shared lane now, rather than when the provider gets round
+        // to answering.
+        //
+        // The worker holds a `ProductAiLaneReservation` for the whole of its
+        // request, and the transport allows that up to 120 seconds. Leaving it
+        // held meant `product_ai_stream_in_flight()` stayed true after the
+        // cancel: every Assist proposal, prediction and Delegate control stayed
+        // disabled while the surface said the prediction had been cancelled.
+        //
+        // This sat in `accept_assist_inline_prediction` for one revision, which
+        // is a function that only ever runs against a *finished* prediction --
+        // no pending worker, no flag, an immediate early return. The comment
+        // described cancelling and the code was nowhere near it.
+        // Which prediction this cancel names, before anything is released.
+        //
+        // A `CancelGhostText` built from an older projection carries an old id,
+        // and releasing first cancelled whatever was running -- so a newer
+        // request was killed and its result fenced out by a command that was
+        // never about it. The validation below would then reject the id, having
+        // already done the damage.
+        let names_the_active_request = prediction_id.as_deref().is_none_or(|requested| {
+            self.assist_inline_prediction_state
+                .active_request_id
+                .as_ref()
+                .is_none_or(|active| active.0 == requested)
+        });
+        if names_the_active_request {
+            self.release_cancelled_inline_prediction_lane();
+        }
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
             self.assist_inline_prediction_state.request_in_flight = false;
@@ -27457,6 +29318,25 @@ impl AppComposition {
         self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Cancel)?;
         self.mark_inline_prediction_lifecycle(index, InlinePredictionResultState::Cancelled)?;
         Ok(self.assist_inline_prediction_projection(TimestampMillis::now()))
+    }
+
+    /// Tell a running prediction worker that nobody is waiting, and free the lane.
+    ///
+    /// Safe when no worker is running: the flag is absent and the sink is not
+    /// in flight, so both halves are no-ops.
+    fn release_cancelled_inline_prediction_lane(&mut self) {
+        self.pending_inline_prediction = None;
+        let Some(flag) = self.pending_inline_prediction_cancelled.take() else {
+            return;
+        };
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.live_product_ai_stream.snapshot().operation.as_str() == "assist.inline_prediction" {
+            // Ends this occupancy as well as freeing the lane, so the worker's
+            // own generation check refuses to publish whatever it eventually
+            // returns -- the flag alone cannot, because the worker may have
+            // read it before this line ran.
+            self.live_product_ai_stream.release_lane();
+        }
     }
 
     fn inline_prediction_request_metadata(
@@ -27566,57 +29446,14 @@ impl AppComposition {
         &self,
         metadata: InlinePredictionRequestMetadata,
     ) -> Result<InlinePredictionResult, AppCompositionError> {
-        // Tier 2: local-first product completion (Ollama / Anthropic) for ghost text.
-        // Without a live route (CI/offline), keep deterministic fixture.
+        // The deterministic offline prediction.
         //
-        // Authorize the concrete backend before any buffer excerpt leaves the process.
-        // DenyByDefaultBroker recognizes `ai.provider.invoke` / `ai.provider.stream`
-        // for provider egress — not the structural `ai.inline_prediction.invoke`
-        // label carried in InlinePredictionRequestMetadata.
-        let live_backend = product_ai_selected_live_backend(self.preferred_ai_provider);
-        if let Some(backend) = live_backend {
-            let (_provider_id, _model, _class, network_target, _, _, _) =
-                product_ai_route_fields(Some(backend));
-            let broker = DenyByDefaultBroker::new(
-                product_ai_security_policy(Some(backend)),
-                CapabilityNamespace("app.ai".to_string()),
-            );
-            let decision = broker
-                .handle(CapabilityRequest::Request {
-                    principal_id: metadata.principal_id.clone(),
-                    capability_id: CapabilityId("ai.provider.invoke".to_string()),
-                    workspace_trust_state: metadata.workspace_trust_state.clone(),
-                    target_path: None,
-                    decision_id: None,
-                    context: legion_protocol::CapabilityRequestContext {
-                        network_target,
-                        ..Default::default()
-                    },
-                    correlation_id: metadata.correlation_id,
-                })
-                .map_err(|error| AppCompositionError::AiRuntime(error.message))?;
-            let granted = matches!(
-                decision,
-                CapabilityResponse::Decision(ref d) if d.granted
-            ) || matches!(decision, CapabilityResponse::Granted(_));
-            if granted {
-                let buffer_excerpt = self
-                    .editor
-                    .text(metadata.buffer_id)
-                    .unwrap_or("")
-                    .chars()
-                    .take(2_000)
-                    .collect::<String>();
-                if let Some(live) = try_live_product_inline_prediction(
-                    self.preferred_ai_provider,
-                    &metadata,
-                    &buffer_excerpt,
-                ) {
-                    return Ok(live);
-                }
-            }
-            // Live route denied or empty: fall through to deterministic offline fixture.
-        }
+        // A live route is attempted by `spawn_live_inline_prediction` on a
+        // worker thread and lands through `merge_inline_prediction_result`.
+        // This is what answers when there is no live backend, when policy
+        // refused one, or when the worker came back with nothing -- and it is
+        // the only path that may run on the calling thread, because it does no
+        // network work at all.
 
         let request = InlinePredictionRequest {
             provider: DETERMINISTIC_LOCAL_PROVIDER_ID.to_string(),
@@ -28009,257 +29846,6 @@ impl AppComposition {
         }
     }
 
-    fn run_language_proposal(
-        &mut self,
-        buffer_id: BufferId,
-        kind: LanguageProposalKind,
-        position: TextCoordinate,
-        label: String,
-    ) -> Result<LanguageToolingProjection, AppCompositionError> {
-        let event_context = self.next_event_context();
-        let input = self.language_request_input(buffer_id, event_context)?;
-        let proposal_id = self.proposal_coordinator.next_id();
-        let capability = CapabilityId("fs.write".to_string());
-        let preconditions = ProposalVersionPreconditions {
-            file_version: Some(input.metadata.file_content_version),
-            buffer_version: Some(input.buffer_version),
-            snapshot_id: Some(input.snapshot_id),
-            generation: Some(input.metadata.workspace_generation),
-            file_content_version: Some(input.metadata.file_content_version),
-            workspace_generation: Some(input.metadata.workspace_generation),
-            expected_fingerprint: Some(input.metadata.fingerprint.clone()),
-            expected_file_length: input.metadata.file_length,
-            expected_modified_at: input.metadata.modified_at,
-        };
-        let source = match kind {
-            LanguageProposalKind::Formatting => WorkspaceEditSourceKind::LspFormatting,
-            LanguageProposalKind::Rename => WorkspaceEditSourceKind::LspRename,
-            LanguageProposalKind::OrganizeImports | LanguageProposalKind::CodeAction => {
-                WorkspaceEditSourceKind::LspCodeAction
-            }
-        };
-        let title = match kind {
-            LanguageProposalKind::Formatting => "Format active buffer".to_string(),
-            LanguageProposalKind::Rename => {
-                format!("Rename symbol to {}", bounded_label(&label, 64))
-            }
-            LanguageProposalKind::OrganizeImports => "Organize imports".to_string(),
-            LanguageProposalKind::CodeAction => {
-                format!("Apply code action {}", bounded_label(&label, 64))
-            }
-        };
-        let (workspace_edit, diagnostics) = match kind {
-            LanguageProposalKind::Rename => {
-                // When the LSP session is live, route through `textDocument/rename`
-                // for multi-file rename coverage (PKT-LSP-C I-2).  The result
-                // arrives asynchronously via `ingest_lsp_rename_result` and is
-                // projected into `language_tooling` on the next drain call.
-                if self.lsp_session.is_live()
-                    && self.issue_lsp_rename_request_inner(buffer_id, position, label.clone())
-                {
-                    return Ok(self.language_tooling.projection());
-                }
-                // --- local (non-LSP) rename path ---
-                let replacement = bounded_label(&label, 128);
-                if replacement.trim().is_empty() {
-                    return Ok(self.language_tooling.record_proposal_failure(
-                        &input,
-                        kind,
-                        "Rename proposal requires a non-empty replacement label".to_string(),
-                    ));
-                }
-                let Some(range) =
-                    identifier_byte_range_at(&input.text, position.byte_offset.unwrap_or(0))
-                else {
-                    return Ok(self.language_tooling.record_proposal_failure(
-                        &input,
-                        kind,
-                        "Rename proposal requires an identifier at the requested position"
-                            .to_string(),
-                    ));
-                };
-                let target = ProposalAffectedTarget {
-                    target_id: format!("file:{}", input.metadata.identity.file_id.0),
-                    kind: ProposalTargetKind::OpenBuffer,
-                    workspace_id: Some(input.workspace_id),
-                    file_id: Some(input.metadata.identity.file_id),
-                    buffer_id: Some(buffer_id),
-                    path: Some(input.metadata.identity.canonical_path.clone()),
-                    terminal_session_id: None,
-                    plugin_id: None,
-                    remote_authority: None,
-                    collaboration_session_id: None,
-                    byte_ranges: vec![range],
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                };
-                let workspace_edit = WorkspaceEditProposalPayload {
-                    workspace_id: input.workspace_id,
-                    edit_id: uuid::Uuid::now_v7(),
-                    title: title.clone(),
-                    source,
-                    target_coverage: ProposalTargetCoverage {
-                        coverage_kind: ProposalTargetCoverageKind::Complete,
-                        targets: vec![target],
-                        omitted_target_count: 0,
-                        redaction_hints: vec![RedactionHint::MetadataOnly],
-                    },
-                    file_edits: vec![WorkspaceTextEdit {
-                        file: input.metadata.identity.clone(),
-                        buffer_id: Some(buffer_id),
-                        edits: EditBatch {
-                            edits: vec![ProtocolWorkspaceTextEdit {
-                                range: ProtocolEditTextRange::byte(range.start, range.end),
-                                replacement,
-                            }],
-                        },
-                        preconditions: preconditions.clone(),
-                    }],
-                    file_operations: Vec::new(),
-                    required_capability: capability.clone(),
-                    diagnostics: Vec::new(),
-                    schema_version: 1,
-                };
-                (workspace_edit, Vec::new())
-            }
-            LanguageProposalKind::Formatting
-            | LanguageProposalKind::OrganizeImports
-            | LanguageProposalKind::CodeAction => {
-                let mut diagnostics = Vec::new();
-                diagnostics.push(ProtocolDiagnostic {
-                    code: "language_tooling.runtime_edit_unavailable".to_string(),
-                    message: format!(
-                        "{title} is represented as a safe no-op preview until live LSP edits are wired"
-                    ),
-                    severity: ProtocolDiagnosticSeverity::Warning,
-                    path: Some(input.metadata.identity.canonical_path.clone()),
-                    range: None,
-                });
-                let target = ProposalAffectedTarget {
-                    target_id: format!("file:{}", input.metadata.identity.file_id.0),
-                    kind: ProposalTargetKind::OpenBuffer,
-                    workspace_id: Some(input.workspace_id),
-                    file_id: Some(input.metadata.identity.file_id),
-                    buffer_id: Some(buffer_id),
-                    path: Some(input.metadata.identity.canonical_path.clone()),
-                    terminal_session_id: None,
-                    plugin_id: None,
-                    remote_authority: None,
-                    collaboration_session_id: None,
-                    byte_ranges: vec![ByteRange::new(0, input.text.len() as u64)],
-                    redaction_hints: vec![RedactionHint::MetadataOnly],
-                };
-                let workspace_edit = WorkspaceEditProposalPayload {
-                    workspace_id: input.workspace_id,
-                    edit_id: uuid::Uuid::now_v7(),
-                    title: title.clone(),
-                    source,
-                    target_coverage: ProposalTargetCoverage {
-                        coverage_kind: ProposalTargetCoverageKind::Complete,
-                        targets: vec![target],
-                        omitted_target_count: 0,
-                        redaction_hints: vec![RedactionHint::MetadataOnly],
-                    },
-                    file_edits: vec![WorkspaceTextEdit {
-                        file: input.metadata.identity.clone(),
-                        buffer_id: Some(buffer_id),
-                        edits: EditBatch {
-                            edits: vec![ProtocolWorkspaceTextEdit {
-                                range: ProtocolEditTextRange::byte(0, input.text.len() as u64),
-                                replacement: input.text.clone(),
-                            }],
-                        },
-                        preconditions: preconditions.clone(),
-                    }],
-                    file_operations: Vec::new(),
-                    required_capability: capability.clone(),
-                    diagnostics: diagnostics.clone(),
-                    schema_version: 1,
-                };
-                (workspace_edit, diagnostics)
-            }
-        };
-        let request = LspRequestCorrelation {
-            request_id: legion_protocol::LspRequestId(uuid::Uuid::now_v7()),
-            server_id: legion_protocol::LanguageServerId(1),
-            workspace_id: input.workspace_id,
-            file_id: Some(input.metadata.identity.file_id),
-            snapshot_id: Some(input.snapshot_id),
-            buffer_version: Some(input.buffer_version),
-            correlation_id: input.event_context.correlation_id,
-            causality_id: input.event_context.causality_id,
-            cancellation_token: Some(CancellationTokenId(uuid::Uuid::now_v7())),
-            privacy_scope: SemanticPrivacyScope::Workspace,
-            issued_at: TimestampMillis::now(),
-            schema_version: 1,
-        };
-        let proposal = legion_protocol::convert_lsp_edit_to_workspace_proposal(
-            LspEditProposalConversionInput {
-                proposal_id,
-                principal: input.principal.clone(),
-                capability,
-                request,
-                workspace_edit,
-                preconditions,
-                lifecycle_state: ProposalLifecycleState::Created,
-                privacy_label: legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata,
-                preview: PreviewSummary {
-                    summary: title.clone(),
-                    details: vec![
-                        "language_tooling.proposal_preview".to_string(),
-                        format!("buffer_version={}", input.buffer_version.0),
-                        format!("snapshot_id={}", input.snapshot_id.0),
-                    ],
-                },
-                expires_at: None,
-                created_at: TimestampMillis::now(),
-                diagnostics,
-                schema_version: 1,
-            },
-        )
-        .map_err(|error| AppCompositionError::LanguageTooling(format!("{error:?}")))?;
-        self.proposal_coordinator
-            .register_lifecycle_context(proposal.proposal_id, input.event_context);
-        let created = self.proposal_coordinator.created_response(&proposal);
-        if !matches!(created, ProposalResponse::Created(_)) {
-            return Ok(self.language_tooling.record_proposal_failure(
-                &input,
-                kind,
-                format!("{} proposal creation failed: {created:?}", title),
-            ));
-        }
-        let validated = self
-            .proposal_coordinator
-            .handle(ProposalRequest::Validate(proposal.clone()));
-        if !matches!(validated, Ok(ProposalResponse::Validated(_))) {
-            return Ok(self.language_tooling.record_proposal_failure(
-                &input,
-                kind,
-                format!("{} proposal validation failed: {validated:?}", title),
-            ));
-        }
-        let previewed = self
-            .proposal_coordinator
-            .handle(ProposalRequest::Preview(proposal.clone()));
-        if !matches!(previewed, Ok(ProposalResponse::Previewed { .. })) {
-            return Ok(self.language_tooling.record_proposal_failure(
-                &input,
-                kind,
-                format!("{} proposal preview failed: {previewed:?}", title),
-            ));
-        }
-        Ok(self.language_tooling.record_proposal(
-            &input,
-            kind,
-            proposal.proposal_id,
-            if matches!(kind, LanguageProposalKind::CodeAction) {
-                Some(label.as_str())
-            } else {
-                None
-            },
-            format!("{} proposal preview created", title),
-        ))
-    }
-
     fn run_active_file_structural_search(
         &self,
         query_id: &str,
@@ -28573,6 +30159,7 @@ impl AppComposition {
     ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
         let mut record = capture_workspace_session_record(&self.active_documents, &self.editor)?;
         record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
+        record.language_toolchain_settings = self.language_toolchain_settings.clone();
         record.memory_snapshot_json = Some(
             serde_json::to_string(
                 &self
@@ -28590,6 +30177,10 @@ impl AppComposition {
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        // Restore metadata only. Stored paths remain an unapproved draft until
+        // the operator explicitly configures the toolchain again.
+        self.clear_typescript_toolchain();
+        self.language_toolchain_settings = record.language_toolchain_settings.clone();
         // Apply user-level terminal shell preference from loaded settings.
         self.terminal_workflow
             .set_user_shell_selection(TerminalShellSelection::from_label(
@@ -28650,7 +30241,13 @@ impl AppComposition {
         &self,
         layout: &ShellLayoutProjection,
     ) -> Result<ActiveBufferProjection, AppCompositionError> {
-        ProjectionBuilder::active_buffer_projection(&self.active_documents, &self.editor, layout)
+        let settings = self.settings_projection();
+        ProjectionBuilder::active_buffer_projection(
+            &self.active_documents,
+            &self.editor,
+            layout,
+            &settings,
+        )
     }
 
     fn selected_proposal_trust_projections(
@@ -28659,6 +30256,26 @@ impl AppComposition {
         generated_at: TimestampMillis,
     ) -> Option<SelectedProposalTrustProjections> {
         let selected_proposal_id = proposal_ledger_projection.selected_proposal_id?;
+        // What the run itself built, if this proposal came from one.
+        //
+        // The reconstruction below derives everything from the proposal row,
+        // which carries no route -- so it cannot tell a remote run from a local
+        // one and assumes consent was never required. Preferring the stored
+        // projections keeps the refusal a reviewer needs to see.
+        // Route-specific data is kept; lifecycle-dependent projections are not.
+        //
+        // The manifest, inspector and budget describe *what the run did* and
+        // cannot be reconstructed from the proposal row -- that is why they are
+        // stored. The approval checklist and the checkpoint projection describe
+        // *where the proposal is now*, and returning the ones captured at
+        // `Created` left the checklist reporting `Created` and its lifecycle
+        // gate blocked while the ledger beside it showed the proposal approved,
+        // applied or cancelled.
+        let stored_trust = self
+            .phase4_projection_state
+            .phase4_trust_by_proposal
+            .get(&selected_proposal_id)
+            .cloned();
         let proposal = self
             .proposal_coordinator
             .proposal_for_id(selected_proposal_id)?;
@@ -28667,34 +30284,6 @@ impl AppComposition {
             .iter()
             .find(|row| row.proposal_id == selected_proposal_id)?;
         let lifecycle_state = row.lifecycle.state;
-        let context_manifest_projection = legion_protocol::ContextManifestProjection {
-            manifest: legion_protocol::context_manifest_from_proposal(
-                &proposal,
-                format!("proposal:{}:context-details", selected_proposal_id.0),
-                self.active_documents.active_workspace_trust.clone(),
-                row.privacy_label,
-                row.risk_label,
-                generated_at,
-                1,
-            ),
-            selected_item_id: None,
-            generated_at,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        };
-        let privacy_inspector_projection =
-            legion_protocol::privacy_inspector_from_context_manifest_projection(
-                &context_manifest_projection,
-                format!("proposal:{}:privacy-details", selected_proposal_id.0),
-                generated_at,
-                1,
-            );
-        let permission_budget_projection = Self::selected_proposal_permission_budget_projection(
-            &proposal,
-            &context_manifest_projection,
-            row.risk_label,
-            generated_at,
-        );
         let causality_id = self
             .proposal_coordinator
             .proposal_contexts
@@ -28718,6 +30307,60 @@ impl AppComposition {
                 generated_at,
                 1,
             );
+        // The run's own answers where it has them, the reconstruction
+        // otherwise -- decided here, because the checklist is built from these
+        // and a checklist reading the reconstruction while the caller receives
+        // the stored trio is two answers to one question.
+        let (
+            context_manifest_projection,
+            privacy_inspector_projection,
+            permission_budget_projection,
+        ) = match stored_trust {
+            Some(stored) => (
+                stored.context_manifest_projection,
+                stored.privacy_inspector_projection,
+                stored.permission_budget_projection,
+            ),
+            // Built only when there is nothing stored to build *instead of*.
+            // Three protocol calls and a budget projection, on every shell
+            // snapshot, for a value the arm above discards.
+            None => {
+                let context_manifest_projection = legion_protocol::ContextManifestProjection {
+                    manifest: legion_protocol::context_manifest_from_proposal(
+                        &proposal,
+                        format!("proposal:{}:context-details", selected_proposal_id.0),
+                        self.active_documents.active_workspace_trust.clone(),
+                        row.privacy_label,
+                        row.risk_label,
+                        generated_at,
+                        1,
+                    ),
+                    selected_item_id: None,
+                    generated_at,
+                    redaction_hints: vec![RedactionHint::MetadataOnly],
+                    schema_version: 1,
+                };
+                let privacy_inspector_projection =
+                    legion_protocol::privacy_inspector_from_context_manifest_projection(
+                        &context_manifest_projection,
+                        format!("proposal:{}:privacy-details", selected_proposal_id.0),
+                        generated_at,
+                        1,
+                    );
+                let permission_budget_projection =
+                    Self::selected_proposal_permission_budget_projection(
+                        &proposal,
+                        &context_manifest_projection,
+                        row.risk_label,
+                        generated_at,
+                    );
+                (
+                    context_manifest_projection,
+                    privacy_inspector_projection,
+                    permission_budget_projection,
+                )
+            }
+        };
         let approval_checklist_projection =
             legion_protocol::approval_checklist_from_trust_projections(
                 format!("proposal:{}:approval-details", selected_proposal_id.0),
@@ -28834,6 +30477,7 @@ impl AppComposition {
         title: impl Into<String>,
     ) -> Result<ShellProjectionSnapshot, AppCompositionError> {
         let layout_projection = ShellLayoutProjection::plain(title);
+        let settings_projection = self.settings_projection();
         let generated_at = TimestampMillis::now();
         let proposal_ledger_projection = self
             .proposal_coordinator
@@ -28877,7 +30521,7 @@ impl AppComposition {
             status_messages: Vec::new(),
             palette_projection: self.palette.projection(),
             command_registry_projection,
-            settings_projection: self.settings_projection(),
+            settings_projection: settings_projection.clone(),
             proposal_ledger_projection,
             artifact_ledger_projection,
             verification_run_projection,
@@ -28941,6 +30585,8 @@ impl AppComposition {
             legion_workflow_comm_rows,
             legion_workflow_budget_rows,
             plugin_contribution_projections: self.plugin_contribution_projections.clone(),
+            extension_catalog: self.extension_catalog.projection(),
+            legion_cloud_lane: self.legion_cloud_lane_projection(),
             collaboration_presence_projections: self.collaboration.presence_projections(),
             collaboration_gui_projection: self.collaboration.gui_projection(),
             remote_gui_projection,
@@ -28960,7 +30606,7 @@ impl AppComposition {
             language_tooling_projection: {
                 // D2: inject live LSP health records from the background session handle.
                 // PKT-LSP-C T3: also inject session lifecycle status (backoff countdown etc).
-                let mut p = self.language_tooling.projection();
+                let mut p = self.language_tooling_projection();
                 if let Some(record) = self.lsp_session.health_record() {
                     p.lsp_health_records.push(record);
                 }
@@ -29014,7 +30660,7 @@ impl AppComposition {
     /// Build explorer projection from workspace tree snapshot.
     pub fn explorer_projection(&self) -> Result<ExplorerProjection, AppCompositionError> {
         let workspace_id = self.active_documents.require_workspace_id()?;
-        let nodes = AppWorkspaceCommandPort::tree_snapshot(&self.workspace, workspace_id)?;
+        let nodes = AppWorkspaceCommandPort::tree_snapshot(&*self.workspace, workspace_id)?;
         Ok(ProjectionBuilder::explorer_projection(
             &self.active_documents,
             nodes,
@@ -29414,7 +31060,106 @@ impl AppComposition {
                 );
                 Ok(response)
             }
-            ProposalRequest::Apply(proposal) => self.apply_workspace_proposal(proposal),
+            ProposalRequest::Apply(proposal) => {
+                let proposal_id = proposal.proposal_id;
+                let mixed_command = self.code_action_command_sidecars.take(proposal_id);
+                let command_buffer_id = mixed_command
+                    .as_ref()
+                    .map(|command| command.identity.buffer_id);
+                if let Some(command) = mixed_command.as_ref()
+                    && !self
+                        .lsp_session
+                        .supports_execute_command(&command.command_id)
+                {
+                    return Err(AppCompositionError::Protocol(ProtocolError {
+                        code: "code_action_command_unadvertised".to_string(),
+                        message:
+                            "language server no longer advertises the retained code-action command"
+                                .to_string(),
+                    }));
+                }
+                let requires_mixed_command =
+                    self.proposal_coordinator
+                        .proposal_for_id(proposal_id)
+                        .is_some_and(|canonical| {
+                            canonical.preview.details.iter().any(|detail| {
+                                detail == "language_tooling.code_action_mixed_command"
+                            })
+                        });
+                if requires_mixed_command && mixed_command.is_none() {
+                    return Err(AppCompositionError::Protocol(ProtocolError {
+                        code: "code_action_command_sidecar_missing".to_string(),
+                        message: "mixed code action command authorization is no longer live"
+                            .to_string(),
+                    }));
+                }
+                self.server_apply_edits.expire();
+                let server_apply_edit_proposal = self
+                    .proposal_coordinator
+                    .proposal_for_id(proposal_id)
+                    .is_some_and(|canonical| {
+                        canonical
+                            .preview
+                            .details
+                            .iter()
+                            .any(|detail| detail == "language_tooling.server_apply_edit")
+                    });
+                if server_apply_edit_proposal && !self.server_apply_edits.is_live(proposal_id) {
+                    return Err(AppCompositionError::Protocol(ProtocolError {
+                        code: "workspace_apply_edit_expired".to_string(),
+                        message:
+                            "server-originated workspace/applyEdit proposal is no longer authorized"
+                                .to_string(),
+                    }));
+                }
+                let apply_edit_reply = if server_apply_edit_proposal {
+                    let Some((claim, reply)) = self.server_apply_edits.claim(proposal_id) else {
+                        return Err(AppCompositionError::Protocol(ProtocolError {
+                            code: "workspace_apply_edit_expired".to_string(),
+                            message:
+                                "server-originated workspace/applyEdit proposal is no longer authorized"
+                                    .to_string(),
+                        }));
+                    };
+                    Some((claim, reply))
+                } else {
+                    None
+                };
+                let response = self.apply_workspace_proposal(proposal);
+                if let Some((claim, reply)) = apply_edit_reply {
+                    match &response {
+                        Ok(ProposalResponse::Applied(_)) => {
+                            crate::language::ServerApplyEditAuthority::finish_claimed(
+                                claim,
+                                reply,
+                                true,
+                                String::new(),
+                            )
+                        }
+                        Ok(_) | Err(_) => {
+                            crate::language::ServerApplyEditAuthority::finish_claimed(
+                                claim,
+                                reply,
+                                false,
+                                "workspace/applyEdit proposal was not applied".to_string(),
+                            )
+                        }
+                    }
+                }
+                if let (Ok(ProposalResponse::Applied(_)), Some(command)) =
+                    (&response, mixed_command)
+                    && let Err(error) = self.issue_code_action_command_sidecar(command)
+                    && let Some(buffer_id) = command_buffer_id
+                    && let Some(input) = self.language_request_input_for_failure(buffer_id)
+                {
+                    let _ = self.language_tooling.record_proposal_failure(
+                        &input,
+                        LanguageProposalKind::CodeAction,
+                        format!("code-action edit applied but command dispatch failed: {error}"),
+                    );
+                }
+                response
+            }
             ProposalRequest::Approve(command) => {
                 self.handle_lifecycle_command_request(ProposalRequest::Approve(command))
             }
@@ -29434,6 +31179,10 @@ impl AppComposition {
         &mut self,
         request: ProposalRequest,
     ) -> Result<ProposalResponse, AppCompositionError> {
+        let terminalizes_server_apply_edit = matches!(
+            &request,
+            ProposalRequest::Reject(_) | ProposalRequest::Cancel(_) | ProposalRequest::Rollback(_)
+        );
         let proposal_id = match &request {
             ProposalRequest::Approve(command)
             | ProposalRequest::Reject(command)
@@ -29449,6 +31198,13 @@ impl AppComposition {
             .proposal_coordinator
             .handle(request)
             .map_err(AppCompositionError::Protocol)?;
+        if terminalizes_server_apply_edit {
+            self.server_apply_edits.finish(
+                proposal_id,
+                false,
+                "workspace/applyEdit proposal was rejected or cancelled".to_string(),
+            );
+        }
         if let Some(proposal) = self.proposal_coordinator.proposal(proposal_id)
             && let Err(failure) = SaveWorkflowService::observe_proposal_response(
                 &mut self.proposal_coordinator,
@@ -30299,6 +32055,7 @@ impl AppComposition {
         if let Ok(record) = self.editor.undo(buffer_id, Some(proposal.correlation_id)) {
             let descriptor = record.to_protocol_descriptor();
             self.emit_transaction_event(&descriptor);
+            self.notify_lsp_did_change(buffer_id, &descriptor);
         }
     }
 
@@ -30450,6 +32207,14 @@ impl AppComposition {
         let buffer_version = self.editor.buffer_version(buffer_id)?;
         let snapshot_id = self.editor.current_snapshot(buffer_id)?.snapshot_id;
         let metadata = self.active_documents.metadata_for_buffer(buffer_id);
+        let fingerprint = metadata.and_then(|metadata| {
+            self.workspace
+                .current_file_fingerprint(
+                    metadata.identity.workspace_id,
+                    &metadata.identity.canonical_path.0,
+                )
+                .ok()
+        });
         Ok(VersionContext {
             file_version: metadata
                 .map(|metadata| metadata.file_content_version)
@@ -30465,7 +32230,7 @@ impl AppComposition {
             workspace_generation: metadata
                 .map(|metadata| metadata.workspace_generation)
                 .unwrap_or(WorkspaceGeneration(0)),
-            fingerprint: metadata.map(|metadata| metadata.fingerprint.clone()),
+            fingerprint,
             file_length: metadata.and_then(|metadata| metadata.file_length),
             modified_at: metadata.and_then(|metadata| metadata.modified_at),
         })
@@ -30731,6 +32496,7 @@ impl AppComposition {
             Ok(record) => {
                 let descriptor = record.to_protocol_descriptor();
                 self.emit_transaction_event(&descriptor);
+                self.notify_lsp_did_change(buffer_id, &descriptor);
                 Ok(())
             }
             Err(err) => Err(self.failed_apply_response(
@@ -31090,6 +32856,11 @@ impl AppComposition {
             {
                 return response;
             }
+        }
+
+        #[cfg(test)]
+        if let Some(hook) = self.workspace_edit_preflight_hook.take() {
+            hook();
         }
 
         let mut committed = Vec::new();
@@ -32663,2662 +34434,8 @@ pub fn default_workspace_root() -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-    #[cfg(feature = "ai")]
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    };
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[test]
-    fn retryable_search_palette_rows_dispatch_the_existing_run_search_intent() {
-        for status_kind in [
-            SearchStatusKindProjection::NoResults,
-            SearchStatusKindProjection::ValidationError,
-            SearchStatusKindProjection::Error,
-            SearchStatusKindProjection::Cancelled,
-            SearchStatusKindProjection::DegradedLimited,
-        ] {
-            let mut app = AppComposition::new();
-            app.palette.open = true;
-            app.palette.mode = PaletteMode::Search;
-            app.palette.query = "/needle".to_string();
-            app.palette.scope = SearchScopeProjection::Workspace;
-            app.search_projection = SearchProjection {
-                query_id: Some("search:failed".to_string()),
-                scope: SearchScopeProjection::Workspace,
-                query_label: "needle".to_string(),
-                status: SearchStatusProjection {
-                    kind: status_kind,
-                    message: "Retryable search state".to_string(),
-                },
-                results: Vec::new(),
-                result_limit: 20,
-                omitted_result_count: 0,
-                omitted_file_count: 0,
-                skipped_binary_count: 0,
-                case_sensitive: false,
-                whole_word: false,
-                use_regex: false,
-                diagnostics: Vec::new(),
-                generated_at: TimestampMillis(1),
-                schema_version: 1,
-            };
-
-            app.sync_search_palette_results();
-
-            assert_eq!(app.palette.results.len(), 1, "{status_kind:?}");
-            let retry = &app.palette.results[0];
-            assert_eq!(retry.id, "search:retry", "{status_kind:?}");
-            assert_eq!(retry.disabled_reason, None, "{status_kind:?}");
-            assert_eq!(
-                app.palette_result_intent(retry),
-                Some(CommandDispatchIntent::RunSearch {
-                    scope: SearchScopeProjection::Workspace,
-                    query: "needle".to_string(),
-                    limit: 0,
-                    case_sensitive: None,
-                    whole_word: None,
-                    use_regex: None,
-                }),
-                "{status_kind:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn search_palette_does_not_restore_results_from_a_different_scope() {
-        let mut app = AppComposition::new();
-        app.search_projection = SearchProjection {
-            query_id: Some("search:workspace".to_string()),
-            scope: SearchScopeProjection::Workspace,
-            query_label: "needle".to_string(),
-            status: SearchStatusProjection {
-                kind: SearchStatusKindProjection::NoResults,
-                message: "No workspace matches".to_string(),
-            },
-            results: Vec::new(),
-            result_limit: 20,
-            omitted_result_count: 0,
-            omitted_file_count: 0,
-            skipped_binary_count: 0,
-            case_sensitive: false,
-            whole_word: false,
-            use_regex: false,
-            diagnostics: Vec::new(),
-            generated_at: TimestampMillis(1),
-            schema_version: 1,
-        };
-
-        let palette = app
-            .open_palette(
-                PaletteMode::Search,
-                "needle".to_string(),
-                SearchScopeProjection::ActiveFile,
-            )
-            .expect("active-file Search should open");
-
-        assert_eq!(palette.scope, SearchScopeProjection::ActiveFile);
-        assert_eq!(palette.results.len(), 1);
-        assert_eq!(palette.results[0].id, "search:run");
-        assert_eq!(
-            palette.results[0].title,
-            "Search active file for \"needle\""
-        );
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn workflow_provider_boundary_denies_workspace_read_capabilities() {
-        let broker = LegionWorkflowProposalOnlyCapabilityBroker;
-        let decision_for = |capability: &str| {
-            broker
-                .handle(CapabilityRequest::Request {
-                    principal_id: PrincipalId("workflow-provider-test".to_string()),
-                    capability_id: CapabilityId(capability.to_string()),
-                    workspace_trust_state: WorkspaceTrustState::Trusted,
-                    target_path: None,
-                    decision_id: None,
-                    context: CapabilityRequestContext::default(),
-                    correlation_id: CorrelationId(1),
-                })
-                .expect("capability decision")
-        };
-
-        assert!(matches!(
-            decision_for("delegate.tool.read"),
-            CapabilityResponse::Decision(CapabilityDecision { granted: false, .. })
-        ));
-        assert!(matches!(
-            decision_for("delegate.tool.grep"),
-            CapabilityResponse::Decision(CapabilityDecision { granted: false, .. })
-        ));
-        assert!(matches!(
-            decision_for("delegate.tool.edit-as-proposal"),
-            CapabilityResponse::Decision(CapabilityDecision { granted: true, .. })
-        ));
-
-        let scope = AppComposition::new().legion_workflow_worker_scope();
-        assert_eq!(
-            scope.allowed_tools,
-            vec![legion_protocol::LegionToolKind::EditAsProposal]
-        );
-    }
-
-    #[test]
-    fn parse_terminal_keeps_unterminated_osc_bytes() {
-        // OSC introducer with no BEL/ST terminator must not silently drop the
-        // trailing bytes of the output.
-        let payload = "before\x1b]7;file://localhost/home";
-        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
-        assert_eq!(parsed.visible_output, "before\x1b]7;file://localhost/home");
-        assert_eq!(parsed.cwd, None);
-    }
-
-    #[test]
-    fn parse_terminal_handles_terminated_osc() {
-        let payload = "out\x1b]7;file:///home/user\x07tail";
-        let parsed = legion_terminal::osc::parse_terminal_shell_output(payload);
-        assert_eq!(parsed.visible_output, "outtail");
-        assert_eq!(parsed.cwd.as_deref(), Some("/home/user"));
-    }
-
-    #[test]
-    fn osc7_cwd_decodes_windows_drive_and_percent() {
-        assert_eq!(
-            legion_terminal::osc::parse_terminal_shell_output(
-                "\x1b]7;file:///C:/Users/My%20Project\x1b\\"
-            )
-            .cwd
-            .as_deref(),
-            Some("C:/Users/My Project")
-        );
-    }
-
-    #[test]
-    fn osc7_cwd_handles_localhost_and_unc() {
-        assert_eq!(
-            legion_terminal::osc::parse_terminal_shell_output(
-                "\x1b]7;file://localhost/home/user\x1b\\"
-            )
-            .cwd
-            .as_deref(),
-            Some("/home/user")
-        );
-        assert_eq!(
-            legion_terminal::osc::parse_terminal_shell_output(
-                "\x1b]7;file://server/share/dir\x1b\\"
-            )
-            .cwd
-            .as_deref(),
-            Some("//server/share/dir")
-        );
-    }
-
-    fn unique_temp_dir(prefix: &str) -> PathBuf {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("legion-{prefix}-{nanos}"));
-        fs::create_dir_all(&path).expect("create temp root");
-        path
-    }
-
-    fn save_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
-        let file = FileIdentity {
-            file_id: FileId(1),
-            workspace_id: WorkspaceId(1),
-            canonical_path: CanonicalPath("C:/repo/file.txt".to_string()),
-            content_version: FileContentVersion(1),
-            content_hash: None,
-        };
-        let fingerprint = FileFingerprint {
-            algorithm: "test".to_string(),
-            value: "hash:test".to_string(),
-        };
-        WorkspaceProposal {
-            proposal_id,
-            principal: PrincipalId("trusted".to_string()),
-            capability: CapabilityId("fs.write".to_string()),
-            correlation_id: CorrelationId(1),
-            payload: ProposalPayload::SaveFile(SaveFileProposal {
-                file: file.clone(),
-                buffer_id: BufferId(1),
-                file_id: file.file_id,
-                snapshot_id: legion_protocol::SnapshotId(1),
-                buffer_version: legion_protocol::BufferVersion(1),
-                file_content_version: FileContentVersion(1),
-                workspace_generation: WorkspaceGeneration(1),
-                expected_fingerprint: Some(fingerprint.clone()),
-                save_intent: SaveIntent::Manual,
-                conflict_policy: SaveConflictPolicy::RejectIfChanged,
-                trust_decision: TrustDecisionContext {
-                    workspace_trust_state: WorkspaceTrustState::Trusted,
-                    decision_id: None,
-                    decided_at: Some(TimestampMillis(1)),
-                },
-                required_capability: CapabilityId("fs.write".to_string()),
-                principal: PrincipalId("trusted".to_string()),
-                correlation_id: CorrelationId(1),
-                diagnostics: Vec::new(),
-            }),
-            preconditions: ProposalVersionPreconditions {
-                file_version: Some(FileContentVersion(1)),
-                buffer_version: Some(legion_protocol::BufferVersion(1)),
-                snapshot_id: Some(legion_protocol::SnapshotId(1)),
-                generation: Some(WorkspaceGeneration(1)),
-                file_content_version: Some(FileContentVersion(1)),
-                workspace_generation: Some(WorkspaceGeneration(1)),
-                expected_fingerprint: Some(fingerprint),
-                expected_file_length: None,
-                expected_modified_at: None,
-            },
-            preview: PreviewSummary {
-                summary: "test save".to_string(),
-                details: Vec::new(),
-            },
-            expires_at: None,
-            created_at: TimestampMillis(1),
-        }
-    }
-
-    fn command(
-        proposal_id: ProposalId,
-        action: legion_protocol::ProposalLifecycleAction,
-    ) -> ProposalLifecycleCommand {
-        ProposalLifecycleCommand {
-            proposal_id,
-            action,
-            principal: PrincipalId("trusted".to_string()),
-            capability: CapabilityId("fs.write".to_string()),
-            correlation_id: CorrelationId(1),
-            causality_id: CausalityId(uuid::Uuid::now_v7()),
-            reason: None,
-            diagnostics: Vec::new(),
-            requested_at: TimestampMillis(1),
-            schema_version: 1,
-        }
-    }
-
-    fn register_created(coordinator: &AppProposalCoordinator, proposal: &WorkspaceProposal) {
-        coordinator
-            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
-        assert!(matches!(
-            coordinator.created_response(proposal),
-            ProposalResponse::Created(_)
-        ));
-    }
-
-    fn proposal_intent_route_context(
-        proposal: Option<WorkspaceProposal>,
-    ) -> AppProposalIntentRouteContext {
-        AppProposalIntentRouteContext {
-            proposal,
-            principal: PrincipalId("trusted".to_string()),
-            capability: CapabilityId("fs.write".to_string()),
-            correlation_id: CorrelationId(99),
-            causality_id: CausalityId(
-                uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
-            ),
-            requested_at: TimestampMillis(123),
-        }
-    }
-
-    fn plugin_manifest(plugin_id: PluginId) -> PluginManifest {
-        PluginManifest {
-            plugin_id,
-            name: "phase5.test".to_string(),
-            version: "0.1.0".to_string(),
-            schema_version: 1,
-            min_abi_version: 1,
-            max_abi_version: 1,
-            module_hash: "sha256:phase5".to_string(),
-            manifest_id: "manifest:phase5".to_string(),
-            trust: legion_protocol::PluginTrustMetadata {
-                source: legion_protocol::PluginTrustSource::ExplicitLocalAllow,
-                decision: legion_protocol::PluginTrustDecision::ExplicitlyAllowed,
-                reason: "test allow".to_string(),
-            },
-            signature: None,
-            activation_events: vec![legion_protocol::PluginActivationEvent::OnCommand {
-                command: "phase5.run".to_string(),
-            }],
-            contributions: vec![legion_protocol::PluginContribution::Command(
-                legion_protocol::PluginCommandDescriptor {
-                    command_id: "phase5.run".to_string(),
-                    title: "Phase 5 Run".to_string(),
-                    required_capability: CapabilityId("plugin.command".to_string()),
-                },
-            )],
-            requested_capabilities: vec![CapabilityId("plugin.command".to_string())],
-            storage_namespace: legion_plugin::plugin_namespace(plugin_id, "state"),
-            quotas: legion_protocol::PluginQuotaDeclaration {
-                max_fuel: 1000,
-                max_wall_time_ms: 50,
-                max_memory_pages: 8,
-                max_storage_bytes: 4096,
-                max_host_calls: 4,
-                max_events: 4,
-                max_output_bytes: 128,
-            },
-        }
-    }
-
-    #[test]
-    fn instruction_prefix_bundle_collects_workspace_and_user_layers_in_order() {
-        let workspace_root = unique_temp_dir("workspace");
-        let workspace_legion_rules = workspace_root.join(".legion/rules");
-        let user_root = unique_temp_dir("user-home");
-        let user_legion_rules = user_root.join(".legion/rules");
-
-        fs::create_dir_all(&workspace_legion_rules).expect("create workspace rules dir");
-        fs::create_dir_all(&user_legion_rules).expect("create user rules dir");
-        fs::write(
-            workspace_root.join("AGENTS.md"),
-            "workspace agent line 1\nworkspace agent line 2\n",
-        )
-        .expect("write workspace AGENTS.md");
-        fs::write(
-            workspace_legion_rules.join("b-rule.md"),
-            "workspace rule b\n",
-        )
-        .expect("write workspace rule b");
-        fs::write(
-            workspace_legion_rules.join("a-rule.md"),
-            "workspace rule a\n",
-        )
-        .expect("write workspace rule a");
-        fs::write(user_legion_rules.join("user-rule.md"), "user rule\n").expect("write user rule");
-
-        let bundle = instruction_prefix_bundle(
-            WorkspaceId(11),
-            TimestampMillis(1),
-            Some(workspace_root.as_path()),
-            Some(user_root.as_path()),
-        );
-
-        assert!(
-            bundle
-                .prompt_prefix
-                .starts_with("source=workspace-agents\npath=")
-        );
-        assert!(bundle.prompt_prefix.contains("workspace agent line 1"));
-        assert!(bundle.prompt_prefix.contains("workspace rule a"));
-        assert!(bundle.prompt_prefix.contains("workspace rule b"));
-        assert!(bundle.prompt_prefix.contains("user rule"));
-        assert_eq!(bundle.manifest_items.len(), 4);
-        assert_eq!(
-            bundle.manifest_items[0]
-                .path
-                .as_ref()
-                .map(|path| path.0.as_str()),
-            Some(
-                workspace_root
-                    .join("AGENTS.md")
-                    .to_str()
-                    .expect("workspace path text")
-            )
-        );
-        assert!(
-            bundle.manifest_items[0]
-                .labels
-                .iter()
-                .any(|label| label == "phase4.context.instruction_source")
-        );
-        assert_eq!(
-            bundle.manifest_items[3]
-                .path
-                .as_ref()
-                .map(|path| path.0.as_str()),
-            Some(
-                user_legion_rules
-                    .join("user-rule.md")
-                    .to_str()
-                    .expect("user path text")
-            )
-        );
-
-        let _ = fs::remove_dir_all(&workspace_root);
-        let _ = fs::remove_dir_all(&user_root);
-    }
-
-    fn assert_transition_diagnostic(response: &ProposalResponse, expected_code: &str) {
-        let diagnostics = match response {
-            ProposalResponse::Created(transition)
-            | ProposalResponse::Validated(transition)
-            | ProposalResponse::Approved(transition)
-            | ProposalResponse::Applied(transition) => &transition.diagnostics,
-            ProposalResponse::Previewed { transition, .. } => &transition.diagnostics,
-            ProposalResponse::Rejected { transition, .. }
-            | ProposalResponse::Denied { transition, .. }
-            | ProposalResponse::Failed { transition, .. }
-            | ProposalResponse::RolledBack { transition, .. }
-            | ProposalResponse::Stale { transition, .. }
-            | ProposalResponse::Conflict { transition, .. }
-            | ProposalResponse::Cancelled { transition, .. } => &transition.diagnostics,
-        };
-
-        assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == expected_code),
-            "expected diagnostic {expected_code}, got {diagnostics:?}"
-        );
-    }
-
-    #[test]
-    fn rust_tree_sitter_overlay_pipeline_returns_keyword_function_and_string_tokens() {
-        let text = "pub fn demo() {\n    let s = \"hi\";\n}\n";
-        let line_slices = logical_lines_with_offsets(text)
-            .into_iter()
-            .map(|(line_number, start_byte, line)| ViewportLineSlice {
-                line_number,
-                visible_text: line.to_string(),
-                byte_range: ByteRange {
-                    start: start_byte as u64,
-                    end: start_byte.saturating_add(line.len()) as u64,
-                },
-                utf16_range: legion_protocol::Utf16Range {
-                    start: legion_protocol::Utf16Position {
-                        line: line_number,
-                        character: 0,
-                    },
-                    end: legion_protocol::Utf16Position {
-                        line: line_number,
-                        character: line.encode_utf16().count() as u32,
-                    },
-                },
-                chunk_hash: FileFingerprint {
-                    algorithm: "test".to_string(),
-                    value: format!("line:{line_number}"),
-                },
-                truncation_state: legion_protocol::ViewportLineTruncationState::None,
-            })
-            .collect::<Vec<_>>();
-
-        let overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
-            "/workspace/src/highlights.rs",
-            &line_slices,
-            Some(text),
-        )
-        .expect("rust full-text input should use tree-sitter overlays");
-        let cache_key = tree_sitter_overlay_cache_key("/workspace/src/highlights.rs", text);
-        assert!(
-            tree_sitter_overlay_cache_guard().get(&cache_key).is_some(),
-            "tree-sitter highlight captures should be cached by content hash"
-        );
-        assert_ne!(
-            cache_key,
-            tree_sitter_overlay_cache_key("/workspace/src/highlights.rs", &format!("{text} ")),
-            "cache key should include length so hash collisions across lengths stay separated"
-        );
-        assert!(
-            tree_sitter_semantic_token_overlays_for_visible_lines(
-                "/workspace/src/highlights.txt",
-                &line_slices,
-                Some(text),
-            )
-            .is_none(),
-            "non-Rust paths should skip tree-sitter overlays"
-        );
-        let cached_overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
-            "/workspace/src/highlights.rs",
-            &line_slices,
-            Some(text),
-        )
-        .expect("cached rust full-text input should use tree-sitter overlays");
-        assert_eq!(overlays, cached_overlays);
-
-        assert!(overlays.iter().any(|overlay| {
-            overlay.line_number == 0
-                && overlay.start_col == 0
-                && overlay.end_col == 3
-                && overlay.kind == ViewportSemanticTokenKind::Keyword
-        }));
-        assert!(overlays.iter().any(|overlay| {
-            overlay.line_number == 0
-                && overlay.start_col == 7
-                && overlay.end_col == 11
-                && overlay.kind == ViewportSemanticTokenKind::Function
-        }));
-        assert!(overlays.iter().any(|overlay| {
-            overlay.line_number == 1 && overlay.kind == ViewportSemanticTokenKind::String
-        }));
-    }
-
-    #[test]
-    fn tree_sitter_overlay_pipeline_splits_multiline_string_captures() {
-        let text = "message = \"\"\"first\nsecond\nthird\"\"\"\n";
-        let line_slices = logical_lines_with_offsets(text)
-            .into_iter()
-            .map(|(line_number, start_byte, line)| ViewportLineSlice {
-                line_number,
-                visible_text: line.to_string(),
-                byte_range: ByteRange {
-                    start: start_byte as u64,
-                    end: start_byte.saturating_add(line.len()) as u64,
-                },
-                utf16_range: legion_protocol::Utf16Range {
-                    start: legion_protocol::Utf16Position {
-                        line: line_number,
-                        character: 0,
-                    },
-                    end: legion_protocol::Utf16Position {
-                        line: line_number,
-                        character: line.encode_utf16().count() as u32,
-                    },
-                },
-                chunk_hash: FileFingerprint {
-                    algorithm: "test".to_string(),
-                    value: format!("line:{line_number}"),
-                },
-                truncation_state: legion_protocol::ViewportLineTruncationState::None,
-            })
-            .collect::<Vec<_>>();
-
-        let overlays = tree_sitter_semantic_token_overlays_for_visible_lines(
-            "/workspace/src/multiline.py",
-            &line_slices,
-            Some(text),
-        )
-        .expect("Python full-text input should use tree-sitter overlays");
-
-        for line_number in 0..3 {
-            assert!(
-                overlays.iter().any(|overlay| {
-                    overlay.line_number == line_number
-                        && overlay.kind == ViewportSemanticTokenKind::String
-                        && overlay.start_col < overlay.end_col
-                }),
-                "expected a string overlay on logical line {line_number}, got {overlays:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn terminal_control_input_is_not_line_normalized() {
-        assert_eq!(terminal_input_payload_to_send("echo ready"), "echo ready\n");
-        assert_eq!(terminal_input_payload_to_send(""), "\n");
-        assert_eq!(terminal_input_payload_to_send("\r"), "\r");
-        assert_eq!(terminal_input_payload_to_send("\x03"), "\x03");
-        assert_eq!(terminal_input_payload_to_send("\x1b[A"), "\x1b[A");
-        assert_eq!(terminal_input_payload_to_send("\t"), "\t");
-    }
-
-    #[test]
-    fn tree_sitter_overlay_cache_evicts_oldest_inserted_entry() {
-        let mut cache = TreeSitterOverlayCache::default();
-        let first = tree_sitter_overlay_cache_key("/workspace/src/first.rs", "fn first() {}\n");
-        cache.insert_if_absent(first.clone(), Vec::new());
-        for index in 0..TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES {
-            cache.insert_if_absent(
-                tree_sitter_overlay_cache_key(
-                    &format!("/workspace/src/{index}.rs"),
-                    &format!("fn f_{index}() {{}}\n"),
-                ),
-                Vec::new(),
-            );
-        }
-
-        assert!(
-            cache.get(&first).is_none(),
-            "oldest entry should be evicted"
-        );
-        assert_eq!(cache.entries.len(), TREE_SITTER_OVERLAY_CACHE_MAX_ENTRIES);
-    }
-
-    #[test]
-    fn audit_rollback_failure_diagnostics_are_preserved_on_failed_response() {
-        let path = CanonicalPath("C:/repo/locked-file.txt".to_string());
-        let diagnostic = ProtocolDiagnostic {
-            code: "proposal.audit_rollback_workspace_failed".to_string(),
-            message: "audit failure rollback did not restore workspace state: locked".to_string(),
-            severity: ProtocolDiagnosticSeverity::Error,
-            path: Some(path.clone()),
-            range: None,
-        };
-        let mut response = ProposalResponse::Failed {
-            transition: ProposalLifecycleTransition {
-                proposal_id: ProposalId(99),
-                lifecycle_state: ProposalLifecycleState::Failed,
-                timestamp: TimestampMillis(1),
-                principal: PrincipalId("trusted".to_string()),
-                capability: CapabilityId("fs.write".to_string()),
-                correlation_id: CorrelationId(1),
-                causality_id: CausalityId(uuid::Uuid::now_v7()),
-                diagnostics: vec![AppProposalCoordinator::diagnostic(
-                    "proposal.audit_storage_failed",
-                    "audit storage failed",
-                )],
-            },
-            reason: ProposalFailureReason::StorageFailed,
-        };
-
-        AppComposition::append_response_diagnostics(&mut response, vec![diagnostic]);
-
-        assert_transition_diagnostic(&response, "proposal.audit_storage_failed");
-        assert_transition_diagnostic(&response, "proposal.audit_rollback_workspace_failed");
-        let ProposalResponse::Failed { transition, .. } = response else {
-            panic!("expected failed response");
-        };
-        let rollback_diagnostic = transition
-            .diagnostics
-            .iter()
-            .find(|diagnostic| diagnostic.code == "proposal.audit_rollback_workspace_failed")
-            .expect("rollback diagnostic");
-        assert_eq!(rollback_diagnostic.path.as_ref(), Some(&path));
-        assert!(rollback_diagnostic.message.contains("locked"));
-    }
-
-    fn text_edit_proposal(proposal_id: ProposalId) -> WorkspaceProposal {
-        WorkspaceProposal {
-            proposal_id,
-            principal: PrincipalId("trusted".to_string()),
-            capability: CapabilityId("editor.write".to_string()),
-            correlation_id: CorrelationId(1),
-            payload: ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
-                file_id: FileId(1),
-                edits: legion_protocol::EditBatch {
-                    edits: vec![legion_protocol::TextEdit {
-                        range: legion_protocol::TextRange::new(
-                            legion_protocol::TextOffset::byte(0),
-                            legion_protocol::TextOffset::byte(0),
-                        ),
-                        replacement: "replacement".to_string(),
-                    }],
-                },
-            }),
-            preconditions: ProposalVersionPreconditions {
-                file_version: None,
-                buffer_version: None,
-                snapshot_id: None,
-                generation: None,
-                file_content_version: None,
-                workspace_generation: None,
-                expected_fingerprint: None,
-                expected_file_length: None,
-                expected_modified_at: None,
-            },
-            preview: PreviewSummary {
-                summary: "test text edit".to_string(),
-                details: Vec::new(),
-            },
-            expires_at: None,
-            created_at: TimestampMillis(1),
-        }
-    }
-
-    fn test_file(file_id: u128, path: &str) -> FileIdentity {
-        FileIdentity {
-            file_id: FileId(file_id),
-            workspace_id: WorkspaceId(1),
-            canonical_path: CanonicalPath(path.to_string()),
-            content_version: FileContentVersion(1),
-            content_hash: None,
-        }
-    }
-
-    fn complete_file_preconditions() -> ProposalVersionPreconditions {
-        ProposalVersionPreconditions {
-            file_version: Some(FileContentVersion(1)),
-            buffer_version: Some(legion_protocol::BufferVersion(1)),
-            snapshot_id: Some(legion_protocol::SnapshotId(1)),
-            generation: Some(WorkspaceGeneration(1)),
-            file_content_version: Some(FileContentVersion(1)),
-            workspace_generation: Some(WorkspaceGeneration(1)),
-            expected_fingerprint: Some(FileFingerprint {
-                algorithm: "test".to_string(),
-                value: "hash:test".to_string(),
-            }),
-            expected_file_length: None,
-            expected_modified_at: None,
-        }
-    }
-
-    fn proposal_with(
-        proposal_id: ProposalId,
-        capability: &str,
-        payload: ProposalPayload,
-    ) -> WorkspaceProposal {
-        WorkspaceProposal {
-            proposal_id,
-            principal: PrincipalId("trusted".to_string()),
-            capability: CapabilityId(capability.to_string()),
-            correlation_id: CorrelationId(1),
-            payload,
-            preconditions: complete_file_preconditions(),
-            preview: PreviewSummary {
-                summary: "test proposal".to_string(),
-                details: Vec::new(),
-            },
-            expires_at: None,
-            created_at: TimestampMillis(1),
-        }
-    }
-
-    fn workspace_edit_payload() -> ProposalPayload {
-        let path = CanonicalPath("C:/repo/workspace-created.rs".to_string());
-        ProposalPayload::WorkspaceEdit(legion_protocol::WorkspaceEditProposalPayload {
-            workspace_id: WorkspaceId(1),
-            edit_id: uuid::Uuid::now_v7(),
-            title: "workspace create".to_string(),
-            source: legion_protocol::WorkspaceEditSourceKind::User,
-            target_coverage: ProposalTargetCoverage {
-                coverage_kind: ProposalTargetCoverageKind::Complete,
-                targets: vec![AppProposalCoordinator::path_target(
-                    "workspace-create".to_string(),
-                    ProposalTargetKind::PathOnly,
-                    path.clone(),
-                    Vec::new(),
-                )],
-                omitted_target_count: 0,
-                redaction_hints: vec![RedactionHint::MetadataOnly],
-            },
-            file_edits: Vec::new(),
-            file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
-                path,
-                initial_content_hash: None,
-            }],
-            required_capability: CapabilityId("fs.write".to_string()),
-            diagnostics: Vec::new(),
-            schema_version: 1,
-        })
-    }
-
-    fn terminal_payload() -> ProposalPayload {
-        ProposalPayload::TerminalCommand(legion_protocol::TerminalCommandProposal {
-            session_id: Some(legion_protocol::TerminalSessionId(7)),
-            command: "cargo test".to_string(),
-            cwd: Some(CanonicalPath("C:/repo".to_string())),
-            env: HashMap::new(),
-        })
-    }
-
-    #[test]
-    fn proposal_coordinator_enforces_preview_after_validation() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(1));
-        register_created(&coordinator, &proposal);
-
-        let preview = coordinator
-            .handle(ProposalRequest::Preview(proposal.clone()))
-            .expect("preview response");
-        let ProposalResponse::Rejected { transition, reason } = preview else {
-            panic!("preview before validation should reject");
-        };
-        assert_eq!(reason, ProposalRejectionReason::ValidationFailed);
-        assert!(
-            transition
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "proposal.invalid_lifecycle_transition")
-        );
-
-        let validation = coordinator
-            .handle(ProposalRequest::Validate(proposal.clone()))
-            .expect("validate response");
-        assert!(matches!(validation, ProposalResponse::Validated(_)));
-        let preview = coordinator
-            .handle(ProposalRequest::Preview(proposal))
-            .expect("preview response");
-        assert!(matches!(preview, ProposalResponse::Previewed { .. }));
-    }
-
-    #[test]
-    fn command_dispatcher_maps_projection_only_proposal_intents_to_protocol_requests() {
-        let proposal = save_proposal(ProposalId(42));
-        let preview = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::PreviewProposal {
-                proposal_id: ProposalId(42),
-            },
-            proposal_intent_route_context(Some(proposal.clone())),
-        )
-        .expect("preview intent maps")
-        .expect("preview request");
-        assert!(
-            matches!(preview, ProposalRequest::Preview(mapped) if mapped.proposal_id == ProposalId(42))
-        );
-
-        let approve = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::ApproveProposal {
-                proposal_id: ProposalId(42),
-            },
-            proposal_intent_route_context(None),
-        )
-        .expect("approve intent maps")
-        .expect("approve request");
-        let ProposalRequest::Approve(command) = approve else {
-            panic!("expected approve request");
-        };
-        assert_eq!(command.proposal_id, ProposalId(42));
-        assert_eq!(command.action, ProposalLifecycleAction::Approve);
-        assert_eq!(command.principal, PrincipalId("trusted".to_string()));
-
-        let reject = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::RejectProposal {
-                proposal_id: ProposalId(42),
-                reason: ProposalRejectionReason::UserRejected,
-            },
-            proposal_intent_route_context(None),
-        )
-        .expect("reject intent maps")
-        .expect("reject request");
-        let ProposalRequest::Reject(command) = reject else {
-            panic!("expected reject request");
-        };
-        assert!(matches!(
-            command.reason,
-            Some(ProposalLifecycleCommandReason::Rejection(
-                ProposalRejectionReason::UserRejected
-            ))
-        ));
-
-        let details = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::OpenProposalDetails {
-                proposal_id: ProposalId(42),
-            },
-            proposal_intent_route_context(Some(proposal)),
-        )
-        .expect("details intent maps");
-        assert!(details.is_none());
-    }
-
-    #[test]
-    fn command_dispatcher_routes_manual_clipboard_input_intents_to_app_requests() {
-        let active = AppCommandRouteContext {
-            workspace_id: Some(WorkspaceId(1)),
-            buffer_id: Some(BufferId(9)),
-            file_id: Some(FileId(2)),
-        };
-
-        let copy = CommandDispatcher::route_intent(
-            CommandDispatchIntent::ClipboardCopy {
-                buffer_id: BufferId(9),
-            },
-            active,
-            CorrelationId(1),
-        )
-        .expect("copy routes");
-        assert_eq!(
-            copy,
-            AppCommandRequest::ClipboardCopy {
-                buffer_id: BufferId(9)
-            }
-        );
-
-        let cut = CommandDispatcher::route_intent(
-            CommandDispatchIntent::ClipboardCut {
-                buffer_id: BufferId(9),
-            },
-            active,
-            CorrelationId(1),
-        )
-        .expect("cut routes");
-        assert_eq!(
-            cut,
-            AppCommandRequest::ClipboardCut {
-                buffer_id: BufferId(9)
-            }
-        );
-
-        let select_all = CommandDispatcher::route_intent(
-            CommandDispatchIntent::SelectAll {
-                buffer_id: BufferId(9),
-            },
-            active,
-            CorrelationId(1),
-        )
-        .expect("select-all routes");
-        assert_eq!(
-            select_all,
-            AppCommandRequest::SelectAll {
-                buffer_id: BufferId(9)
-            }
-        );
-    }
-
-    #[test]
-    fn plugin_command_intent_routes_through_app_owned_plugin_runtime() {
-        let mut app = AppComposition::new();
-        let plugin_id = app
-            .load_plugin_manifest(plugin_manifest(PluginId(7)))
-            .expect("plugin manifest loads");
-
-        let outcome = app
-            .dispatch_ui_intent(CommandDispatchIntent::InvokePluginCommand {
-                plugin_id,
-                command_id: "phase5.run".to_string(),
-                metadata_label: "metadata-only".to_string(),
-            })
-            .expect("plugin command routes through app");
-
-        match outcome {
-            AppCommandOutcome::PluginCommandInvoked(response) => {
-                assert!(matches!(
-                    response.as_ref(),
-                    PluginHostCallResponse::Accepted { metadata_label }
-                        if metadata_label == "metadata-only"
-                ));
-            }
-            other => panic!("unexpected plugin command outcome: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn command_dispatcher_routes_collaboration_intents_to_app_requests() {
-        let active = AppCommandRouteContext {
-            workspace_id: Some(WorkspaceId(1)),
-            buffer_id: Some(BufferId(1)),
-            file_id: Some(FileId(1)),
-        };
-        let join = CommandDispatcher::route_intent(
-            CommandDispatchIntent::JoinCollaborationSession {
-                session_id: CollaborationSessionId(7),
-            },
-            active,
-            CorrelationId(1),
-        )
-        .expect("join routes");
-        assert_eq!(
-            join,
-            AppCommandRequest::JoinCollaborationSession {
-                session_id: CollaborationSessionId(7)
-            }
-        );
-
-        let presence = CommandDispatcher::route_intent(
-            CommandDispatchIntent::PublishCollaborationPresence {
-                session_id: CollaborationSessionId(7),
-                participant_id: CollaborationParticipantId(9),
-            },
-            active,
-            CorrelationId(1),
-        )
-        .expect("presence routes");
-        assert_eq!(
-            presence,
-            AppCommandRequest::PublishCollaborationPresence {
-                session_id: CollaborationSessionId(7),
-                participant_id: CollaborationParticipantId(9),
-            }
-        );
-    }
-
-    #[test]
-    fn shared_collaboration_route_wraps_existing_safe_targets_only() {
-        let editor_target = ProposalAffectedTarget {
-            target_id: "editor".to_string(),
-            kind: ProposalTargetKind::OpenBuffer,
-            workspace_id: Some(WorkspaceId(1)),
-            file_id: Some(FileId(1)),
-            buffer_id: Some(BufferId(1)),
-            path: None,
-            terminal_session_id: None,
-            plugin_id: None,
-            remote_authority: None,
-            collaboration_session_id: None,
-            byte_ranges: Vec::new(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-        };
-        let collaboration_target = ProposalAffectedTarget {
-            target_id: "collaboration".to_string(),
-            kind: ProposalTargetKind::CollaborationSession,
-            workspace_id: Some(WorkspaceId(1)),
-            file_id: Some(FileId(1)),
-            buffer_id: Some(BufferId(1)),
-            path: None,
-            terminal_session_id: None,
-            plugin_id: None,
-            remote_authority: None,
-            collaboration_session_id: Some("7".to_string()),
-            byte_ranges: Vec::new(),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-        };
-        let shared = ProposalTargetCoverage {
-            coverage_kind: ProposalTargetCoverageKind::Complete,
-            targets: vec![editor_target, collaboration_target.clone()],
-            omitted_target_count: 0,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-        };
-        assert_eq!(
-            ProposalExecutionRoute::for_payload(
-                &text_edit_proposal(ProposalId(70)).payload,
-                &shared
-            ),
-            ProposalExecutionRoute::SharedCollaboration
-        );
-
-        let pure_collaboration = ProposalTargetCoverage {
-            coverage_kind: ProposalTargetCoverageKind::Complete,
-            targets: vec![collaboration_target],
-            omitted_target_count: 0,
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-        };
-        assert_eq!(
-            ProposalExecutionRoute::for_payload(
-                &text_edit_proposal(ProposalId(71)).payload,
-                &pure_collaboration
-            ),
-            ProposalExecutionRoute::Unsupported
-        );
-    }
-
-    #[test]
-    fn command_dispatcher_rejects_apply_intent_without_app_owned_matching_proposal() {
-        let missing = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::ApplyProposal {
-                proposal_id: ProposalId(42),
-            },
-            proposal_intent_route_context(None),
-        );
-        assert!(matches!(
-            missing,
-            Err(AppCompositionError::ProposalIntentMissingProposal)
-        ));
-
-        let mismatch = CommandDispatcher::route_proposal_intent(
-            CommandDispatchIntent::ApplyProposal {
-                proposal_id: ProposalId(42),
-            },
-            proposal_intent_route_context(Some(save_proposal(ProposalId(7)))),
-        );
-        assert!(matches!(
-            mismatch,
-            Err(AppCompositionError::ProposalIntentMismatch {
-                target: ProposalId(42),
-                active: Some(ProposalId(7))
-            })
-        ));
-    }
-
-    #[test]
-    fn proposal_coordinator_allows_created_validated_previewed_approved_applied_path() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(10));
-        register_created(&coordinator, &proposal);
-
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-            Ok(ProposalResponse::Validated(_))
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
-            Ok(ProposalResponse::Previewed { .. })
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Approve(command(
-                proposal.proposal_id,
-                legion_protocol::ProposalLifecycleAction::Approve,
-            ))),
-            Ok(ProposalResponse::Approved(_))
-        ));
-
-        let transition = coordinator
-            .record_transition(&proposal, ProposalLifecycleState::Applied, "apply")
-            .expect("approved proposal can apply");
-        assert_eq!(transition.lifecycle_state, ProposalLifecycleState::Applied);
-        assert_eq!(
-            coordinator.current_lifecycle_state(proposal.proposal_id),
-            Some(ProposalLifecycleState::Applied)
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_exports_and_recovers_lifecycle_snapshot() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(20));
-        register_created(&coordinator, &proposal);
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-            Ok(ProposalResponse::Validated(_))
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
-            Ok(ProposalResponse::Previewed { .. })
-        ));
-
-        let snapshot = coordinator.proposal_lifecycle_recovery_snapshot();
-        assert_eq!(snapshot.records.len(), 1);
-        assert!(snapshot.generated_at.0 > 0);
-
-        let recovered = AppProposalCoordinator::new(SharedEventSink::default());
-        recovered.recover_lifecycle_from_snapshot(snapshot);
-
-        assert_eq!(
-            recovered.current_lifecycle_state(proposal.proposal_id),
-            Some(ProposalLifecycleState::Previewed)
-        );
-        assert!(recovered.has_lifecycle_context(proposal.proposal_id));
-        assert_eq!(
-            recovered
-                .proposal(proposal.proposal_id)
-                .map(|proposal| proposal.proposal_id),
-            Some(proposal.proposal_id)
-        );
-
-        let ledger = recovered.proposal_ledger_projection(TimestampMillis(99));
-        assert_eq!(ledger.rows.len(), 1);
-        assert_eq!(ledger.selected_proposal_id, Some(proposal.proposal_id));
-        assert_eq!(
-            ledger.rows[0].lifecycle.state,
-            ProposalLifecycleState::Previewed
-        );
-        assert_eq!(ledger.rows[0].updated_at, TimestampMillis(99));
-        assert!(
-            ledger.rows[0]
-                .redaction_hints
-                .contains(&RedactionHint::MetadataOnly)
-        );
-    }
-
-    #[cfg(feature = "ai")]
-    fn delegated_output_from(
-        proposal: WorkspaceProposal,
-        suffix: &str,
-    ) -> legion_protocol::AssistedAiEditProposalOutput {
-        legion_protocol::AssistedAiEditProposalOutput {
-            output_id: format!("delegated-output-{suffix}"),
-            request_id: format!("delegated-request-{suffix}"),
-            provider_id: "provider:test".to_string(),
-            proposal_id: ProposalId(0),
-            principal: proposal.principal,
-            capability: proposal.capability,
-            correlation_id: proposal.correlation_id,
-            causality_id: CausalityId(uuid::Uuid::now_v7()),
-            payload: proposal.payload,
-            preconditions: proposal.preconditions,
-            preview: proposal.preview,
-            expires_at: proposal.expires_at,
-            created_at: proposal.created_at,
-            context_manifest: trust_reference(
-                "delegated-context-test",
-                legion_protocol::AssistedAiTrustProjectionKind::ContextManifest,
-            ),
-            approval_checklist: trust_reference(
-                "delegated-approval-test",
-                legion_protocol::AssistedAiTrustProjectionKind::ProposalApprovalChecklist,
-            ),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-        }
-    }
-
-    #[cfg(feature = "ai")]
-    #[derive(Clone)]
-    struct FailSecondAtomicBatchSink {
-        recorder: legion_observability::InMemoryEventSink,
-        fail_second: Arc<AtomicBool>,
-        legacy_emit_calls: Arc<AtomicUsize>,
-        batch_emit_calls: Arc<AtomicUsize>,
-    }
-
-    #[cfg(feature = "ai")]
-    impl EventSinkPort for FailSecondAtomicBatchSink {
-        fn emit(&self, request: EventSinkRequest) -> ProtocolResult<()> {
-            self.legacy_emit_calls.fetch_add(1, Ordering::SeqCst);
-            self.recorder.emit(request)
-        }
-
-        fn emit_batch(&self, requests: Vec<EventSinkRequest>) -> ProtocolResult<()> {
-            self.batch_emit_calls.fetch_add(1, Ordering::SeqCst);
-            for (index, request) in requests.iter().enumerate() {
-                legion_observability::validate_envelope(
-                    &request.envelope,
-                    legion_observability::EventSinkConfig::default(),
-                )
-                .map_err(|error| ProtocolError {
-                    code: "test_sink_validation_failed".to_string(),
-                    message: error.to_string(),
-                })?;
-                if index == 1 && self.fail_second.load(Ordering::SeqCst) {
-                    return Err(ProtocolError {
-                        code: "test_sink_validation_failed".to_string(),
-                        message: "injected validation failure at second batch item".to_string(),
-                    });
-                }
-            }
-            self.recorder.emit_batch(requests)
-        }
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_proposal_preflight_failure_keeps_ledger_and_storage_unchanged() {
-        let event_sink = legion_observability::InMemoryEventSink::new();
-        let mut app = AppComposition::with_event_sink(SharedEventSink::new(event_sink.clone()));
-        let mut rejected = delegated_output_from(save_proposal(ProposalId(101)), "second");
-        rejected.correlation_id = CorrelationId(0);
-
-        let error = app
-            .register_delegated_task_proposals(vec![
-                delegated_output_from(save_proposal(ProposalId(100)), "first"),
-                rejected,
-            ])
-            .expect_err("invalid second proposal rejects the staged batch");
-        assert!(matches!(error, AppCompositionError::AiRuntime(_)));
-        assert_eq!(
-            app.delegate_workflow.runtime_activation,
-            DelegatedTaskRuntimeActivationState::Failed
-        );
-        assert!(
-            app.proposal_coordinator
-                .proposal_ledger_projection(TimestampMillis(99))
-                .rows
-                .is_empty()
-        );
-        assert!(event_sink.events().expect("event snapshot").is_empty());
-        assert!(
-            app.storage
-                .pending_proposal_observation_batches()
-                .expect("pending batches")
-                .is_empty()
-        );
-        for proposal_id in [ProposalId(1), ProposalId(2)] {
-            assert!(matches!(
-                app.storage
-                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
-                        proposal_id
-                    ))
-                    .expect("read audit record"),
-                StorageRepositoryResponse::ProposalAuditRecord(None)
-            ));
-        }
-
-        let registered = app
-            .register_delegated_task_proposals(vec![delegated_output_from(
-                save_proposal(ProposalId(102)),
-                "retry",
-            )])
-            .expect("valid retry after staged rollback");
-        assert_eq!(registered[0].proposal_id, ProposalId(1));
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_proposal_storage_failure_keeps_ledger_and_ids_unchanged() {
-        let event_sink = legion_observability::InMemoryEventSink::new();
-        let mut app = AppComposition::with_event_sink(SharedEventSink::new(event_sink.clone()));
-        app.storage
-            .fail_proposal_observation_batch_at_item_for_test(1);
-        let error = app
-            .register_delegated_task_proposals(vec![
-                delegated_output_from(save_proposal(ProposalId(100)), "first"),
-                delegated_output_from(save_proposal(ProposalId(101)), "second"),
-            ])
-            .expect_err("the injected second-item storage failure rejects the full batch");
-
-        assert!(matches!(
-            error,
-            AppCompositionError::Protocol(ProtocolError { code, .. }) if code == "storage_failed"
-        ));
-        assert_eq!(
-            app.delegate_workflow.runtime_activation,
-            DelegatedTaskRuntimeActivationState::Failed
-        );
-        let ledger = app
-            .proposal_coordinator
-            .proposal_ledger_projection(TimestampMillis(99));
-        assert!(ledger.rows.is_empty());
-        assert!(
-            event_sink.events().expect("event snapshot").is_empty(),
-            "storage rejection must not emit any Created event"
-        );
-        assert!(app.proposal_coordinator.proposal(ProposalId(1)).is_none());
-        assert!(
-            app.storage
-                .pending_proposal_observation_batches()
-                .expect("pending batches")
-                .is_empty()
-        );
-        for proposal_id in [ProposalId(1), ProposalId(2)] {
-            assert!(matches!(
-                app.storage
-                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
-                        proposal_id
-                    ))
-                    .expect("read audit record"),
-                StorageRepositoryResponse::ProposalAuditRecord(None)
-            ));
-        }
-        let storage_debug = app
-            .storage
-            .with_storage(|storage| format!("{storage:?}"))
-            .expect("storage snapshot");
-        assert!(storage_debug.contains("protocol_event_metadata: {}"));
-        assert!(storage_debug.contains("protocol_proposal_audit: {}"));
-        assert!(storage_debug.contains("protocol_proposal_observation_outbox: {}"));
-
-        let registered = app
-            .register_delegated_task_proposals(vec![delegated_output_from(
-                save_proposal(ProposalId(102)),
-                "retry",
-            )])
-            .expect("a valid retry should register after rollback");
-        assert_eq!(registered[0].proposal_id, ProposalId(1));
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_proposal_sink_failure_schedules_production_retry() {
-        let recorder = legion_observability::InMemoryEventSink::new();
-        let fail_second = Arc::new(AtomicBool::new(true));
-        let legacy_emit_calls = Arc::new(AtomicUsize::new(0));
-        let batch_emit_calls = Arc::new(AtomicUsize::new(0));
-        let sink = FailSecondAtomicBatchSink {
-            recorder: recorder.clone(),
-            fail_second: Arc::clone(&fail_second),
-            legacy_emit_calls: Arc::clone(&legacy_emit_calls),
-            batch_emit_calls: Arc::clone(&batch_emit_calls),
-        };
-        let mut app = AppComposition::with_event_sink(SharedEventSink::new(sink));
-
-        let registered = app
-            .register_delegated_task_proposals(vec![
-                delegated_output_from(save_proposal(ProposalId(100)), "first"),
-                delegated_output_from(save_proposal(ProposalId(101)), "second"),
-            ])
-            .expect("sink failure must retain registration and schedule delivery retry");
-
-        assert_eq!(
-            registered
-                .iter()
-                .map(|proposal| proposal.proposal_id)
-                .collect::<Vec<_>>(),
-            vec![ProposalId(1), ProposalId(2)]
-        );
-        let ledger = app
-            .proposal_coordinator
-            .proposal_ledger_projection(TimestampMillis(99));
-        assert_eq!(ledger.rows.len(), 2);
-        assert_eq!(
-            ledger
-                .rows
-                .iter()
-                .map(|row| row.proposal_id)
-                .collect::<Vec<_>>(),
-            vec![ProposalId(1), ProposalId(2)]
-        );
-        assert!(recorder.events().expect("event snapshot").is_empty());
-        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 1);
-
-        let pending = app
-            .storage
-            .pending_proposal_observation_batches()
-            .expect("pending batch");
-        assert_eq!(pending.len(), 1);
-        assert!(pending[0].batch.batch_id.starts_with("dpr3-"));
-        assert_eq!(pending[0].batch.batch_id.len(), "dpr3-".len() + 64);
-        assert_eq!(pending[0].batch.event_metadata.len(), 2);
-        assert_eq!(pending[0].batch.proposal_audits.len(), 2);
-        assert_eq!(
-            pending[0].batch.schema_version,
-            PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION
-        );
-        for ((event, metadata), audit) in pending[0]
-            .batch
-            .events
-            .iter()
-            .zip(&pending[0].batch.event_metadata)
-            .zip(&pending[0].batch.proposal_audits)
-        {
-            assert_eq!(event.event_id, metadata.event_id);
-            assert_eq!(
-                event.payload["proposal_id"].as_u64(),
-                Some(audit.proposal_id.0)
-            );
-            assert_eq!(event.correlation_id, audit.correlation_id);
-            assert_eq!(event.causality_id, audit.causality_id);
-            assert_eq!(event.occurred_at, audit.timestamp);
-            assert_eq!(audit.lifecycle_state, ProposalLifecycleState::Created);
-            assert!(matches!(
-                app.storage
-                    .handle(StorageRepositoryRequest::ReadProposalAuditRecord(
-                        audit.proposal_id
-                    ))
-                    .expect("read audit record"),
-                StorageRepositoryResponse::ProposalAuditRecord(Some(stored))
-                    if stored.lifecycle_state == ProposalLifecycleState::Created
-            ));
-        }
-        for metadata in &pending[0].batch.event_metadata {
-            assert!(matches!(
-                app.storage
-                    .handle(StorageRepositoryRequest::ReadEventMetadata(
-                        metadata.event_id
-                    ))
-                    .expect("read event metadata"),
-                StorageRepositoryResponse::EventMetadata(Some(_))
-            ));
-        }
-
-        let still_pending = app
-            .retry_pending_proposal_observations()
-            .expect("failed retry report");
-        assert_eq!(still_pending.delivered_count, 0);
-        assert_eq!(still_pending.pending_count, 1);
-        assert_eq!(still_pending.attempts.len(), 1);
-        assert_eq!(
-            still_pending.attempts[0].delivery_state,
-            legion_storage::ProposalObservationDeliveryState::Pending
-        );
-        assert_eq!(
-            still_pending.attempts[0].error_code.as_deref(),
-            Some("test_sink_validation_failed")
-        );
-        assert_eq!(
-            still_pending.attempts[0].error_kind,
-            Some(legion_storage::ProposalObservationRetryErrorKind::Transient)
-        );
-        assert_eq!(recorder.events().expect("event snapshot").len(), 0);
-
-        fail_second.store(false, Ordering::SeqCst);
-        assert!(
-            app.poll_product_ai_stream(),
-            "production polling must service the scheduled observation retry"
-        );
-        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
-        assert!(
-            app.storage
-                .pending_proposal_observation_batches()
-                .expect("pending batches after retry")
-                .is_empty()
-        );
-        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 3);
-
-        let empty = app
-            .retry_pending_proposal_observations()
-            .expect("idempotent empty retry");
-        assert_eq!(empty.delivered_count, 0);
-        assert_eq!(empty.pending_count, 0);
-        assert!(empty.attempts.is_empty());
-        assert_eq!(recorder.events().expect("event snapshot").len(), 2);
-        assert_eq!(legacy_emit_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(batch_emit_calls.load(Ordering::SeqCst), 3);
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_registration_key_canonicalizes_hash_map_insertion_order() {
-        let mut first = delegated_output_from(save_proposal(ProposalId(100)), "canonical");
-        let mut first_env = HashMap::new();
-        first_env.insert("B_KEY".to_string(), "two".to_string());
-        first_env.insert("A_KEY".to_string(), "one".to_string());
-        first.payload =
-            ProposalPayload::TerminalCommand(legion_protocol::TerminalCommandProposal {
-                session_id: None,
-                command: "cargo test".to_string(),
-                cwd: Some(CanonicalPath("C:/repo".to_string())),
-                env: first_env,
-            });
-
-        let mut second = first.clone();
-        let mut second_env = HashMap::new();
-        second_env.insert("A_KEY".to_string(), "one".to_string());
-        second_env.insert("B_KEY".to_string(), "two".to_string());
-        if let ProposalPayload::TerminalCommand(command) = &mut second.payload {
-            command.env = second_env;
-        } else {
-            panic!("test payload must remain a terminal command");
-        }
-
-        assert_eq!(
-            AppComposition::delegated_registration_keys(&[first]).expect("first canonical key"),
-            AppComposition::delegated_registration_keys(&[second]).expect("second canonical key")
-        );
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn durable_proposal_observation_rejects_near_terminal_identity_floors() {
-        let app_sink = legion_observability::InMemoryEventSink::new();
-        let mut app = AppComposition::with_event_sink(SharedEventSink::new(app_sink));
-        let proposal_id = ProposalId(MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR);
-        let proposal = save_proposal(proposal_id);
-        let causality_id = CausalityId(uuid::Uuid::now_v7());
-        let transition = ProposalLifecycleTransition {
-            proposal_id,
-            lifecycle_state: ProposalLifecycleState::Created,
-            timestamp: TimestampMillis(1),
-            principal: proposal.principal.clone(),
-            capability: proposal.capability.clone(),
-            correlation_id: proposal.correlation_id,
-            causality_id,
-            diagnostics: Vec::new(),
-        };
-        let event = proposal_created_event_with_transition(
-            &proposal,
-            &transition,
-            EventSequence(MAX_DURABLE_PROPOSAL_OBSERVATION_FLOOR),
-        )
-        .expect("near-limit event remains structurally valid");
-        let batch = ProposalObservationBatch {
-            batch_id: "near-terminal-floor".to_string(),
-            event_metadata: vec![event_metadata_record(&event)],
-            proposal_audits: vec![
-                proposal_audit_record(&proposal, &transition).expect("near-limit audit"),
-            ],
-            events: vec![event],
-            schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
-        };
-        app.storage
-            .store_proposal_observation_batch(batch)
-            .expect("store near-limit untrusted durable record");
-
-        let error = app
-            .reserve_durable_proposal_observation_identities()
-            .expect_err("near-terminal durable floors must fail closed");
-        assert_eq!(error.code, "proposal_observation_identity_exhausted");
-        assert_eq!(app.proposal_coordinator.next_proposal_id.get(), 0);
-        assert_eq!(app.proposal_coordinator.next_event_sequence.get(), 0);
-    }
-
-    #[test]
-    fn proposal_persistence_late_enable_rejects_live_identity_overlap() {
-        let workspace_root = unique_temp_dir("proposal-persistence-late-enable");
-        let mut app = AppComposition::new();
-        let live = save_proposal(ProposalId(1));
-        register_created(&app.proposal_coordinator, &live);
-
-        let error = app
-            .enable_proposal_audit_persistence(&workspace_root)
-            .expect_err("persistence enable after live proposals must fail closed");
-        assert!(matches!(
-            error,
-            AppCompositionError::Protocol(ProtocolError { code, .. })
-                if code == "proposal_observation_publication_conflict"
-        ));
-        assert!(
-            !workspace_root.join(".legion").exists(),
-            "rejected late enable must not bind or create the durability root"
-        );
-
-        fs::remove_dir_all(&workspace_root).expect("remove late-enable test workspace");
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn proposal_observation_retry_skips_orphan_without_blocking_published_batch() {
-        let recorder = legion_observability::InMemoryEventSink::new();
-        let fail_second = Arc::new(AtomicBool::new(true));
-        let sink = FailSecondAtomicBatchSink {
-            recorder: recorder.clone(),
-            fail_second: Arc::clone(&fail_second),
-            legacy_emit_calls: Arc::new(AtomicUsize::new(0)),
-            batch_emit_calls: Arc::new(AtomicUsize::new(0)),
-        };
-        let mut app = AppComposition::with_event_sink(SharedEventSink::new(sink));
-        let published = app
-            .register_delegated_task_proposals(vec![
-                delegated_output_from(save_proposal(ProposalId(100)), "published-first"),
-                delegated_output_from(save_proposal(ProposalId(101)), "published-second"),
-            ])
-            .expect("published batch remains Pending with a scheduled retry");
-        let first_published = app
-            .proposal_coordinator
-            .proposal(published[0].proposal_id)
-            .expect("published proposal");
-        assert!(matches!(
-            app.proposal_coordinator
-                .handle(ProposalRequest::Validate(first_published)),
-            Ok(ProposalResponse::Validated(_))
-        ));
-
-        let orphan_proposal = save_proposal(ProposalId(900));
-        let orphan_transition = ProposalLifecycleTransition {
-            proposal_id: orphan_proposal.proposal_id,
-            lifecycle_state: ProposalLifecycleState::Created,
-            timestamp: TimestampMillis(900),
-            principal: orphan_proposal.principal.clone(),
-            capability: orphan_proposal.capability.clone(),
-            correlation_id: orphan_proposal.correlation_id,
-            causality_id: CausalityId(uuid::Uuid::now_v7()),
-            diagnostics: Vec::new(),
-        };
-        let orphan_event = proposal_created_event_with_transition(
-            &orphan_proposal,
-            &orphan_transition,
-            EventSequence(900),
-        )
-        .expect("orphan event");
-        app.storage
-            .store_proposal_observation_batch(ProposalObservationBatch {
-                batch_id: "aaa-orphan".to_string(),
-                event_metadata: vec![event_metadata_record(&orphan_event)],
-                proposal_audits: vec![
-                    proposal_audit_record(&orphan_proposal, &orphan_transition)
-                        .expect("orphan audit"),
-                ],
-                events: vec![orphan_event],
-                schema_version: PROPOSAL_OBSERVATION_BATCH_SCHEMA_VERSION,
-            })
-            .expect("store unassociated orphan");
-
-        fail_second.store(false, Ordering::SeqCst);
-        let report = app
-            .retry_pending_proposal_observations()
-            .expect("retry all pending without head-of-line blocking");
-        assert_eq!(report.attempts.len(), 2);
-        assert_eq!(report.delivered_count, 1);
-        assert_eq!(report.pending_count, 1);
-        assert_eq!(report.attempts[0].batch_id, "aaa-orphan");
-        assert_eq!(
-            report.attempts[0].error_code.as_deref(),
-            Some("proposal_observation_publication_missing")
-        );
-        assert_eq!(
-            report.attempts[0].error_kind,
-            Some(legion_storage::ProposalObservationRetryErrorKind::Permanent)
-        );
-        assert_eq!(
-            report.attempts[1].delivery_state,
-            legion_storage::ProposalObservationDeliveryState::Delivered
-        );
-        assert_eq!(recorder.events().expect("published events").len(), 2);
-        let remaining = app
-            .storage
-            .pending_proposal_observation_batches()
-            .expect("remaining orphan");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].batch.batch_id, "aaa-orphan");
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_replay_rejects_durable_lifecycle_advanced_beyond_created() {
-        let workspace_root = unique_temp_dir("delegated-observation-advanced");
-        let recorder = legion_observability::InMemoryEventSink::new();
-        let outputs = vec![delegated_output_from(
-            save_proposal(ProposalId(100)),
-            "advanced",
-        )];
-        {
-            let mut interrupted =
-                AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
-            interrupted
-                .enable_proposal_audit_persistence(&workspace_root)
-                .expect("enable durable proposal observations");
-            interrupted.interrupt_after_proposal_observation_store = true;
-            interrupted
-                .register_delegated_task_proposals(outputs.clone())
-                .expect_err("inject post-commit interruption");
-            let pending = interrupted
-                .storage
-                .pending_proposal_observation_batches()
-                .expect("pending record");
-            let mut advanced = pending[0].batch.proposal_audits[0].clone();
-            advanced.lifecycle_state = ProposalLifecycleState::Applied;
-            advanced.timestamp = TimestampMillis(advanced.timestamp.0.saturating_add(1));
-            interrupted
-                .storage
-                .handle(StorageRepositoryRequest::SaveProposalAuditRecord(advanced))
-                .expect("persist advanced lifecycle audit");
-        }
-
-        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
-        recovered
-            .enable_proposal_audit_persistence(&workspace_root)
-            .expect("reopen advanced durable state");
-        let error = recovered
-            .register_delegated_task_proposals(outputs)
-            .expect_err("advanced durable lifecycle must not regress to Created");
-        assert!(matches!(
-            error,
-            AppCompositionError::Protocol(ProtocolError { code, .. })
-                if code == "proposal_observation_replay_lifecycle_advanced"
-        ));
-        assert_eq!(
-            recovered.delegate_workflow.runtime_activation,
-            DelegatedTaskRuntimeActivationState::Failed
-        );
-        assert!(
-            recovered
-                .proposal_coordinator
-                .proposal_ledger_projection(TimestampMillis(99))
-                .rows
-                .is_empty()
-        );
-        assert!(
-            recorder
-                .events()
-                .expect("no regressed Created event")
-                .is_empty()
-        );
-        assert_eq!(
-            recovered
-                .storage
-                .pending_proposal_observation_batches()
-                .expect("advanced record stays pending")
-                .len(),
-            1
-        );
-
-        fs::remove_dir_all(&workspace_root).expect("remove advanced replay workspace");
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_registration_allocates_above_generic_persisted_audit_floor() {
-        let workspace_root = unique_temp_dir("delegated-generic-audit-floor");
-        let historical_id = ProposalId(7);
-        {
-            let mut first = AppComposition::new();
-            first
-                .enable_proposal_audit_persistence(&workspace_root)
-                .expect("enable generic proposal audit persistence");
-            let historical = save_proposal(historical_id);
-            let transition = ProposalLifecycleTransition {
-                proposal_id: historical_id,
-                lifecycle_state: ProposalLifecycleState::Created,
-                timestamp: TimestampMillis(7),
-                principal: historical.principal.clone(),
-                capability: historical.capability.clone(),
-                correlation_id: historical.correlation_id,
-                causality_id: CausalityId(uuid::Uuid::now_v7()),
-                diagnostics: Vec::new(),
-            };
-            let audit = proposal_audit_record(&historical, &transition)
-                .expect("build historical generic audit");
-            first
-                .storage
-                .handle(StorageRepositoryRequest::SaveProposalAuditRecord(audit))
-                .expect("persist generic proposal audit without an outbox batch");
-            assert!(
-                first
-                    .storage
-                    .proposal_observation_batches()
-                    .expect("no first-process outbox")
-                    .is_empty()
-            );
-        }
-
-        let recorder = legion_observability::InMemoryEventSink::new();
-        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
-        recovered
-            .enable_proposal_audit_persistence(&workspace_root)
-            .expect("reload generic proposal audit floor");
-        assert_eq!(
-            recovered
-                .storage
-                .max_proposal_audit_id()
-                .expect("read generic proposal audit high-watermark"),
-            Some(historical_id)
-        );
-        assert_eq!(
-            recovered.proposal_coordinator.next_proposal_id.get(),
-            historical_id.0
-        );
-
-        let registered = recovered
-            .register_delegated_task_proposals(vec![delegated_output_from(
-                save_proposal(ProposalId(100)),
-                "after-generic-audit",
-            )])
-            .expect("delegated registration allocates above historical audit id");
-        assert_eq!(registered[0].proposal_id, ProposalId(8));
-        assert_eq!(recorder.events().expect("created event").len(), 1);
-
-        fs::remove_dir_all(&workspace_root).expect("remove generic audit floor workspace");
-    }
-
-    #[cfg(feature = "ai")]
-    #[test]
-    fn delegated_proposal_replays_exact_durable_registration_after_interruption() {
-        let workspace_root = unique_temp_dir("delegated-observation-replay");
-        let recorder = legion_observability::InMemoryEventSink::new();
-        let outputs = vec![
-            delegated_output_from(save_proposal(ProposalId(100)), "first"),
-            delegated_output_from(save_proposal(ProposalId(101)), "second"),
-        ];
-
-        let durable_batch = {
-            let mut interrupted =
-                AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
-            interrupted
-                .enable_proposal_audit_persistence(&workspace_root)
-                .expect("enable durable proposal observations");
-            interrupted.interrupt_after_proposal_observation_store = true;
-            let error = interrupted
-                .register_delegated_task_proposals(outputs.clone())
-                .expect_err("inject post-commit interruption");
-            assert!(matches!(
-                error,
-                AppCompositionError::Protocol(ProtocolError { code, .. })
-                    if code == "proposal_observation_post_commit_interrupted"
-            ));
-            assert_eq!(
-                interrupted.delegate_workflow.runtime_activation,
-                DelegatedTaskRuntimeActivationState::Failed
-            );
-            assert!(
-                interrupted
-                    .proposal_coordinator
-                    .proposal_ledger_projection(TimestampMillis(99))
-                    .rows
-                    .is_empty()
-            );
-            let orphan = interrupted
-                .retry_pending_proposal_observations()
-                .expect("report unpublished durable batch");
-            assert_eq!(orphan.delivered_count, 0);
-            assert_eq!(orphan.pending_count, 1);
-            assert_eq!(
-                orphan.attempts[0].error_code.as_deref(),
-                Some("proposal_observation_publication_missing")
-            );
-            assert!(recorder.events().expect("no orphan events").is_empty());
-            interrupted
-                .storage
-                .pending_proposal_observation_batches()
-                .expect("durable pending batch")
-                .into_iter()
-                .next()
-                .expect("one pending batch")
-                .batch
-        };
-
-        let mut recovered = AppComposition::with_event_sink(SharedEventSink::new(recorder.clone()));
-        recovered
-            .enable_proposal_audit_persistence(&workspace_root)
-            .expect("reopen durable proposal observations");
-        let orphan = recovered
-            .retry_pending_proposal_observations()
-            .expect("restart must still refuse orphan delivery");
-        assert_eq!(orphan.pending_count, 1);
-        assert_eq!(
-            orphan.attempts[0].error_code.as_deref(),
-            Some("proposal_observation_publication_missing")
-        );
-        assert!(
-            recorder
-                .events()
-                .expect("no restart orphan events")
-                .is_empty()
-        );
-
-        let mut divergent = outputs.clone();
-        let ProposalPayload::SaveFile(save) = &mut divergent[0].payload else {
-            panic!("test payload must remain a save proposal");
-        };
-        save.file.canonical_path.0 = "C:/repo/file.txu".to_string();
-        let error = recovered
-            .register_delegated_task_proposals(divergent)
-            .expect_err("same logical identities with changed payload must fail closed");
-        assert!(matches!(
-            error,
-            AppCompositionError::Protocol(ProtocolError { code, .. })
-                if code == "proposal_observation_replay_mismatch"
-        ));
-        assert!(
-            recovered
-                .proposal_coordinator
-                .proposal_ledger_projection(TimestampMillis(99))
-                .rows
-                .is_empty()
-        );
-
-        let replayed = recovered
-            .register_delegated_task_proposals(outputs.clone())
-            .expect("exact caller-assisted replay");
-        assert_eq!(
-            replayed
-                .iter()
-                .map(|proposal| proposal.proposal_id)
-                .collect::<Vec<_>>(),
-            vec![ProposalId(1), ProposalId(2)]
-        );
-        assert_eq!(
-            recovered
-                .proposal_coordinator
-                .proposal_ledger_projection(TimestampMillis(99))
-                .rows
-                .len(),
-            2
-        );
-        let restored = recovered
-            .storage
-            .proposal_observation_batches()
-            .expect("restored outbox record");
-        assert_eq!(restored.len(), 1);
-        assert_eq!(
-            restored[0].delivery_state,
-            legion_storage::ProposalObservationDeliveryState::Delivered
-        );
-        assert_eq!(restored[0].batch.batch_id, durable_batch.batch_id);
-        assert_eq!(
-            restored[0]
-                .batch
-                .events
-                .iter()
-                .map(|event| (event.event_id, event.occurred_at, event.sequence))
-                .collect::<Vec<_>>(),
-            durable_batch
-                .events
-                .iter()
-                .map(|event| (event.event_id, event.occurred_at, event.sequence))
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            serde_json::to_value(&restored[0].batch.proposal_audits)
-                .expect("serialize restored audits"),
-            serde_json::to_value(&durable_batch.proposal_audits)
-                .expect("serialize original audits")
-        );
-        assert_eq!(
-            recorder.events().expect("one atomic replay delivery").len(),
-            2
-        );
-
-        let next = recovered
-            .register_delegated_task_proposals(vec![delegated_output_from(
-                save_proposal(ProposalId(200)),
-                "after-restart",
-            )])
-            .expect("new registration allocates above durable floors");
-        assert_eq!(next[0].proposal_id, ProposalId(3));
-        let records = recovered
-            .storage
-            .proposal_observation_batches()
-            .expect("all observation records");
-        assert_eq!(records.len(), 2);
-        let newest_sequence = records
-            .iter()
-            .flat_map(|record| &record.batch.events)
-            .map(|event| event.sequence.0)
-            .max()
-            .expect("event sequence");
-        assert!(newest_sequence > durable_batch.events[1].sequence.0);
-
-        fs::remove_dir_all(&workspace_root).expect("remove replay test workspace");
-    }
-
-    #[test]
-    fn proposal_coordinator_builds_metadata_only_ledger_projection() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let save = save_proposal(ProposalId(21));
-        let terminal = proposal_with(ProposalId(22), "terminal.spawn", terminal_payload());
-        register_created(&coordinator, &save);
-        register_created(&coordinator, &terminal);
-
-        let ledger = coordinator.proposal_ledger_projection(TimestampMillis(123));
-        assert_eq!(ledger.rows.len(), 2);
-        assert_eq!(ledger.selected_proposal_id, Some(ProposalId(22)));
-        assert!(
-            ledger
-                .redaction_hints
-                .contains(&RedactionHint::MetadataOnly)
-        );
-
-        let save_row = ledger
-            .rows
-            .iter()
-            .find(|row| row.proposal_id == save.proposal_id)
-            .expect("save row");
-        assert_eq!(
-            save_row.payload_kind,
-            legion_protocol::ProposalPayloadKind::SaveFile
-        );
-        assert_eq!(save_row.workspace_id, Some(WorkspaceId(1)));
-        assert!(save_row.diff_summary.full_source_redacted);
-        assert_eq!(
-            save_row.privacy_label,
-            legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
-        );
-
-        let terminal_row = ledger
-            .rows
-            .iter()
-            .find(|row| row.proposal_id == terminal.proposal_id)
-            .expect("terminal row");
-        assert_eq!(
-            terminal_row.risk_label,
-            legion_protocol::ProposalRiskLabel::High
-        );
-        assert_eq!(
-            terminal_row.rollback,
-            legion_protocol::ProposalRollbackAvailability::Unavailable
-        );
-        assert_eq!(
-            terminal_row.diff_summary.kind,
-            legion_protocol::ProposalDiffSummaryKind::TerminalMetadata
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_allows_validated_denied_path() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(11));
-        register_created(&coordinator, &proposal);
-
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-            Ok(ProposalResponse::Validated(_))
-        ));
-        let transition = coordinator
-            .record_transition_with_diagnostics(
-                &proposal,
-                ProposalLifecycleState::Denied,
-                "validate",
-                vec![AppProposalCoordinator::diagnostic(
-                    "proposal.validation_denied",
-                    "test validation denial",
-                )],
-            )
-            .expect("validated proposal can deny");
-        assert_eq!(transition.lifecycle_state, ProposalLifecycleState::Denied);
-        assert!(
-            transition
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "proposal.validation_denied")
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_allows_approved_stale_conflict_and_failed_paths() {
-        for (proposal_id, terminal_state) in [
-            (ProposalId(12), ProposalLifecycleState::Stale),
-            (ProposalId(13), ProposalLifecycleState::Conflict),
-            (ProposalId(14), ProposalLifecycleState::Failed),
-        ] {
-            let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-            let proposal = save_proposal(proposal_id);
-            register_created(&coordinator, &proposal);
-            assert!(matches!(
-                coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-                Ok(ProposalResponse::Validated(_))
-            ));
-            assert!(matches!(
-                coordinator.handle(ProposalRequest::Preview(proposal.clone())),
-                Ok(ProposalResponse::Previewed { .. })
-            ));
-            assert!(matches!(
-                coordinator.handle(ProposalRequest::Approve(command(
-                    proposal.proposal_id,
-                    legion_protocol::ProposalLifecycleAction::Approve,
-                ))),
-                Ok(ProposalResponse::Approved(_))
-            ));
-
-            let transition = coordinator
-                .record_transition_with_diagnostics(
-                    &proposal,
-                    terminal_state,
-                    "apply",
-                    vec![AppProposalCoordinator::diagnostic(
-                        "proposal.apply_terminal",
-                        format!("test {terminal_state:?} terminal transition"),
-                    )],
-                )
-                .expect("approved proposal can enter terminal apply state");
-            assert_eq!(transition.lifecycle_state, terminal_state);
-            assert!(
-                transition
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.code == "proposal.apply_terminal")
-            );
-        }
-    }
-
-    #[test]
-    fn proposal_coordinator_rejects_created_to_applied_without_state_mutation() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(15));
-        register_created(&coordinator, &proposal);
-
-        let response = coordinator
-            .record_transition(&proposal, ProposalLifecycleState::Applied, "apply")
-            .expect_err("created proposal cannot apply directly");
-        assert_transition_diagnostic(&response, "proposal.invalid_lifecycle_transition");
-        assert_eq!(
-            coordinator.current_lifecycle_state(proposal.proposal_id),
-            Some(ProposalLifecycleState::Created)
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_rejects_expired_lifecycle_before_validation() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let mut proposal = save_proposal(ProposalId(16));
-        proposal.expires_at = Some(TimestampMillis(1));
-        register_created(&coordinator, &proposal);
-
-        let response = coordinator
-            .handle(ProposalRequest::Validate(proposal.clone()))
-            .expect("expired validate response");
-        let ProposalResponse::Rejected { reason, .. } = &response else {
-            panic!("expired proposal should reject, got {response:?}");
-        };
-        assert_eq!(*reason, ProposalRejectionReason::Expired);
-        assert_transition_diagnostic(&response, "proposal.expired");
-        assert_eq!(
-            coordinator.current_lifecycle_state(proposal.proposal_id),
-            Some(ProposalLifecycleState::Rejected)
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_rejects_zero_correlation_or_nil_causality_context() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let mut proposal = save_proposal(ProposalId(17));
-        proposal.correlation_id = CorrelationId(0);
-        coordinator.register_lifecycle_context(
-            proposal.proposal_id,
-            EventContext {
-                correlation_id: CorrelationId(0),
-                causality_id: CausalityId(uuid::Uuid::nil()),
-            },
-        );
-
-        let response = coordinator.created_response(&proposal);
-        assert_transition_diagnostic(&response, "proposal.invalid_lifecycle_context");
-        assert_transition_diagnostic(&response, "proposal.zero_correlation_id");
-        assert_transition_diagnostic(&response, "proposal.lifecycle_context_nil_causality_id");
-        assert_eq!(
-            coordinator.current_lifecycle_state(proposal.proposal_id),
-            None
-        );
-
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(18));
-        register_created(&coordinator, &proposal);
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-            Ok(ProposalResponse::Validated(_))
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
-            Ok(ProposalResponse::Previewed { .. })
-        ));
-        let mut approve = command(
-            proposal.proposal_id,
-            legion_protocol::ProposalLifecycleAction::Approve,
-        );
-        approve.correlation_id = CorrelationId(0);
-        approve.causality_id = CausalityId(uuid::Uuid::nil());
-
-        let response = coordinator
-            .handle(ProposalRequest::Approve(approve))
-            .expect("invalid command context response");
-        assert_transition_diagnostic(&response, "proposal.command_zero_correlation_id");
-        assert_transition_diagnostic(&response, "proposal.command_nil_causality_id");
-        assert_eq!(
-            coordinator.current_lifecycle_state(proposal.proposal_id),
-            Some(ProposalLifecycleState::Previewed)
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_rejects_command_without_lifecycle_context() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let response = coordinator
-            .handle(ProposalRequest::Approve(command(
-                ProposalId(99),
-                legion_protocol::ProposalLifecycleAction::Approve,
-            )))
-            .expect("approve response");
-
-        let ProposalResponse::Rejected { transition, reason } = response else {
-            panic!("unknown lifecycle command should reject");
-        };
-        assert_eq!(reason, ProposalRejectionReason::ValidationFailed);
-        assert!(
-            transition
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "proposal.missing_lifecycle_context")
-        );
-    }
-
-    #[test]
-    fn proposal_coordinator_denies_registered_text_edit_missing_preconditions() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = text_edit_proposal(ProposalId(3));
-        coordinator
-            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
-        assert!(matches!(
-            coordinator.created_response(&proposal),
-            ProposalResponse::Created(_)
-        ));
-
-        let response = coordinator
-            .handle(ProposalRequest::Validate(proposal))
-            .expect("validate response");
-        let ProposalResponse::Denied { transition, reason } = response else {
-            panic!("registered text edit with missing preconditions should deny");
-        };
-        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
-        assert!(transition.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "proposal.missing_buffer_precondition"
-                || diagnostic.code == "proposal.missing_file_precondition"
-        }));
-    }
-
-    #[test]
-    fn proposal_coordinator_rejects_stateless_generic_save_apply() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let proposal = save_proposal(ProposalId(2));
-        coordinator
-            .register_lifecycle_context(proposal.proposal_id, EventContext::new(CorrelationId(1)));
-        assert!(matches!(
-            coordinator.created_response(&proposal),
-            ProposalResponse::Created(_)
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Validate(proposal.clone())),
-            Ok(ProposalResponse::Validated(_))
-        ));
-        assert!(matches!(
-            coordinator.handle(ProposalRequest::Preview(proposal.clone())),
-            Ok(ProposalResponse::Previewed { .. })
-        ));
-
-        let response = coordinator
-            .handle(ProposalRequest::Apply(proposal))
-            .expect("apply response");
-        let ProposalResponse::Rejected { transition, reason } = response else {
-            panic!("stateless coordinator save apply should remain denied");
-        };
-        assert_eq!(reason, ProposalRejectionReason::Unsupported);
-        assert!(transition.diagnostics.iter().any(|diagnostic| {
-            diagnostic
-                .message
-                .contains("use AppComposition::save_active_buffer")
-        }));
-    }
-
-    #[test]
-    fn proposal_coordinator_discovers_targets_for_every_payload_variant() {
-        let file = test_file(10, "C:/repo/file.rs");
-        let rename_destination = CanonicalPath("C:/repo/renamed.rs".to_string());
-        let cases = vec![
-            (
-                ProposalPayload::TextEdit(legion_protocol::TextEditProposal {
-                    file_id: FileId(10),
-                    edits: legion_protocol::EditBatch {
-                        edits: vec![legion_protocol::TextEdit {
-                            range: legion_protocol::TextRange::new(
-                                legion_protocol::TextOffset::byte(0),
-                                legion_protocol::TextOffset::byte(4),
-                            ),
-                            replacement: "edit".to_string(),
-                        }],
-                    },
-                }),
-                vec![ProposalTargetKind::OpenBuffer],
-            ),
-            (
-                ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
-                    path: CanonicalPath("C:/repo/new.rs".to_string()),
-                    initial_content: None,
-                }),
-                vec![ProposalTargetKind::PathOnly],
-            ),
-            (
-                ProposalPayload::DeleteFile(legion_protocol::DeleteFileProposal {
-                    file: file.clone(),
-                }),
-                vec![ProposalTargetKind::ClosedFile],
-            ),
-            (
-                ProposalPayload::RenameFile(legion_protocol::RenameFileProposal {
-                    file: file.clone(),
-                    destination: rename_destination,
-                }),
-                vec![ProposalTargetKind::ClosedFile, ProposalTargetKind::PathOnly],
-            ),
-            (
-                save_proposal(ProposalId(40)).payload,
-                vec![ProposalTargetKind::OpenBuffer],
-            ),
-            (
-                ProposalPayload::FormatFile(legion_protocol::FormatFileProposal {
-                    file: file.clone(),
-                    snapshot_id: legion_protocol::SnapshotId(1),
-                    options: HashMap::new(),
-                }),
-                vec![ProposalTargetKind::ClosedFile],
-            ),
-            (
-                ProposalPayload::CodeAction(legion_protocol::CodeActionProposal {
-                    file: file.clone(),
-                    title: "fix".to_string(),
-                    edits: vec![legion_protocol::TextEdit {
-                        range: legion_protocol::TextRange::new(
-                            legion_protocol::TextOffset::byte(1),
-                            legion_protocol::TextOffset::byte(2),
-                        ),
-                        replacement: "x".to_string(),
-                    }],
-                }),
-                vec![ProposalTargetKind::ClosedFile],
-            ),
-            (workspace_edit_payload(), vec![ProposalTargetKind::PathOnly]),
-            (
-                terminal_payload(),
-                vec![ProposalTargetKind::TerminalSession],
-            ),
-            (
-                ProposalPayload::Batch(BatchProposalPayload {
-                    batch_id: uuid::Uuid::now_v7(),
-                    atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
-                    rollback_policy: ProposalBatchRollbackPolicy::NotSupported,
-                    target_coverage: ProposalTargetCoverage {
-                        coverage_kind: ProposalTargetCoverageKind::Complete,
-                        targets: Vec::new(),
-                        omitted_target_count: 0,
-                        redaction_hints: Vec::new(),
-                    },
-                    items: vec![ProposalBatchItem {
-                        order: 0,
-                        item_id: "create".to_string(),
-                        payload: Box::new(ProposalPayload::CreateFile(
-                            legion_protocol::CreateFileProposal {
-                                path: CanonicalPath("C:/repo/batch.rs".to_string()),
-                                initial_content: None,
-                            },
-                        )),
-                        target_ids: Vec::new(),
-                        required_capability: CapabilityId("fs.write".to_string()),
-                        rollback_step_ids: Vec::new(),
-                    }],
-                    dependency_edges: Vec::new(),
-                    rollback_steps: Vec::new(),
-                    partial_failures: Vec::new(),
-                    preview_warnings: Vec::new(),
-                    schema_version: 1,
-                }),
-                vec![ProposalTargetKind::PathOnly],
-            ),
-        ];
-
-        for (payload, expected_kinds) in cases {
-            let coverage = AppProposalCoordinator::affected_target_coverage_for_payload(&payload);
-            let actual_kinds = coverage
-                .targets
-                .iter()
-                .map(|target| target.kind)
-                .collect::<Vec<_>>();
-            assert_eq!(coverage.coverage_kind, ProposalTargetCoverageKind::Complete);
-            assert_eq!(coverage.omitted_target_count, 0);
-            assert_eq!(actual_kinds, expected_kinds, "payload {payload:?}");
-        }
-    }
-
-    #[test]
-    fn proposal_coordinator_denies_duplicate_ambiguous_and_unsupported_targets() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let file = test_file(20, "C:/repo/dup.rs");
-        let mut proposal = proposal_with(
-            ProposalId(41),
-            "fs.write",
-            ProposalPayload::WorkspaceEdit(legion_protocol::WorkspaceEditProposalPayload {
-                workspace_id: WorkspaceId(1),
-                edit_id: uuid::Uuid::now_v7(),
-                title: "duplicate targets".to_string(),
-                source: legion_protocol::WorkspaceEditSourceKind::User,
-                target_coverage: ProposalTargetCoverage {
-                    coverage_kind: ProposalTargetCoverageKind::Complete,
-                    targets: vec![
-                        AppProposalCoordinator::file_identity_target(
-                            "dup".to_string(),
-                            ProposalTargetKind::ClosedFile,
-                            &file,
-                            None,
-                            Vec::new(),
-                        ),
-                        AppProposalCoordinator::file_identity_target(
-                            "dup".to_string(),
-                            ProposalTargetKind::ClosedFile,
-                            &file,
-                            None,
-                            Vec::new(),
-                        ),
-                    ],
-                    omitted_target_count: 0,
-                    redaction_hints: Vec::new(),
-                },
-                file_edits: vec![legion_protocol::WorkspaceTextEdit {
-                    file,
-                    buffer_id: None,
-                    edits: legion_protocol::EditBatch { edits: Vec::new() },
-                    preconditions: complete_file_preconditions(),
-                }],
-                file_operations: Vec::new(),
-                required_capability: CapabilityId("fs.write".to_string()),
-                diagnostics: Vec::new(),
-                schema_version: 1,
-            }),
-        );
-        register_created(&coordinator, &proposal);
-
-        let response = coordinator
-            .handle(ProposalRequest::Validate(proposal.clone()))
-            .expect("validate duplicate targets");
-        let ProposalResponse::Denied { transition, reason } = response else {
-            panic!("duplicate targets should deny, got {response:?}");
-        };
-        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
-        assert!(
-            transition
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "proposal.duplicate_target")
-        );
-
-        proposal.proposal_id = ProposalId(42);
-        let ProposalPayload::WorkspaceEdit(payload) = &mut proposal.payload else {
-            panic!("expected workspace-edit payload");
-        };
-        payload.target_coverage.targets = vec![ProposalAffectedTarget {
-            target_id: "ambiguous".to_string(),
-            kind: ProposalTargetKind::Plugin,
-            workspace_id: Some(WorkspaceId(1)),
-            file_id: Some(FileId(20)),
-            buffer_id: None,
-            path: None,
-            terminal_session_id: None,
-            plugin_id: Some(legion_protocol::PluginId(7)),
-            remote_authority: None,
-            collaboration_session_id: None,
-            byte_ranges: Vec::new(),
-            redaction_hints: Vec::new(),
-        }];
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        register_created(&coordinator, &proposal);
-        let response = coordinator
-            .handle(ProposalRequest::Validate(proposal))
-            .expect("validate ambiguous target");
-        assert_transition_diagnostic(&response, "proposal.ambiguous_target");
-        assert_transition_diagnostic(&response, "proposal.unsupported_target_kind");
-    }
-
-    #[test]
-    fn proposal_coordinator_denies_nested_batch_duplicates_and_unsupported_items() {
-        let coordinator = AppProposalCoordinator::new(SharedEventSink::default());
-        let create_path = CanonicalPath("C:/repo/batch-create.rs".to_string());
-        let duplicate_target = AppProposalCoordinator::path_target(
-            "target-create".to_string(),
-            ProposalTargetKind::PathOnly,
-            create_path.clone(),
-            Vec::new(),
-        );
-        let proposal = proposal_with(
-            ProposalId(43),
-            "fs.write",
-            ProposalPayload::Batch(BatchProposalPayload {
-                batch_id: uuid::Uuid::now_v7(),
-                atomicity: ProposalBatchAtomicity::OrderedNonAtomic,
-                rollback_policy: ProposalBatchRollbackPolicy::NotSupported,
-                target_coverage: ProposalTargetCoverage {
-                    coverage_kind: ProposalTargetCoverageKind::Complete,
-                    targets: vec![duplicate_target.clone(), duplicate_target],
-                    omitted_target_count: 0,
-                    redaction_hints: Vec::new(),
-                },
-                items: vec![
-                    ProposalBatchItem {
-                        order: 0,
-                        item_id: "create".to_string(),
-                        payload: Box::new(ProposalPayload::CreateFile(
-                            legion_protocol::CreateFileProposal {
-                                path: create_path,
-                                initial_content: None,
-                            },
-                        )),
-                        target_ids: vec!["target-create".to_string(), "target-create".to_string()],
-                        required_capability: CapabilityId("fs.write".to_string()),
-                        rollback_step_ids: Vec::new(),
-                    },
-                    ProposalBatchItem {
-                        order: 1,
-                        item_id: "terminal".to_string(),
-                        payload: Box::new(terminal_payload()),
-                        target_ids: vec!["target-missing".to_string()],
-                        required_capability: CapabilityId("terminal.execute".to_string()),
-                        rollback_step_ids: Vec::new(),
-                    },
-                ],
-                dependency_edges: Vec::new(),
-                rollback_steps: Vec::new(),
-                partial_failures: Vec::new(),
-                preview_warnings: Vec::new(),
-                schema_version: 1,
-            }),
-        );
-        register_created(&coordinator, &proposal);
-
-        let response = coordinator
-            .handle(ProposalRequest::Validate(proposal))
-            .expect("validate batch");
-        let ProposalResponse::Denied { transition, reason } = response else {
-            panic!("invalid batch should deny, got {response:?}");
-        };
-        assert_eq!(reason, ProposalDenialReason::PolicyDenied);
-        for expected in [
-            "proposal.duplicate_target",
-            "proposal.duplicate_batch_item_target",
-            "proposal.unknown_batch_target",
-            "proposal.unsupported_batch_item_route",
-        ] {
-            assert!(
-                transition
-                    .diagnostics
-                    .iter()
-                    .any(|diagnostic| diagnostic.code == expected),
-                "missing {expected}: {:?}",
-                transition.diagnostics
-            );
-        }
-    }
-
-    #[test]
-    fn paths_equivalent_matches_real_file_with_alternate_separators() {
-        let dir = std::env::temp_dir().join(format!(
-            "legion_app_paths_equivalent_{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file_path = dir.join("test.txt");
-        std::fs::write(&file_path, "hello").unwrap();
-
-        let canonical = file_path.to_string_lossy();
-        let forward = canonical.replace('\\', "/");
-        let backward = canonical.replace('/', "\\");
-
-        // On the current platform, at least one alternate form should be
-        // equivalent to the canonical form via Path comparison or canonicalize.
-        assert!(
-            AppComposition::paths_equivalent(&canonical, &forward)
-                || AppComposition::paths_equivalent(&canonical, &backward),
-            "paths_equivalent should match a real file with alternate separators"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// SEARCH.06: frequency bonus lifts heavily-used palette commands.
-    ///
-    /// "Preferences: Theme Dark" and "Preferences: Theme Light" score
-    /// identically for query "preferences theme". The alphabetical
-    /// tiebreaker puts Dark first. After recording 20 usages for Light, its
-    /// +100 frequency bonus lifts it within the canonical View group.
-    #[test]
-    fn palette_usage_frequency_bonus_lifts_heavily_used_command() {
-        let workspace_id = WorkspaceId(42);
-        let mut app = AppComposition::new();
-        // Give the composition a workspace so `workspace_id()` returns `Some`.
-        app.active_documents.opened_workspace = Some(WorkspaceOpened {
-            workspace_id,
-            root_id: legion_protocol::WorkspaceRootId(1),
-            generation: WorkspaceGeneration(1),
-            snapshot_id: legion_protocol::SnapshotId(0),
-            correlation_id: CorrelationId(0),
-        });
-
-        let baseline = app.palette_command_results("preferences theme");
-        let light_pos_base = baseline
-            .iter()
-            .position(|r| r.id == "command:preferences-theme-light")
-            .expect("Theme Light should match 'preferences theme'");
-        let dark_pos_base = baseline
-            .iter()
-            .position(|r| r.id == "command:preferences-theme-dark")
-            .expect("Theme Dark should match 'preferences theme'");
-        assert!(
-            dark_pos_base <= light_pos_base,
-            "Theme Dark should rank at least as high as Theme Light without a frequency boost"
-        );
-
-        // Record 20 usages for Theme Light -> +100 frequency bonus.
-        for _ in 0..20 {
-            app.palette_usage
-                .record_usage(workspace_id, "command:preferences-theme-light");
-        }
-
-        let boosted = app.palette_command_results("preferences theme");
-        let light_pos_boosted = boosted
-            .iter()
-            .position(|r| r.id == "command:preferences-theme-light")
-            .expect("Theme Light should still match after boost");
-        let dark_pos_boosted = boosted
-            .iter()
-            .position(|r| r.id == "command:preferences-theme-dark")
-            .expect("Theme Dark should still match after boost");
-
-        assert!(
-            light_pos_boosted < dark_pos_boosted,
-            "Theme Light (20 usages, +100 frequency bonus) must outrank Theme Dark within View"
-        );
-    }
-
-    #[test]
-    fn cloud_lane_endpoint_parses_bracketed_ipv6_without_port() {
-        let target =
-            parse_cloud_lane_endpoint("https://[::1]").expect("bracketed IPv6 defaults to HTTPS");
-
-        assert_eq!(target.scheme, "https");
-        assert_eq!(target.host, "[::1]");
-        assert_eq!(target.port, Some(443));
-    }
-
-    #[test]
-    fn cloud_lane_endpoint_parses_bracketed_ipv6_with_port() {
-        let target =
-            parse_cloud_lane_endpoint("https://[::1]:9443/path").expect("bracketed IPv6 with port");
-
-        assert_eq!(target.scheme, "https");
-        assert_eq!(target.host, "[::1]");
-        assert_eq!(target.port, Some(9443));
-    }
-}
+#[path = "app_composition_tests.rs"]
+mod tests;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PKT-LSP-C T1: Explicit session start — TDD tests
@@ -35422,6 +34539,32 @@ mod lsp_explicit_start_tests {
             specs.iter().any(|s| s.id == "lsp-restart-session"),
             "lsp-restart-session palette command must be registered"
         );
+        for command_id in [
+            "language-format",
+            "language-rename",
+            "language-organize-imports",
+            "language-code-action",
+        ] {
+            assert!(
+                specs.iter().any(|spec| spec.id == command_id),
+                "{command_id} palette command must be registered"
+            );
+        }
+    }
+
+    #[test]
+    fn pr12_language_palette_operands_are_parsed() {
+        assert_eq!(
+            parse_palette_command_operands("language-rename", "language rename NewName"),
+            Some(Ok(PaletteCommandOperands::RenameName(
+                "NewName".to_string(),
+            )))
+        );
+        assert_eq!(
+            parse_palette_command_operands("language-code-action", "code action quick-fix"),
+            None,
+            "code actions no longer take an action id; the palette requests the live list"
+        );
     }
 
     /// `palette_command_intent` must route the two LSP commands to the correct
@@ -35445,7 +34588,8 @@ mod lsp_explicit_start_tests {
     }
 
     /// After a Refused session, dispatching `LspRestartSession` must reset
-    /// state and attempt a new start (ending in Refused again if no Cargo.toml).
+    /// state and attempt a new start (ending in preparation failure without
+    /// explicit language-server configuration).
     /// PKT-LSP-C T1/T3.
     #[test]
     fn t1_restart_resets_refused_session() {
@@ -35463,28 +34607,21 @@ mod lsp_explicit_start_tests {
         let _ = app.open_file(rs_path.to_string_lossy().as_ref());
         assert!(app.lsp_is_idle_for_test(), "file open must not start LSP");
 
-        // Explicitly approve the initial start; it refuses because this
-        // workspace has no Cargo.toml.
+        // Explicitly request the initial start; it leaves Idle and prepares a
+        // visible missing-configuration refusal without implicit startup.
         let result = app.dispatch_ui_intent(CommandDispatchIntent::LspStartSession);
         assert!(result.is_ok(), "start dispatch must succeed");
         assert!(
             !app.lsp_is_idle_for_test(),
             "should have left Idle after explicit start"
         );
-        assert!(
-            !app.lsp_is_starting_for_test(),
-            "should not be Starting without Cargo.toml"
-        );
-        assert!(
-            app.lsp_failure_reason_for_test().is_some(),
-            "should have a failure reason (Refused: no Cargo.toml)"
-        );
+        assert!(app.lsp_is_starting_for_test() || app.lsp_failure_reason_for_test().is_some());
 
         // Restart via the palette command dispatch path.
         let result = app.dispatch_ui_intent(CommandDispatchIntent::LspRestartSession);
         assert!(result.is_ok(), "restart dispatch must succeed");
-        // Session was reset to Idle and re-attempted immediately; without
-        // Cargo.toml it ends up Refused again — still "not Idle".
+        // Session was reset and re-attempted with the same missing
+        // configuration; it remains active while preparation resolves.
         assert!(
             !app.lsp_is_idle_for_test(),
             "session must have re-attempted (Refused again) after restart"
@@ -35554,11 +34691,11 @@ mod pkt_worker_tests {
     fn manual_mode_is_refused_while_product_provider_stream_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         app.set_product_mode(AppProductMode::Manual);
 
@@ -35570,26 +34707,99 @@ mod pkt_worker_tests {
         assert_eq!(app.product_mode(), AppProductMode::Manual);
     }
 
+    /// A reservation cannot finish a lane somebody else now holds.
+    ///
+    /// The cancellation flag alone cannot close this: a worker can read "not
+    /// cancelled", be pre-empted, and reach `finish_background` after the app
+    /// thread released the lane and another operation took it. Its stale result
+    /// would then land against the new run and clear an in-flight flag that is
+    /// not its own -- so a request still in progress looks finished, and a
+    /// third is let in behind it.
+    #[test]
+    fn a_stale_reservation_cannot_finish_a_reused_lane() {
+        let sink = Arc::new(LiveProductAiStreamSink::default());
+        let stale = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "assist.inline_prediction",
+            "provider:a",
+            "model:a",
+        )
+        .expect("the lane must be free to start");
+
+        // The app thread cancels: the lane is released and this occupancy ends.
+        sink.release_lane();
+        let _current = ProductAiLaneReservation::try_acquire(
+            sink.clone(),
+            "delegate.chat",
+            "provider:b",
+            "model:b",
+        )
+        .expect("the released lane must be available to the next operation");
+        assert!(
+            sink.is_in_flight(),
+            "the new operation must hold the lane for this test to mean anything"
+        );
+
+        // The old worker finally returns.
+        stale.finish_background(
+            ProductAiBackgroundResult {
+                live_failed: false,
+                assistant_message_id: String::new(),
+                content_label: String::new(),
+                stream: None,
+                assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
+            },
+            None,
+        );
+
+        assert!(
+            sink.is_in_flight(),
+            "a stale reservation cleared the in-flight flag of an operation that is still \
+             running, which makes it look finished and lets another request in behind it"
+        );
+        assert!(
+            sink.take_background_results().is_empty(),
+            "a stale reservation published its result against somebody else's run"
+        );
+    }
+
     #[test]
     fn product_ai_stream_lane_rejects_reentrant_and_pending_result_begin() {
         let sink = LiveProductAiStreamSink::default();
-        assert!(sink.try_begin("assist.proposal", "provider:a", "model:a"));
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        let generation = sink
+            .try_begin("assist.proposal", "provider:a", "model:a")
+            .expect("the lane must be free to start");
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.snapshot().operation, "assist.proposal");
 
-        sink.finish_background(
+        sink.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "assist.proposal",
         );
-        assert!(!sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_none()
+        );
         assert_eq!(sink.take_background_results().len(), 1);
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -35605,7 +34815,10 @@ mod pkt_worker_tests {
 
         drop(reservation);
 
-        assert!(sink.try_begin("delegate.chat", "provider:b", "model:b"));
+        assert!(
+            sink.try_begin("delegate.chat", "provider:b", "model:b")
+                .is_some()
+        );
     }
 
     #[test]
@@ -35624,11 +34837,12 @@ mod pkt_worker_tests {
         .expect("open workspace");
         app.open_file("lib.rs").expect("open source");
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(
-            app.live_product_ai_stream
-                .try_begin("delegate.chat", "provider:a", "model:a")
-        );
-        app.live_product_ai_stream.push_delta("stream-a");
+        let occupancy = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:a", "model:a")
+            .expect("the lane starts free");
+        app.live_product_ai_stream
+            .push_delta_owned(occupancy, "stream-a");
 
         let stream_before = app.live_product_ai_stream.snapshot();
         let semantic_index_before = format!("{:?}", app.language_tooling.semantic_index);
@@ -35666,21 +34880,24 @@ mod pkt_worker_tests {
     fn delegate_chat_stream_defers_assist_downgrade_until_result_merge() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Delegate);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
 
         app.set_product_mode(AppProductMode::Assist);
         assert_eq!(app.product_mode(), AppProductMode::Delegate);
 
-        app.live_product_ai_stream.finish_background(
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
@@ -35696,11 +34913,11 @@ mod pkt_worker_tests {
     fn manual_dispatch_does_not_report_mode_changed_while_provider_is_in_flight() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "assist.proposal",
-            "provider:test",
-            "model:test"
-        ));
+        assert!(
+            app.live_product_ai_stream
+                .try_begin("assist.proposal", "provider:test", "model:test")
+                .is_some()
+        );
 
         let outcome = app.dispatch_ui_intent(CommandDispatchIntent::SetProductMode {
             mode: DockMode::Manual,
@@ -35715,17 +34932,20 @@ mod pkt_worker_tests {
     fn manual_mode_waits_until_completed_provider_result_is_merged() {
         let mut app = AppComposition::new();
         app.set_product_mode(AppProductMode::Assist);
-        assert!(app.live_product_ai_stream.try_begin(
-            "delegate.chat",
-            "provider:test",
-            "model:test"
-        ));
-        app.live_product_ai_stream.finish_background(
+        let generation = app
+            .live_product_ai_stream
+            .try_begin("delegate.chat", "provider:test", "model:test")
+            .expect("the lane must be free to start");
+        app.live_product_ai_stream.finish_background_owned(
+            generation,
             ProductAiBackgroundResult {
+                live_failed: false,
                 assistant_message_id: String::new(),
                 content_label: "finished".to_string(),
                 stream: None,
                 assist_proposal: None,
+                inline_prediction: None,
+                delegate_route: None,
             },
             None,
             "delegate.chat",
@@ -35756,6 +34976,95 @@ mod pkt_worker_tests {
 
         assert!(error.to_string().contains("belongs to workflow"));
         assert!(!flag.is_cancelled());
+    }
+
+    /// A stale queued record cannot overwrite the ending that replaced it.
+    ///
+    /// The audit id is `phase4-runtime:{run}:{route}`, so two queued records for
+    /// one run write to the same place. A `Streaming` entry queued when the turn
+    /// started would, once retried, overwrite the `Completed` that landed after
+    /// it, and a finished turn would read as permanently in flight.
+    #[test]
+    fn a_queued_streaming_record_does_not_outlive_the_ending() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:coalesce".to_string());
+        let route_id = "delegate-chat-route:coalesce".to_string();
+        let event_context = app.next_event_context();
+
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+            outcome_label: "phase4.provider.route.completed",
+            event_context,
+        });
+
+        let queued = &app.phase4_projection_state.pending_route_audits;
+        assert_eq!(
+            queued.len(),
+            1,
+            "two records for one run write to the same audit id, so the older one is a stale answer waiting to overwrite the newer: {queued:?}"
+        );
+        assert_eq!(
+            queued[0].state,
+            legion_protocol::AssistedAiProviderInvocationState::Completed,
+            "the surviving record must be the ending, not the beginning"
+        );
+
+        // And a record written directly clears anything still queued for it.
+        app.queue_route_audit(PendingRouteAudit {
+            run_id: run_id.clone(),
+            route_id: route_id.clone(),
+            state: legion_protocol::AssistedAiProviderInvocationState::Streaming,
+            outcome_label: "phase4.provider.route.streaming",
+            event_context,
+        });
+        app.forget_queued_route_audit(&run_id, &route_id);
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a queued record survived the write that superseded it"
+        );
+    }
+
+    /// A terminal route record that failed to write is written later.
+    ///
+    /// The background result carrying the ending is consumed once, so dropping
+    /// a failed write left the route recorded as `Streaming` for good -- an
+    /// audit trail permanently unable to say whether a remote turn finished.
+    #[test]
+    fn a_failed_route_audit_write_is_retried_rather_than_lost() {
+        let mut app = AppComposition::new();
+        let run_id = legion_protocol::AgentRunId("delegate-chat-run:retry".to_string());
+        let event_context = app.next_event_context();
+        app.phase4_projection_state
+            .pending_route_audits
+            .push(PendingRouteAudit {
+                run_id: run_id.clone(),
+                route_id: "delegate-chat-route:retry".to_string(),
+                state: legion_protocol::AssistedAiProviderInvocationState::Completed,
+                outcome_label: "phase4.provider.route.completed",
+                event_context,
+            });
+
+        assert!(
+            app.retry_pending_route_audits(),
+            "a queued record must be attempted on the next poll"
+        );
+        assert!(
+            app.phase4_projection_state.pending_route_audits.is_empty(),
+            "a record that wrote successfully must not stay queued forever"
+        );
+        assert!(
+            app.replay_ai_run(run_id).is_ok(),
+            "the retried write did not reach the audit trail"
+        );
     }
 
     #[test]

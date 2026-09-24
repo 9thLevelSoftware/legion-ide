@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
+    io::Write,
     path::Path,
     process,
 };
@@ -30,7 +31,10 @@ const DEFAULT_PHASE13_RUNBOOK_PATH: &str = "plans/evidence/gui-productization/ph
 const DEFAULT_DOCS_HYGIENE_ALLOWLIST_PATH: &str = "docs/hygiene-allowlist.toml";
 const DEFAULT_CLAIM_AUDIT_LEDGER_PATH: &str = "plans/product-readiness-ledger.md";
 const DEFAULT_NO_EGUI_TEXTEDIT_CONFIG_PATH: &str = "xtask/no-egui-textedit.toml";
+const DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH: &str = "target/dap-adapter/probe_report.toml";
 const DEFAULT_EXTRACT_BEFORE_MODIFY_CONFIG_PATH: &str = "xtask/extract-before-modify.toml";
+const DEFAULT_INTENT_REACHABILITY_CONFIG_PATH: &str = "xtask/intent-reachability.toml";
+const DEFAULT_DEFERRED_SURFACES_CONFIG_PATH: &str = "xtask/deferred-surfaces.toml";
 const DEFAULT_RELEASE_PIPELINE_CONFIG_PATH: &str = "xtask/release-pipeline.example.toml";
 const DEFAULT_RELEASE_PIPELINE_OUTPUT_PATH: &str = "target/release-pipeline";
 const DEFAULT_PERF_HARNESS_OUTPUT_PATH: &str = "target/perf-harness";
@@ -434,6 +438,10 @@ const RENDERER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["legion-desktop"];
 const FORBIDDEN_RENDERER_DEPS: &[&str] = &[
     "eframe",
     "egui",
+    // epaint is the renderer's lower-level drawing crate.  ADR-0053 permits
+    // the existing graph's patched epaint only under legion-desktop; a direct
+    // declaration in any other package would bypass the projection boundary.
+    "epaint",
     "egui-winit",
     "egui-wgpu",
     "winit",
@@ -453,6 +461,22 @@ const PARSER_BOUNDARY_POLICY_MARKERS: &[&str] = &[
 ];
 const PARSER_DEPENDENCY_ALLOWED_PACKAGES: &[&str] = &["legion-index"];
 const FORBIDDEN_PARSER_DEPS: &[&str] = &["tree-sitter", "tree-sitter-rust"];
+
+/// External runtime engines that may only be in the workspace with a ratifying
+/// ADR and a matching `plans/dependency-policy.md` entry. `P7.F1.T1` carries the
+/// stop condition "Stop if the runtime is added to the workspace before the ADR
+/// is merged"; this list is that condition turned into a standing check, so the
+/// engine cannot outlive its authorization.
+const PLUGIN_RUNTIME_GATED_DEPS: &[&str] = &["wasmtime"];
+/// The only workspace packages permitted to declare a gated runtime engine.
+const PLUGIN_RUNTIME_ALLOWED_PACKAGES: &[&str] = &["legion-plugin"];
+/// The ADR that ratifies the gated runtime engine.
+const PLUGIN_RUNTIME_ADR_PATH: &str = "plans/adrs/ADR-0050-wasmtime-runtime-ratification.md";
+/// Clauses `plans/dependency-policy.md` must carry to admit the engine.
+const PLUGIN_RUNTIME_POLICY_MARKERS: &[&str] = &[
+    "WASM plugin runtime engine (`legion-plugin`): `wasmtime`",
+    "ADR-0050-wasmtime-runtime-ratification.md",
+];
 
 #[derive(Parser)]
 #[command(author, version, about = "Repository maintenance and validation tasks")]
@@ -482,6 +506,59 @@ enum Commands {
         #[arg(long, default_value = DEFAULT_CLAIM_AUDIT_LEDGER_PATH)]
         ledger: String,
     },
+    /// Validate the canonical completion registers and nominated evidence.
+    VerifyCompletion {
+        /// Candidate code SHA pinned by plans/completion/candidate.json.
+        #[arg(long)]
+        candidate: String,
+        /// Require complete required product/configuration release coverage.
+        #[arg(long)]
+        release: bool,
+        /// Workspace root that contains `plans/completion`. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+    },
+    /// Validate the canonical completion register structure only.
+    ///
+    /// Runs the register structure validator by itself, so the register can be
+    /// checked before a candidate SHA and an evidence set exist. It takes no
+    /// candidate SHA and no release switch, and reaches no evidence, defect or
+    /// release validator. It establishes no evidence run, no acceptance status
+    /// and no implementation status: a clean result is a structural lint, never
+    /// a completion or acceptance verdict. Status counts are informational.
+    #[command(name = "verify-completion-register")]
+    VerifyCompletionRegister {
+        /// Workspace root that contains `plans/completion`. Defaults to cwd.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+    },
+    /// Report which DAP adapter binaries this machine has (P2.F3.T2).
+    ///
+    /// The dogfood tests for policy-gated adapter resolution were reporting
+    /// `ok` through a soft-skip on every runner, which proves nothing about a
+    /// real adapter. This command establishes the precondition: what each
+    /// machine actually ships, under which names, at which versions. It is
+    /// report-only unless `--require` is passed.
+    #[command(name = "dap-adapter-probe")]
+    DapAdapterProbe {
+        /// How these binaries got here: shipped (image default), installed
+        /// (a workflow step put them there), or unknown. Recorded verbatim —
+        /// "the platform ships this" and "we installed this" support different
+        /// claims and must not be conflated in evidence.
+        #[arg(long, default_value = "unknown")]
+        provenance: String,
+        /// Fail when no adapter the resolver could return is present. Use
+        /// after an install step so a failed install is reported there instead
+        /// of as a confusing dogfood-test failure.
+        #[arg(long)]
+        require: bool,
+        /// Skip running each found binary with `--version`.
+        #[arg(long)]
+        no_versions: bool,
+        /// Where to write the TOML report.
+        #[arg(long, default_value = DEFAULT_DAP_ADAPTER_PROBE_REPORT_PATH)]
+        out: String,
+    },
     /// Forbid egui::TextEdit in the desktop code-canvas/editor render path.
     NoEguiTextedit {
         /// Path to no-egui-textedit TOML configuration.
@@ -503,6 +580,28 @@ enum Commands {
         /// Branch to measure against.
         #[arg(long, default_value = "origin/main")]
         base: String,
+    },
+    /// Fail when a dispatch intent has no route from any user gesture.
+    ///
+    /// A capability nobody can reach is not shipped. Four were found complete,
+    /// tested and unreachable on 2026-08-17, one at a time, by running the app.
+    #[command(name = "intent-reachability")]
+    IntentReachability {
+        /// Path to intent-reachability TOML configuration.
+        #[arg(long, default_value = DEFAULT_INTENT_REACHABILITY_CONFIG_PATH)]
+        config: String,
+    },
+    /// Fail when a frozen surface claims readiness its artifacts do not support.
+    ///
+    /// ADR-0046 keeps three gates deferred, and the roadmap's rule is that each
+    /// needs its own ADR, policy, tests and product evidence before its
+    /// readiness status changes. The ledger is a markdown table, so without
+    /// this the rule was enforceable only by whoever reviewed the diff.
+    #[command(name = "deferred-surfaces")]
+    DeferredSurfaces {
+        /// Path to deferred-surfaces TOML configuration.
+        #[arg(long, default_value = DEFAULT_DEFERRED_SURFACES_CONFIG_PATH)]
+        config: String,
     },
     /// Generate dry-run release pipeline installer descriptors.
     ReleasePipeline {
@@ -603,21 +702,29 @@ enum Commands {
         /// Output directory for the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Run mode for the baseline. Recorded is the offline CI default
-        /// (synthetic budget arithmetic); live is reserved for the weekly
-        /// external run; live-local executes the corpus tasks for real against
-        /// an OpenAI-compatible endpoint (env: LEGION_BENCH_ENDPOINT, default
-        /// http://127.0.0.1:11434/v1; LEGION_BENCH_MODEL required;
-        /// LEGION_BENCH_API_KEY optional).
+        /// Run mode. `recorded` is the offline CI default: it executes every
+        /// corpus task for real against a fixture checkout, replaying the
+        /// model's side of the conversation from committed cassettes.
+        /// `record` runs live and writes those cassettes. `live-local` runs
+        /// live against an OpenAI-compatible endpoint without recording
+        /// (env: LEGION_BENCH_ENDPOINT, default http://127.0.0.1:11434/v1;
+        /// LEGION_BENCH_MODEL required; LEGION_BENCH_API_KEY optional).
         #[arg(long, default_value = "recorded")]
         mode: String,
-        /// Corpus directory of live-local task TOMLs (live-local mode only).
+        /// Corpus directory of task TOMLs.
         #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
         corpus: String,
-        /// Also execute corpus tasks marked `holdout = true` (live-local mode
-        /// only). Excluded holdout tasks are recorded as skipped.
+        /// Directory of recorded provider cassettes and the recorded baseline.
+        #[arg(long, default_value = xtask::legion_bench_recorded::DEFAULT_CASSETTE_PATH)]
+        cassettes: String,
+        /// Also execute corpus tasks marked `holdout = true`. Excluded holdout
+        /// tasks are recorded as skipped.
         #[arg(long = "include-holdout")]
         include_holdout: bool,
+        /// Recorded mode only: replace the committed baseline with this run's
+        /// measurements instead of gating against it. Use after re-recording.
+        #[arg(long = "write-baseline")]
+        write_baseline: bool,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -642,10 +749,12 @@ enum Commands {
         /// Output directory holding the bench report.
         #[arg(long, default_value = DEFAULT_BENCH_OUTPUT_PATH)]
         out: String,
-        /// Corpus directory used to recompute the suite when verifying a
-        /// live-local report.
+        /// Corpus directory used to recompute the suite the report must match.
         #[arg(long, default_value = xtask::legion_bench_corpus::DEFAULT_CORPUS_PATH)]
         corpus: String,
+        /// Directory of recorded provider cassettes and the recorded baseline.
+        #[arg(long, default_value = xtask::legion_bench_recorded::DEFAULT_CASSETTE_PATH)]
+        cassettes: String,
         /// Treat any failed task as a CI failure (default: true).
         /// Pass `--no-strict` to keep report-only behavior even on failures.
         #[arg(long, default_value_t = true)]
@@ -683,6 +792,20 @@ enum Commands {
     /// A clean skip (rust-analyzer absent) is treated as success (exit 0).
     /// Returns non-zero only on a real test failure.
     RustAnalyzerSmoke,
+    /// Run the hostile-AI evals against a real local model.
+    ///
+    /// Executes:
+    ///   cargo test -p legion-app --test hostile_eval_live -- --ignored
+    ///
+    /// The scripted evals in `hostile_eval_integration` prove the harness
+    /// refuses a tool call it is handed. These ask the different question: given
+    /// a hostile directive and a real workspace, can a live model talk its way
+    /// past the authority substrate. The assertions are about the boundary, so a
+    /// model that simply refuses the task passes too.
+    ///
+    /// A clean skip (no model server, or one that does not answer) is success:
+    /// an absent model is an absent measurement, not a failed eval.
+    HostileEvalLive,
     /// Run the scripted GP-1 golden-path smoke against a throwaway fixture workspace.
     ///
     /// Drives legion-app product APIs (AppComposition, RustAnalyzerSession,
@@ -812,6 +935,58 @@ enum Commands {
         #[arg(long)]
         record_evidence: Option<String>,
     },
+    /// GAP-01.1: unsigned package layout + windowed GUI E2E (`eframe::run_native`).
+    ///
+    /// Builds `legion-desktop`, copies the binary and legal files into
+    /// `target/windowed-gui/package/`, and launches that binary with
+    /// `--windowed-e2e`. This is not `--beta-smoke` and not AppComposition
+    /// `golden-path-5`. A run that cannot create a window fails closed.
+    ///
+    /// Not a standing gate and not merge-blocking. GAP-01.2 is the independent
+    /// 3-OS job; do not fold this into PR gates until the T0-D clock plus
+    /// owner sign-off.
+    #[command(name = "windowed-gui-e2e")]
+    WindowedGuiE2e {
+        /// Output directory for the unsigned package layout and report.
+        #[arg(long, default_value = "target/windowed-gui")]
+        out_dir: String,
+        /// Build the desktop binary in release mode.
+        #[arg(long)]
+        release: bool,
+        /// Copy the report to this path or directory after a successful run.
+        #[arg(long)]
+        record_evidence: Option<String>,
+    },
+    /// COMP-PLAT-002: native input acceptance harness for the packaged product (ADR-0056).
+    ///
+    /// Drives the six `COMP-PLAT-002` input classes (keyboard, pointer, text,
+    /// clipboard, IME/CJK, command) against the packaged product through an
+    /// owner-installed external input driver, and observes them from outside
+    /// the product process. `xtask` never links `legion-desktop`; the product
+    /// is reached only as a subprocess.
+    ///
+    /// Exit codes: `0` passed (every class observed to conform on a real
+    /// window — never the mere absence of a failure); `1` conformance failure
+    /// (the product is wrong); `2` operational error (cannot create the output
+    /// directory, cannot write the report, driver produced no result); `3`
+    /// blocked (no driver, no interactive desktop session, no packaged
+    /// product, or a macOS/Linux host blocked on `BLK-2026-09-08-02`). Blocked
+    /// is never a pass, never a skip and never `0`.
+    ///
+    /// Not a standing gate and not merge-blocking. No workflow under
+    /// `.github/workflows/` references it, and a test asserts that.
+    #[command(name = "native-product-acceptance")]
+    NativeProductAcceptance {
+        /// Output directory for the acceptance report.
+        #[arg(long, default_value = "target/native-input-acceptance")]
+        out_dir: String,
+        /// Directory holding the packaged native product.
+        #[arg(long, default_value = "target/native-input-acceptance/package")]
+        package_dir: String,
+        /// Path to the owner-installed external native input driver.
+        #[arg(long)]
+        driver: Option<String>,
+    },
     /// Run the scripted GP-5 golden-path acceptance smoke against a throwaway fixture workspace.
     ///
     /// Drives the core IDE user journey through AppComposition: open workspace,
@@ -868,6 +1043,38 @@ enum Commands {
         #[arg(long, default_value = "target/update-drill")]
         out: String,
     },
+    /// Export a trainer-ready dataset from the consent-gated training pipeline
+    /// (P9.F4.T1/T2) and archive its Legion-Bench baseline comparison.
+    ///
+    /// This is the only supported way to produce `train.jsonl` for
+    /// `training/qlora_train.py`: it routes every trace through
+    /// `build_training_candidate_corpus` and `build_training_adapter_dataset`,
+    /// then re-derives consent from the corpus for every emitted line.
+    #[command(name = "training-corpus")]
+    TrainingCorpus {
+        /// Source `(audit, proposal)` trace batch, as JSON.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_TRACES_PATH)]
+        traces: String,
+        /// Archived Legion-Bench baseline the dataset is compared against.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_BASELINE_PATH)]
+        baseline: String,
+        /// Output directory for `train.jsonl`, `holdout.jsonl`, and the manifest.
+        #[arg(long, default_value = xtask::training_corpus::DEFAULT_EXPORT_OUTPUT_PATH)]
+        out: String,
+        /// Corpus identifier stamped on the exported artifacts.
+        #[arg(long = "corpus-id", default_value = xtask::training_corpus::DEFAULT_CORPUS_ID)]
+        corpus_id: String,
+        /// Expand the source batch to this many fixture traces before the
+        /// consent filter runs. 0 uses the batch verbatim.
+        #[arg(long, default_value_t = 0)]
+        expand: usize,
+        /// Seed for the deterministic trace expander.
+        #[arg(long, default_value_t = xtask::training_corpus::DEFAULT_EXPAND_SEED)]
+        seed: u64,
+        /// Every Nth candidate in corpus order is withheld for evaluation.
+        #[arg(long = "holdout-every", default_value_t = xtask::training_corpus::DEFAULT_HOLDOUT_EVERY)]
+        holdout_every: usize,
+    },
 }
 
 fn main() {
@@ -885,10 +1092,26 @@ fn main() {
         }
         Commands::DocsHygiene { allowlist } => run_docs_hygiene_command(&allowlist),
         Commands::ClaimAudit { ledger } => run_claim_audit_command(&ledger),
+        Commands::VerifyCompletion {
+            candidate,
+            release,
+            root,
+        } => xtask::completion_command::run_verify_completion_command(&root, &candidate, release),
+        Commands::VerifyCompletionRegister { root } => {
+            xtask::completion_command::run_verify_completion_register_command(&root)
+        }
+        Commands::DapAdapterProbe {
+            provenance,
+            require,
+            no_versions,
+            out,
+        } => run_dap_adapter_probe_command(&provenance, require, !no_versions, &out),
         Commands::NoEguiTextedit { config } => run_no_egui_textedit_command(&config),
         Commands::ExtractBeforeModify { config, base } => {
             run_extract_before_modify_command(&config, &base)
         }
+        Commands::IntentReachability { config } => run_intent_reachability_command(&config),
+        Commands::DeferredSurfaces { config } => run_deferred_surfaces_command(&config),
         Commands::ReleasePipeline {
             config,
             out,
@@ -932,24 +1155,36 @@ fn main() {
             out,
             mode,
             corpus,
+            cassettes,
             include_holdout,
+            write_baseline,
             strict,
             no_strict,
-        } => run_legion_bench_command(&out, &mode, &corpus, include_holdout, strict && !no_strict),
+        } => run_legion_bench_command(
+            &out,
+            &mode,
+            &corpus,
+            &cassettes,
+            include_holdout,
+            write_baseline,
+            strict && !no_strict,
+        ),
         Commands::VerifyLegionBenchCorpus { corpus, no_execute } => {
             run_verify_legion_bench_corpus_command(&corpus, !no_execute)
         }
         Commands::VerifyLegionBench {
             out,
             corpus,
+            cassettes,
             strict,
             no_strict,
-        } => run_verify_legion_bench_command(&out, &corpus, strict && !no_strict),
+        } => run_verify_legion_bench_command(&out, &corpus, &cassettes, strict && !no_strict),
         Commands::VerifyKanbanBacklog { backlog } => run_verify_kanban_backlog_command(&backlog),
         Commands::VerifyReadinessConsistency { ledger, backlog } => {
             run_verify_readiness_consistency_command(&ledger, &backlog)
         }
         Commands::RustAnalyzerSmoke => run_rust_analyzer_smoke_command(),
+        Commands::HostileEvalLive => run_hostile_eval_live_command(),
         Commands::GoldenPath1 {
             fixture_dir,
             out_dir,
@@ -970,6 +1205,22 @@ fn main() {
             out_dir,
             record_evidence,
         } => run_golden_path_4_command(&fixture_dir, &out_dir, record_evidence.as_deref()),
+        Commands::WindowedGuiE2e {
+            out_dir,
+            release,
+            record_evidence,
+        } => run_windowed_gui_e2e_command(&out_dir, release, record_evidence.as_deref()),
+        Commands::NativeProductAcceptance {
+            out_dir,
+            package_dir,
+            driver,
+        } => xtask::native_product_acceptance::run_native_product_acceptance_command(
+            &xtask::native_product_acceptance::NativeProductAcceptanceOptions {
+                out_dir,
+                package_dir,
+                driver_path: driver,
+            },
+        ),
         Commands::GoldenPath5 {
             fixture_dir,
             out_dir,
@@ -978,9 +1229,131 @@ fn main() {
         Commands::HostileEvals { out } => run_hostile_evals_command(&out),
         Commands::VerifyHostileEvals { out } => run_verify_hostile_evals_command(&out),
         Commands::UpdateDrill { out } => run_update_drill_command(&out),
+        Commands::TrainingCorpus {
+            traces,
+            baseline,
+            out,
+            corpus_id,
+            expand,
+            seed,
+            holdout_every,
+        } => run_training_corpus_command(
+            &traces,
+            &baseline,
+            &out,
+            &corpus_id,
+            expand,
+            seed,
+            holdout_every,
+        ),
     };
 
     process::exit(code);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_training_corpus_command(
+    traces: &str,
+    baseline: &str,
+    out: &str,
+    corpus_id: &str,
+    expand: usize,
+    seed: u64,
+    holdout_every: usize,
+) -> i32 {
+    use xtask::training_corpus as tc;
+
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("training corpus failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+
+    let source = match tc::read_traces(&workspace_root.join(traces)) {
+        Ok(source) => source,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+    let baseline = match tc::read_baseline(&workspace_root.join(baseline)) {
+        Ok(baseline) => baseline,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+
+    // An empty source is refused rather than expanded into nothing.
+    //
+    // `expand_traces` returns the source untouched when it is empty, so
+    // `--expand 1200` over zero traces produced zero traces, a manifest saying
+    // `source_trace_count: 0`, an empty `train.jsonl`, and a trainer that would
+    // dutifully train an adapter on no examples. The consent gate is built to
+    // reject data it should not have; it says nothing about having none, and a
+    // pipeline that produces an empty dataset without complaint is the louder
+    // failure.
+    if source.is_empty() {
+        eprintln!(
+            "training corpus failed: no traces to export. The consent filter dropped every candidate, or the input carried none. Either way there is nothing to train on, and an empty dataset must not be written as though there were."
+        );
+        return 1;
+    }
+    let batch = if expand > 0 {
+        tc::expand_traces(&source, expand, seed)
+    } else {
+        source
+    };
+    let options = tc::ExportOptions {
+        corpus_id: corpus_id.to_string(),
+        expand_to: expand,
+        seed,
+        holdout_every,
+    };
+    let export = match tc::build_export(&batch, &baseline, &options) {
+        Ok(export) => export,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+    let manifest = tc::build_manifest(&export, &options);
+    let out_dir = workspace_root.join(out);
+    let written = match tc::write_export(&out_dir, &export, &manifest) {
+        Ok(written) => written,
+        Err(err) => {
+            eprintln!("training corpus failed: {err}");
+            return 1;
+        }
+    };
+
+    println!(
+        "training corpus: source_traces={} consented={} dropped_unconsented={} dropped_non_terminal={} \
+         accepted={} rejected={} train={} holdout={} corpus_fingerprint={} dataset_fingerprint={} \
+         baseline={} baseline_rate_bp={} dataset_rate_bp={} delta_bp={} regressed={} out={}",
+        manifest.source_trace_count,
+        manifest.candidate_count,
+        manifest.skipped_unconsented_count,
+        manifest.skipped_non_terminal_count,
+        manifest.accepted_count,
+        manifest.rejected_count,
+        manifest.train_count,
+        manifest.holdout_count,
+        manifest.corpus_fingerprint,
+        manifest.dataset_fingerprint,
+        manifest.comparison.baseline_id,
+        manifest.comparison.baseline_accepted_rate_bp,
+        manifest.comparison.dataset_accepted_rate_bp,
+        manifest.comparison.delta_bp,
+        manifest.comparison.regressed,
+        out_dir.display(),
+    );
+    for path in written {
+        println!("training corpus wrote {}", path.display());
+    }
+    0
 }
 
 fn run_docs_hygiene_command(allowlist: &str) -> i32 {
@@ -1057,12 +1430,15 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         .iter()
         .all(|row| row.status == "Product workflow validated");
 
-    // Canonical public-doc scan set: README.md and top-level docs/*.md only.
-    // docs/releases/ (forward templates),
+    // Canonical public-doc scan set: README.md, AGENTS.md, and top-level
+    // docs/*.md only. docs/releases/ (forward templates),
     // docs/superpowers/ (plans quote forbidden phrases as code literals),
     // and plans/evidence/ (historical) are intentionally excluded, matching
     // how docs-hygiene allowlists archived material.
     let mut scan_files: Vec<String> = vec!["README.md".to_string()];
+    if workspace_root.join("AGENTS.md").is_file() {
+        scan_files.push("AGENTS.md".to_string());
+    }
     let docs_dir = workspace_root.join("docs");
     let entries = match fs::read_dir(&docs_dir) {
         Ok(entries) => entries,
@@ -1101,6 +1477,8 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
 
     let mut violations: Vec<xtask::claim_audit::ClaimViolation> = Vec::new();
     let mut readme_text = String::new();
+    let mut agents_text = String::new();
+    let mut user_guide_text = String::new();
     for rel_path in &scan_files {
         let path = workspace_root.join(rel_path);
         let text = match fs::read_to_string(&path) {
@@ -1116,12 +1494,39 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
         if rel_path == "README.md" {
             readme_text = text.clone();
         }
+        if rel_path == "AGENTS.md" {
+            agents_text = text.clone();
+        }
+        if rel_path == "docs/USER_GUIDE.md" {
+            user_guide_text = text.clone();
+        }
         violations.extend(xtask::claim_audit::audit_text(rel_path, &text));
     }
 
     if !all_validated && !xtask::claim_audit::readme_caveat_present(&readme_text) {
         violations.push(xtask::claim_audit::ClaimViolation::MissingReadmeCaveat);
     }
+
+    let facts = match hosted_facts_from_workspace(&workspace_root) {
+        Ok(facts) => facts,
+        Err(code) => return code,
+    };
+    violations.extend(xtask::claim_audit::audit_cross_docs(
+        xtask::claim_audit::CrossDocInputs {
+            agents: if agents_text.is_empty() {
+                None
+            } else {
+                Some(agents_text.as_str())
+            },
+            ledger: &ledger_text,
+            user_guide: if user_guide_text.is_empty() {
+                None
+            } else {
+                Some(user_guide_text.as_str())
+            },
+            facts,
+        },
+    ));
 
     if violations.is_empty() {
         println!("claim audit passed");
@@ -1144,9 +1549,169 @@ fn run_claim_audit_command(ledger: &str) -> i32 {
                          while ledger rows remain below `Product workflow validated`"
                     );
                 }
+                xtask::claim_audit::ClaimViolation::CrossDocContradiction {
+                    file,
+                    line_number,
+                    message,
+                } => {
+                    eprintln!("{file}:{line_number}: {message}");
+                }
             }
         }
         1
+    }
+}
+
+fn hosted_facts_from_workspace(
+    workspace_root: &Path,
+) -> Result<xtask::claim_audit::HostedFacts, i32> {
+    fn optional_workflow(root: &Path, rel: &str) -> Result<Option<String>, i32> {
+        let path = root.join(rel);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        match fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) => {
+                eprintln!("claim audit failed: unable to read `{rel}`: {err}");
+                Err(1)
+            }
+        }
+    }
+
+    let release = optional_workflow(workspace_root, ".github/workflows/legion-release.yml")?;
+    let gates = optional_workflow(workspace_root, ".github/workflows/legion-gates.yml")?;
+    let smoke = optional_workflow(workspace_root, ".github/workflows/legion-smoke.yml")?;
+    Ok(xtask::claim_audit::HostedFacts::from_workflow_texts(
+        release.as_deref(),
+        gates.as_deref(),
+        smoke.as_deref(),
+    ))
+}
+
+fn run_deferred_surfaces_command(config_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("deferred-surfaces failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::deferred_surfaces::DeferredSurfacesConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("deferred-surfaces failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::deferred_surfaces::run_deferred_surfaces(&workspace_root, &config) {
+        Ok(Ok(checked)) => {
+            println!("deferred-surfaces: {checked} frozen surface(s) deferred or fully evidenced");
+            0
+        }
+        Ok(Err(unsupported)) => {
+            eprintln!(
+                "deferred-surfaces: {} surface(s) claim readiness their artifacts do not support:",
+                unsupported.len()
+            );
+            for entry in &unsupported {
+                eprintln!("  {} is \"{}\" but is missing:", entry.gate, entry.status);
+                for missing in &entry.missing {
+                    eprintln!("      {missing}");
+                }
+            }
+            eprintln!();
+            eprintln!(
+                "A frozen surface needs its own ADR, policy, tests and product evidence before its readiness status changes (roadmap P9.F3.T4). Produce the missing artifacts, or leave the row deferred until they exist."
+            );
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::Ledger(why)) => {
+            eprintln!("deferred-surfaces failed: {why}");
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::ReasonMissing(gate)) => {
+            eprintln!("deferred-surfaces failed: surface {gate} has no reason recorded");
+            1
+        }
+        Err(xtask::deferred_surfaces::GateError::RowMissing(gates)) => {
+            eprintln!(
+                "deferred-surfaces failed: these surfaces have no ledger row: {}",
+                gates.join(", ")
+            );
+            eprintln!(
+                "Deleting the row is not a way out of the gate; it is a louder version of the edit the gate exists to prevent."
+            );
+            1
+        }
+    }
+}
+
+fn run_intent_reachability_command(config_path: &str) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("intent-reachability failed: cannot resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let config = match xtask::intent_reachability::IntentReachabilityConfig::from_file(
+        &workspace_root.join(config_path),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("intent-reachability failed: {err}");
+            return 1;
+        }
+    };
+
+    match xtask::intent_reachability::run_intent_reachability(&workspace_root, &config) {
+        Ok(Ok(checked)) => {
+            println!("intent-reachability: {checked} intent(s) reachable or allowlisted");
+            0
+        }
+        Ok(Err(unreachable)) => {
+            eprintln!(
+                "intent-reachability: {} intent(s) have no route from any user gesture:",
+                unreachable.len()
+            );
+            for entry in &unreachable {
+                eprintln!("  CommandDispatchIntent::{}", entry.intent);
+            }
+            eprintln!();
+            eprintln!(
+                "An intent nobody can reach is a capability that is not shipped, however 
+                 complete the app layer is and however many tests cover it. Give it a route 
+                 — a rendered control, a keybinding, a `:` command, a Vim mapping, or a 
+                 palette entry — or add it to xtask/intent-reachability.toml with a reason."
+            );
+            1
+        }
+        Err(xtask::intent_reachability::GateError::IntentSource(why)) => {
+            eprintln!("intent-reachability failed: {why}");
+            1
+        }
+        Err(xtask::intent_reachability::GateError::ReasonMissing(intent)) => {
+            eprintln!(
+                "intent-reachability failed: allowlisted intent `{intent}` carries no reason. 
+                 An allowlist without reasons is a list nobody remembers the case for."
+            );
+            1
+        }
+        Err(xtask::intent_reachability::GateError::StaleAllowlist(entries)) => {
+            eprintln!(
+                "intent-reachability failed: {} allowlist entry(ies) are stale — now reachable, 
+                 or naming no variant. Remove them; a stale exemption hides the next real one:",
+                entries.len()
+            );
+            for entry in &entries {
+                eprintln!("  {entry}");
+            }
+            1
+        }
     }
 }
 
@@ -1212,6 +1777,55 @@ fn run_extract_before_modify_command(config_path: &str, base_ref: &str) -> i32 {
             1
         }
     }
+}
+
+fn run_dap_adapter_probe_command(
+    provenance: &str,
+    require: bool,
+    capture_versions: bool,
+    out_path: &str,
+) -> i32 {
+    let provenance = match xtask::dap_adapter_probe::Provenance::parse(provenance) {
+        Ok(provenance) => provenance,
+        Err(err) => {
+            eprintln!("dap-adapter-probe failed: {err}");
+            return 1;
+        }
+    };
+
+    let report = xtask::dap_adapter_probe::probe(provenance, capture_versions);
+    print!("{}", xtask::dap_adapter_probe::render_summary(&report));
+
+    let out_path = Path::new(out_path);
+    if let Some(parent) = out_path.parent()
+        && let Err(err) = fs::create_dir_all(parent)
+    {
+        eprintln!(
+            "dap-adapter-probe failed: create {}: {err}",
+            parent.display()
+        );
+        return 1;
+    }
+    let rendered = xtask::dap_adapter_probe::render_toml(&report);
+    if let Err(err) = fs::write(out_path, rendered) {
+        eprintln!(
+            "dap-adapter-probe failed: write {}: {err}",
+            out_path.display()
+        );
+        return 1;
+    }
+    println!("dap-adapter-probe report: {}", out_path.display());
+
+    if require && !report.has_resolvable_adapter() {
+        eprintln!(
+            "dap-adapter-probe --require: no adapter the resolver can return is on PATH. \
+             Searched {}. Install one (or expose an existing versioned binary under an \
+             exact name) before running the LEGION_DAP_DOGFOOD=1 tests.",
+            xtask::dap_adapter_probe::PROBE_NAMES.join(", ")
+        );
+        return 1;
+    }
+    0
 }
 
 fn run_no_egui_textedit_command(config_path: &str) -> i32 {
@@ -1500,8 +2114,18 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     let package_name = "legion-desktop".to_string();
     let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
     let mut report = xtask::perf_harness::plan_perf_skeletons(&package_name, &git_sha, &skeletons);
+    // Every row from here down comes from a product-crate subprocess, because
+    // `xtask` cannot depend on the product crates and a stand-in would measure
+    // the stand-in. None of them is behind a flag: a budget nobody runs is not
+    // a budget (P8.F4.T1's stop condition).
+    append_product_workload_measurements(&workspace_root, &out_dir, &mut report);
     append_manual_renderer_measurement(&workspace_root, &out_dir, &mut report);
     append_large_file_measurement(&workspace_root, &out_dir, &mut report);
+    report.workload_kind = "product+skeleton".to_string();
+
+    let (baseline_status, tolerance_percent, regressions) =
+        evaluate_perf_trend(&workspace_root, &report);
+
     let path = match xtask::perf_harness::write_report(&out_dir, &report) {
         Ok(path) => path,
         Err(err) => {
@@ -1509,8 +2133,74 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
             return 1;
         }
     };
+
+    let entry = xtask::perf_trend::build_entry(
+        &report,
+        xtask::perf_harness::host_os(),
+        xtask::perf_harness::host_arch(),
+        baseline_status,
+        tolerance_percent,
+        regressions.clone(),
+    );
+    let entry_path = match xtask::perf_trend::write_entry(&workspace_root, &entry) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            // A trend archive that silently stops recording is worse than one
+            // that fails loudly, so this is reported rather than swallowed.
+            eprintln!("perf harness: unable to archive trend entry: {err}");
+            None
+        }
+    };
+
+    print_perf_report(&report, &path, strict);
+    if let Some(entry_path) = &entry_path {
+        println!(
+            "  trend entry={} baseline={} tolerance={}%",
+            entry_path.display(),
+            baseline_status.as_str(),
+            tolerance_percent
+        );
+    }
+    for regression in &regressions {
+        println!("  REGRESSION {regression}");
+    }
+    for row in xtask::perf_trend::unmeasured_names(&report) {
+        println!("  UNMEASURED {row}");
+    }
+
+    let required = required_measured_workloads();
+    for row in xtask::perf_trend::missing_required_names(&report, &required) {
+        println!("  MISSING-REQUIRED {row}");
+    }
+    let strict_failure = xtask::perf_trend::strict_failure(&report, &regressions, &required);
+    if entry_path.is_none() || (strict && strict_failure) {
+        1
+    } else {
+        0
+    }
+}
+
+/// Workloads that must produce a measurement on every host.
+///
+/// All headless product workloads must run on every host. The renderer-backed
+/// large-file row is also required, but a headless host records it as an
+/// honest unmeasured skip because no desktop renderer is available.
+fn required_measured_workloads() -> Vec<String> {
+    let mut names: Vec<String> = xtask::perf_workloads::product_workload_policies()
+        .into_iter()
+        .map(|policy| policy.name.to_string())
+        .collect();
+    names.push(xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb().name);
+    names
+}
+
+/// Print one line per workload, plus the header the dashboard is read from.
+fn print_perf_report(report: &xtask::perf_harness::PerfReport, path: &Path, strict: bool) {
     println!(
-        "perf harness: total={} passed={} failed={} skipped={} report={} strict={}",
+        "perf harness: os={} arch={} kind={} total={} passed={} failed={} skipped={} report={} strict={}",
+        report.os,
+        report.arch,
+        report.workload_kind,
         report.summary.total,
         report.summary.passed,
         report.summary.failed,
@@ -1520,22 +2210,85 @@ fn run_perf_harness_command(out: &str, strict: bool) -> i32 {
     );
     for skeleton in &report.skeletons {
         println!(
-            "  skeleton={} kind={} total_us={} p50_us={} p95_us={} budget_ms={} status={} message={}",
+            "  workload={} kind={} measured={} synthetic={} total_us={} p50_us={} p95_us={} bytes={} budget_ms={} status={} message={}",
             skeleton.name,
             skeleton.kind.as_str(),
+            skeleton.measured,
+            skeleton.synthetic_stand_in,
             skeleton.total_micros,
             skeleton.p50_micros,
             skeleton.p95_micros,
+            skeleton.bytes_value,
             skeleton.budget_millis,
             skeleton.status.as_str(),
             skeleton.message,
         );
     }
-    if strict && report.summary.failed > 0 {
-        1
-    } else {
-        0
+}
+
+/// Compare this run against the tracked baseline.
+///
+/// A missing or unreadable baseline is reported as `MissingForOs` rather than
+/// as a pass: the regression gate having no reference is a fact the archived
+/// entry has to carry.
+fn evaluate_perf_trend(
+    workspace_root: &Path,
+    report: &xtask::perf_harness::PerfReport,
+) -> (
+    xtask::perf_trend::BaselineStatus,
+    u64,
+    Vec<xtask::perf_trend::TrendRegression>,
+) {
+    match xtask::perf_trend::read_baseline(workspace_root) {
+        Ok(baseline) => {
+            let (status, regressions) = xtask::perf_trend::detect_regressions(
+                &baseline,
+                &report.skeletons,
+                xtask::perf_harness::host_os(),
+            );
+            if status == xtask::perf_trend::BaselineStatus::MissingForOs {
+                println!(
+                    "perf harness: no trend baseline recorded for os={} profile={}; regression gate \
+                     cannot run (add `[[workload]]` blocks with os = \"{}\" and profile = \"{}\" to {})",
+                    xtask::perf_harness::host_os(),
+                    xtask::perf_trend::baseline_profile(),
+                    xtask::perf_harness::host_os(),
+                    xtask::perf_trend::baseline_profile(),
+                    xtask::perf_trend::baseline_path(workspace_root).display(),
+                );
+            }
+            (status, baseline.tolerance_percent, regressions)
+        }
+        Err(err) => {
+            eprintln!("perf harness: {err}");
+            (
+                xtask::perf_trend::BaselineStatus::MissingForOs,
+                0,
+                Vec::new(),
+            )
+        }
     }
+}
+
+/// Run the real product workloads and fold them into the report.
+///
+/// `LEGION_PERF_FAIL_ON_BUDGET_MS` is deliberately not applied here. It exists
+/// so hosted runners can stop a 2ms microbenchmark from failing on VM noise,
+/// and applying it to the product workloads is what made every budget on every
+/// OS unfailable — P8.F4.T2's stop condition. The product ceilings are sized to
+/// survive a slow runner instead
+/// (see `product_budgets_ignore_the_skeleton_report_only_override`).
+fn append_product_workload_measurements(
+    workspace_root: &Path,
+    out_dir: &Path,
+    report: &mut xtask::perf_harness::PerfReport,
+) {
+    let measurements = xtask::perf_workloads::run_product_workloads(workspace_root, out_dir);
+    report.skeletons.extend(measurements);
+    report
+        .skeletons
+        .extend(xtask::perf_workloads::git_report_only_measurements());
+    report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }
 
 /// Run the real 100MB workload and replace its placeholder measurement.
@@ -1550,49 +2303,22 @@ fn append_large_file_measurement(
     report: &mut xtask::perf_harness::PerfReport,
 ) {
     let descriptor = xtask::perf_harness::SkeletonDescriptor::m9_large_file_100mb();
-    let report_path = out_dir.join("large-file-perf.toml");
     let _ = std::fs::create_dir_all(out_dir);
-
-    let output = std::process::Command::new("cargo")
-        .current_dir(workspace_root)
-        .args([
-            "run",
-            "--release",
-            "-q",
-            "-p",
-            "legion-app",
-            "--bin",
-            "large_file_perf",
-            "--",
-            "--report",
-        ])
-        .arg(&report_path)
-        .output();
-
-    let measurement = match output {
-        Err(err) => placeholder_large_file_measurement(
-            &descriptor,
-            format!("100MB measurement blocked: cannot spawn subprocess: {err}"),
+    let fixture_path = out_dir.join("large-file-100mb.txt");
+    let measurement = match write_large_file_fixture(&fixture_path, descriptor.fixture_bytes) {
+        Ok(()) => xtask::perf_harness::run_renderer_backed_large_file_measurement(
+            workspace_root,
+            out_dir,
+            &fixture_path,
+            descriptor.fixture_bytes,
+            descriptor.budget_millis,
         ),
-        Ok(output) if !output.status.success() => placeholder_large_file_measurement(
-            &descriptor,
-            format!(
-                "100MB measurement subprocess exited with status {}",
-                output.status
-            ),
+        Err(err) => xtask::perf_harness::placeholder_large_file_manual_measurement(
+            xtask::perf_harness::SkeletonStatus::Skipped,
+            descriptor.fixture_bytes,
+            descriptor.budget_millis,
+            format!("renderer-backed 100MB fixture unavailable: {err}"),
         ),
-        Ok(_) => match std::fs::read_to_string(&report_path)
-            .map_err(|err| err.to_string())
-            .and_then(|body| {
-                toml::from_str::<xtask::perf_harness::LargeFilePerfReport>(&body)
-                    .map_err(|err| err.to_string())
-            }) {
-            Ok(parsed) => xtask::perf_harness::large_file_perf_measurement(&descriptor, &parsed),
-            Err(err) => placeholder_large_file_measurement(
-                &descriptor,
-                format!("100MB measurement report unreadable: {err}"),
-            ),
-        },
     };
 
     // Replace the planned placeholder rather than appending beside it, so the
@@ -1606,23 +2332,22 @@ fn append_large_file_measurement(
     report.summary = xtask::perf_harness::summarize_measurements(&report.skeletons);
 }
 
-/// A skipped measurement carrying why the real one could not be taken.
-fn placeholder_large_file_measurement(
-    descriptor: &xtask::perf_harness::SkeletonDescriptor,
-    message: String,
-) -> xtask::perf_harness::SkeletonMeasurement {
-    xtask::perf_harness::SkeletonMeasurement {
-        name: descriptor.name.clone(),
-        kind: descriptor.kind,
-        fixture_bytes: descriptor.fixture_bytes,
-        sample_count: descriptor.sample_count,
-        total_micros: 0,
-        p50_micros: 0,
-        p95_micros: 0,
-        budget_millis: descriptor.budget_millis,
-        status: xtask::perf_harness::SkeletonStatus::Skipped,
-        message,
+fn write_large_file_fixture(path: &Path, byte_len: usize) -> Result<(), String> {
+    let mut file = fs::File::create(path)
+        .map_err(|err| format!("unable to create 100MB fixture `{}`: {err}", path.display()))?;
+    let line = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\n";
+    let mut chunk = Vec::with_capacity(64 * 1024);
+    while chunk.len() + line.len() <= chunk.capacity() {
+        chunk.extend_from_slice(line);
     }
+    let mut remaining = byte_len;
+    while remaining > 0 {
+        let chunk_len = remaining.min(chunk.len());
+        file.write_all(&chunk[..chunk_len])
+            .map_err(|err| format!("unable to write 100MB fixture `{}`: {err}", path.display()))?;
+        remaining -= chunk_len;
+    }
+    Ok(())
 }
 
 fn append_manual_renderer_measurement(
@@ -1683,7 +2408,10 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
         }
     };
     println!(
-        "perf harness verify: total={} passed={} failed={} skipped={} report={} strict={}",
+        "perf harness verify: os={} arch={} kind={} total={} passed={} failed={} skipped={} report={} strict={}",
+        report.os,
+        report.arch,
+        report.workload_kind,
         report.summary.total,
         report.summary.passed,
         report.summary.failed,
@@ -1691,7 +2419,55 @@ fn run_verify_perf_harness_command(out: &str, strict: bool) -> i32 {
         report_path.display(),
         strict,
     );
-    if strict && report.summary.failed > 0 {
+
+    // Coverage before budgets. A report can be green because everything passed
+    // or because half of it never ran, and on a three-OS matrix the second is
+    // the one that goes unnoticed (P8.F4.T2). This check is not conditioned on
+    // `strict`: report-only budgets are a policy choice about noise, not a
+    // licence for a workload to vanish on one OS.
+    let missing =
+        xtask::perf_trend::missing_required_names(&report, &required_measured_workloads());
+    let mut failed = !missing.is_empty();
+
+    // A report from a different OS than the one verifying it is a leftover, not
+    // a result. On a three-OS matrix that is how one job ends up "verifying"
+    // another job's numbers and passing without having measured anything.
+    let host = xtask::perf_harness::host_os();
+    if report.os != host {
+        eprintln!(
+            "perf harness verify failed: report was produced on os={} but this host is os={host} \
+             (run `cargo run -p xtask -- perf-harness` on this machine first)",
+            report.os
+        );
+        failed = true;
+    }
+    for row in &missing {
+        eprintln!(
+            "perf harness verify failed: required workload did not run on {}: {row}",
+            report.os
+        );
+    }
+    for row in xtask::perf_trend::unmeasured_names(&report) {
+        println!("  unmeasured {row}");
+    }
+    let synthetic = xtask::perf_trend::synthetic_names(&report);
+    if !synthetic.is_empty() {
+        println!(
+            "  synthetic stand-ins still in the report (labelled, not product measurements): {}",
+            synthetic.join(", ")
+        );
+    }
+
+    // Re-run the trend comparison against the archived report. Cheap — it
+    // re-reads numbers rather than re-measuring them — and it means a baseline
+    // edit can be checked without a 30-minute harness run.
+    let (baseline_status, _tolerance, regressions) = evaluate_perf_trend(&workspace_root, &report);
+    for regression in &regressions {
+        eprintln!("perf harness verify: REGRESSION {regression}");
+    }
+    println!("  baseline={}", baseline_status.as_str());
+
+    if failed || (strict && (report.summary.failed > 0 || !regressions.is_empty())) {
         1
     } else {
         0
@@ -1702,7 +2478,9 @@ fn run_legion_bench_command(
     out: &str,
     mode: &str,
     corpus: &str,
+    cassettes: &str,
     include_holdout: bool,
+    write_baseline: bool,
     strict: bool,
 ) -> i32 {
     let workspace_root = match env::current_dir() {
@@ -1712,62 +2490,51 @@ fn run_legion_bench_command(
             return 1;
         }
     };
-    let out_dir = workspace_root.join(out);
-    let mode = match parse_legion_bench_mode(mode) {
-        Ok(mode) => mode,
+    let execution = match parse_legion_bench_mode(mode) {
+        Ok(execution) => execution,
         Err(err) => {
             eprintln!("legion bench failed: {err}");
             return 1;
         }
     };
-    if mode == xtask::legion_bench::LegionBenchRunMode::LiveLocal {
-        let config = match xtask::legion_bench_live::live_config_from_env() {
+    // Replay dials nothing, so it must not demand endpoint configuration:
+    // requiring `LEGION_BENCH_MODEL` would make the offline CI gate depend on
+    // a local model being installed, which is the one thing recorded mode
+    // exists to avoid. The model name a replayed report cites comes from the
+    // committed baseline instead.
+    let config = if execution == xtask::legion_bench_live::ExecutionMode::Recorded {
+        let cassette_dir = workspace_root.join(cassettes);
+        let model = xtask::legion_bench_recorded::load_baseline(&cassette_dir)
+            .map(|baseline| baseline.model)
+            .unwrap_or_else(|_| "unbaselined".to_string());
+        xtask::legion_bench_live::LiveConfig {
+            endpoint: "replay://cassettes".to_string(),
+            model,
+            api_key: xtask::legion_bench_live::PLACEHOLDER_API_KEY.to_string(),
+        }
+    } else {
+        match xtask::legion_bench_live::live_config_from_env() {
             Ok(config) => config,
             Err(err) => {
                 eprintln!("legion bench failed: {err}");
                 return 1;
             }
-        };
-        let opts = xtask::legion_bench_live::LiveLocalOptions {
-            out_dir: out.to_string(),
-            corpus_dir: corpus.to_string(),
-            include_holdout,
-            strict,
-            config,
-        };
-        return xtask::legion_bench_live::run_live_local(&workspace_root, &opts);
-    }
-    let suite = xtask::legion_bench::plan_default_legion_bench_suite();
-    let git_sha = xtask::perf_harness::resolve_workspace_git_sha(&workspace_root);
-    let report =
-        xtask::legion_bench::plan_legion_bench_report("legion-desktop", &git_sha, mode, &suite);
-    let path = match xtask::legion_bench::write_report(&out_dir, &report) {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("legion bench failed: {err}");
-            return 1;
         }
     };
-    println!(
-        "legion bench: total={} passed={} failed={} regressed={} report={} strict={} mode={} provider={} fingerprint={}",
-        report.summary.total,
-        report.summary.passed,
-        report.summary.failed,
-        report.summary.regressed,
-        path.display(),
+    let opts = xtask::legion_bench_live::LiveLocalOptions {
+        out_dir: out.to_string(),
+        corpus_dir: corpus.to_string(),
+        cassette_dir: cassettes.to_string(),
+        execution,
+        include_holdout,
         strict,
-        report.mode.as_str(),
-        report.provider_profile,
-        report.suite_fingerprint,
-    );
-    if strict && report.summary.failed > 0 {
-        1
-    } else {
-        0
-    }
+        write_baseline,
+        config,
+    };
+    xtask::legion_bench_live::run_live_local(&workspace_root, &opts)
 }
 
-fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32 {
+fn run_verify_legion_bench_command(out: &str, corpus: &str, cassettes: &str, strict: bool) -> i32 {
     let workspace_root = match env::current_dir() {
         Ok(path) => path,
         Err(err) => {
@@ -1786,24 +2553,50 @@ fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32
             return 1;
         }
     };
-    // Live-local reports are verified against the corpus-derived suite (the
-    // task list the runner actually executed); recorded reports keep verifying
-    // against the in-code default suite, byte-identical to the historical gate.
-    let suite = if report.scoring_mode == xtask::legion_bench::SCORING_MODE_LIVE_LOCAL {
-        let corpus_dir = workspace_root.join(corpus);
-        match xtask::legion_bench_corpus::load_corpus(&corpus_dir) {
-            Ok(tasks) => xtask::legion_bench_corpus::corpus_suite(&tasks),
-            Err(err) => {
-                eprintln!("legion bench verify failed: {err}");
-                return 1;
-            }
+    // Every bench report now describes a real run of the corpus, so there is
+    // one suite to verify against: the one on disk.
+    let corpus_dir = workspace_root.join(corpus);
+    let suite = match xtask::legion_bench_corpus::load_corpus(&corpus_dir) {
+        Ok(tasks) => xtask::legion_bench_corpus::corpus_suite(&tasks),
+        Err(err) => {
+            eprintln!("legion bench verify failed: {err}");
+            return 1;
         }
-    } else {
-        xtask::legion_bench::plan_default_legion_bench_suite()
     };
     if let Err(err) = xtask::legion_bench::verify_legion_bench_report(&report, &suite) {
         eprintln!("legion bench verify failed: {err}");
         return 1;
+    }
+    // The regression gate. Structural checks above prove the report is
+    // internally consistent; only this proves the run still measures what it
+    // measured when the baseline was cut.
+    if report.scoring_mode == xtask::legion_bench::SCORING_MODE_RECORDED_REPLAY {
+        let cassette_dir = workspace_root.join(cassettes);
+        let baseline = match xtask::legion_bench_recorded::load_baseline(&cassette_dir) {
+            Ok(baseline) => baseline,
+            Err(err) => {
+                eprintln!("legion bench verify failed: {err}");
+                return 1;
+            }
+        };
+        if let Err(problems) = xtask::legion_bench_recorded::compare_to_baseline(&report, &baseline)
+        {
+            eprintln!(
+                "legion bench verify failed: recorded run differs from the committed baseline \
+                 ({} difference(s)):",
+                problems.len()
+            );
+            for problem in &problems {
+                eprintln!("  - {problem}");
+            }
+            return 1;
+        }
+        println!(
+            "legion bench verify: recorded run matches baseline {} (model={} arm={})",
+            xtask::legion_bench_recorded::baseline_path(&cassette_dir).display(),
+            baseline.model,
+            baseline.arm,
+        );
     }
     println!(
         "legion bench verify: total={} passed={} failed={} regressed={} skipped={} report={} strict={} mode={} provider={} fingerprint={}",
@@ -1818,7 +2611,12 @@ fn run_verify_legion_bench_command(out: &str, corpus: &str, strict: bool) -> i32
         report.provider_profile,
         report.suite_fingerprint,
     );
-    if strict && report.summary.failed > 0 {
+    // See `run_live_local`: a recorded run's failures are the reference
+    // model's, and the baseline comparison above is what gates them.
+    if strict
+        && report.summary.failed > 0
+        && report.scoring_mode != xtask::legion_bench::SCORING_MODE_RECORDED_REPLAY
+    {
         1
     } else {
         0
@@ -1867,6 +2665,39 @@ fn run_rust_analyzer_smoke_command() -> i32 {
     }
     println!("rust-analyzer smoke: all invocations passed");
     0
+}
+
+fn run_hostile_eval_live_command() -> i32 {
+    let args: &[&str] = &[
+        "test",
+        "-p",
+        "legion-app",
+        "--test",
+        "hostile_eval_live",
+        "--",
+        "--ignored",
+        "--nocapture",
+    ];
+    println!("hostile-eval-live: running cargo {}", args.join(" "));
+    // `--nocapture` so the SKIP lines reach the operator. A run that measured
+    // nothing and a run that measured everything both exit 0, and the only way
+    // to tell them apart is to read what the tests printed.
+    match process::Command::new("cargo").args(args).status() {
+        Ok(status) if status.success() => {
+            println!(
+                "hostile-eval-live: passed. Check the output above for SKIP lines --                  a skip means no model answered and no boundary was exercised."
+            );
+            0
+        }
+        Ok(status) => {
+            eprintln!("hostile-eval-live: a hostile eval failed with {status}");
+            status.code().unwrap_or(1)
+        }
+        Err(err) => {
+            eprintln!("hostile-eval-live: unable to spawn cargo: {err}");
+            1
+        }
+    }
 }
 
 fn run_verify_kanban_backlog_command(backlog_path: &str) -> i32 {
@@ -2076,6 +2907,26 @@ fn run_golden_path_4_command(
     code
 }
 
+fn run_windowed_gui_e2e_command(
+    out_dir: &str,
+    release: bool,
+    record_evidence: Option<&str>,
+) -> i32 {
+    let workspace_root = match env::current_dir() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("windowed-gui-e2e failed: unable to resolve current directory: {err}");
+            return 1;
+        }
+    };
+    let opts = xtask::windowed_gui_e2e::WindowedGuiE2eOptions {
+        out_dir: out_dir.to_string(),
+        release,
+        record_evidence: record_evidence.map(|s| s.to_string()),
+    };
+    xtask::windowed_gui_e2e::run_windowed_gui_e2e(&workspace_root, &opts)
+}
+
 fn run_golden_path_5_command(
     fixture_dir: &str,
     out_dir: &str,
@@ -2184,19 +3035,17 @@ fn run_verify_hostile_evals_command(out: &str) -> i32 {
     0
 }
 
-fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench::LegionBenchRunMode, String> {
+fn parse_legion_bench_mode(value: &str) -> Result<xtask::legion_bench_live::ExecutionMode, String> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "recorded" | "recorded_offline" | "offline" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::RecordedOffline)
+        "recorded" | "recorded_offline" | "offline" | "replay" => {
+            Ok(xtask::legion_bench_live::ExecutionMode::Recorded)
         }
-        "live" | "live_weekly" | "weekly" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::LiveWeekly)
-        }
-        "live-local" | "live_local" | "local" => {
-            Ok(xtask::legion_bench::LegionBenchRunMode::LiveLocal)
+        "record" => Ok(xtask::legion_bench_live::ExecutionMode::Record),
+        "live-local" | "live_local" | "local" | "live" => {
+            Ok(xtask::legion_bench_live::ExecutionMode::LiveLocal)
         }
         other => Err(format!(
-            "unknown legion-bench mode `{other}`; expected recorded, live, or live-local"
+            "unknown legion-bench mode `{other}`; expected recorded, record, or live-local"
         )),
     }
 }
@@ -2242,8 +3091,15 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
     let violations = validate_dependency_policy(&packages, &policy);
     let renderer_violations =
         validate_renderer_dependency_gate(&policy_text, &package_dependency_names);
+    let grapheme_violations = validate_grapheme_dependency_gate(&metadata, &policy_text);
     let parser_violations =
         validate_parser_dependency_gate(&policy_text, &package_dependency_names);
+    let plugin_runtime_adr = fs::read_to_string(workspace_root.join(PLUGIN_RUNTIME_ADR_PATH)).ok();
+    let plugin_runtime_violations = validate_plugin_runtime_dependency_gate(
+        &policy_text,
+        &package_dependency_names,
+        plugin_runtime_adr.as_deref(),
+    );
 
     let protocol_violations = validate_protocol_contracts(
         &workspace_root.join(DEFAULT_PROTOCOL_PATH),
@@ -2414,7 +3270,9 @@ fn run_check_deps(policy_path: &str) -> Result<(), String> {
 
     let mut all = violations;
     all.extend(renderer_violations);
+    all.extend(grapheme_violations);
     all.extend(parser_violations);
+    all.extend(plugin_runtime_violations);
     all.extend(protocol_violations);
     all.extend(phase3_violations);
     all.extend(phase4_violations);
@@ -2560,6 +3418,66 @@ fn validate_dependency_policy(
     issues
 }
 
+fn validate_grapheme_dependency_gate(metadata: &Metadata, policy_text: &str) -> Vec<String> {
+    const DEPENDENCY: &str = "unicode-segmentation";
+    let mut owners = Vec::new();
+    let workspace_members = metadata.workspace_members.iter().collect::<HashSet<_>>();
+    for package in &metadata.packages {
+        if !workspace_members.contains(&package.id) {
+            continue;
+        }
+        for dependency in &package.dependencies {
+            if dependency.name == DEPENDENCY
+                && dependency.kind == cargo_metadata::DependencyKind::Normal
+            {
+                owners.push((package.name.as_str(), dependency.req.to_string()));
+            }
+        }
+    }
+    let owners = owners
+        .into_iter()
+        .map(|(package, req)| (package.to_string(), req))
+        .collect::<Vec<_>>();
+    validate_grapheme_dependency_specs(&owners, policy_text)
+}
+
+fn validate_grapheme_dependency_specs(
+    owners: &[(String, String)],
+    policy_text: &str,
+) -> Vec<String> {
+    const DEPENDENCY: &str = "unicode-segmentation";
+    const REQUIRED: &str = "=1.13.2";
+    let mut issues = Vec::new();
+    if !policy_text.contains("unicode-segmentation = 1.13.2") {
+        issues.push(
+            "`plans/dependency-policy.md` must authorize `unicode-segmentation = 1.13.2` for `legion-text`"
+                .to_string(),
+        );
+    }
+    for (package, req) in owners {
+        if *package != "legion-text" {
+            issues.push(format!(
+                "`{package}` directly depends on `{DEPENDENCY}`; only `legion-text` may own it"
+            ));
+        } else if req != REQUIRED {
+            issues.push(format!(
+                "`legion-text` must pin `{DEPENDENCY}` to `{REQUIRED}`, found `{req}`"
+            ));
+        }
+    }
+    if !owners
+        .iter()
+        .any(|(package, req)| *package == "legion-text" && req == REQUIRED)
+    {
+        issues.push(
+            "`legion-text` must directly depend on pinned `unicode-segmentation = 1.13.2`"
+                .to_string(),
+        );
+    }
+    issues.sort();
+    issues
+}
+
 fn validate_renderer_dependency_gate(
     policy_text: &str,
     package_dependencies: &HashMap<String, HashSet<String>>,
@@ -2658,6 +3576,71 @@ fn validate_parser_dependency_gate(
     }
 
     issues.sort();
+    issues
+}
+
+/// Enforce that a gated runtime engine is admitted before it is depended on.
+///
+/// The check is silent while no workspace crate declares the engine — a policy
+/// entry for a dependency nobody has is not a violation. The moment some crate
+/// does declare it, three things must hold: the crate is on the allow-list, the
+/// policy text admits the engine, and the ratifying ADR exists and names it.
+/// Deleting the ADR or the policy clause while the dependency remains is
+/// therefore a `check-deps` failure, which is the ordering `P7.F1.T1` protects.
+fn validate_plugin_runtime_dependency_gate(
+    policy_text: &str,
+    package_dependencies: &HashMap<String, HashSet<String>>,
+    adr_text: Option<&str>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    let allowed_packages = PLUGIN_RUNTIME_ALLOWED_PACKAGES
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+
+    for engine in PLUGIN_RUNTIME_GATED_DEPS {
+        let mut declaring_packages = package_dependencies
+            .iter()
+            .filter(|(_, dependencies)| dependencies.contains(*engine))
+            .map(|(package, _)| package.as_str())
+            .collect::<Vec<_>>();
+        declaring_packages.sort();
+
+        if declaring_packages.is_empty() {
+            continue;
+        }
+
+        for package in &declaring_packages {
+            if !allowed_packages.contains(package) {
+                issues.push(format!(
+                    "workspace package `{package}` must not declare runtime engine `{engine}`; only {} may",
+                    PLUGIN_RUNTIME_ALLOWED_PACKAGES.join(", ")
+                ));
+            }
+        }
+
+        for marker in PLUGIN_RUNTIME_POLICY_MARKERS {
+            if !policy_text.contains(marker) {
+                issues.push(format!(
+                    "`plans/dependency-policy.md` must admit runtime engine `{engine}` with clause `{marker}`"
+                ));
+            }
+        }
+
+        match adr_text {
+            None => issues.push(format!(
+                "runtime engine `{engine}` is in the workspace but `{PLUGIN_RUNTIME_ADR_PATH}` is missing; the ADR must be merged before the runtime"
+            )),
+            Some(text) if !text.contains(engine) => issues.push(format!(
+                "`{PLUGIN_RUNTIME_ADR_PATH}` must explain the choice of runtime engine `{engine}`"
+            )),
+            Some(_) => {}
+        }
+    }
+
+    issues.sort();
+    issues.dedup();
     issues
 }
 
@@ -4040,6 +5023,10 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
                 "legion-ui".to_string(),
                 "egui".to_string(),
                 "eframe".to_string(),
+                // The generic gate permits renderer declarations in the
+                // desktop adapter. Production remains on egui::epaint until
+                // the separately authorized ADR-0053 patch is activated.
+                "epaint".to_string(),
             ]),
         ),
     ]);
@@ -4060,7 +5047,7 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
         "core crate renderer dependency violation should be reported, got: {issues:?}"
     );
 
-    let mut violating_dependencies = package_dependencies;
+    let mut violating_dependencies = package_dependencies.clone();
     violating_dependencies
         .get_mut("legion-ui")
         .expect("legion-ui fixture must exist")
@@ -4072,6 +5059,18 @@ fn renderer_dependency_gate_preserves_projection_boundary() {
             .any(|issue| issue.contains(DEFAULT_UI_MANIFEST_PATH) && issue.contains("egui")),
         "legion-ui renderer dependency violation should be reported, got: {issues:?}"
     );
+
+    for package in ["legion-editor", "legion-ui", "legion-app"] {
+        let mut violating_dependencies = package_dependencies.clone();
+        violating_dependencies.insert(package.to_string(), HashSet::from(["epaint".to_string()]));
+        let issues = validate_renderer_dependency_gate(&policy, &violating_dependencies);
+        assert!(
+            issues
+                .iter()
+                .any(|issue| { issue.contains(package) && issue.contains("epaint") }),
+            "{package} direct epaint edge should be rejected, got: {issues:?}"
+        );
+    }
 }
 
 #[test]
@@ -4115,6 +5114,87 @@ fn parser_dependency_gate_keeps_tree_sitter_in_index_crate() {
             .iter()
             .any(|issue| issue.contains("legion-desktop") && issue.contains("tree-sitter")),
         "desktop parser dependency violation should be reported, got: {issues:?}"
+    );
+}
+
+#[test]
+fn plugin_runtime_gate_requires_policy_and_adr_before_the_engine() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("xtask manifest should live under workspace root");
+    let policy = fs::read_to_string(workspace_root.join(DEFAULT_POLICY_PATH))
+        .expect("policy should be readable");
+    let adr = fs::read_to_string(workspace_root.join(PLUGIN_RUNTIME_ADR_PATH))
+        .expect("plugin runtime ADR should be readable");
+
+    let clean = HashMap::from([
+        (
+            "legion-plugin".to_string(),
+            HashSet::from(["legion-protocol".to_string(), "wasmtime".to_string()]),
+        ),
+        (
+            "legion-desktop".to_string(),
+            HashSet::from(["legion-app".to_string()]),
+        ),
+    ]);
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &clean, Some(&adr));
+    assert!(issues.is_empty(), "unexpected issues: {issues:?}");
+
+    // A workspace with no wasmtime at all needs no ADR and no policy clause.
+    let no_engine = HashMap::from([(
+        "legion-desktop".to_string(),
+        HashSet::from(["legion-app".to_string()]),
+    )]);
+    let issues = validate_plugin_runtime_dependency_gate("", &no_engine, None);
+    assert!(
+        issues.is_empty(),
+        "gate must stay silent when the engine is absent, got: {issues:?}"
+    );
+
+    // The engine present without the ADR is the ordering `P7.F1.T1` forbids.
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &clean, None);
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains(PLUGIN_RUNTIME_ADR_PATH)
+                && issue.contains("must be merged before the runtime")),
+        "missing ADR should be reported, got: {issues:?}"
+    );
+
+    // The engine present with an ADR that never mentions it is equally unratified.
+    let issues = validate_plugin_runtime_dependency_gate(
+        &policy,
+        &clean,
+        Some("# ADR about something else"),
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("must explain the choice of runtime engine `wasmtime`")),
+        "silent ADR should be reported, got: {issues:?}"
+    );
+
+    // The engine present while the policy stays silent about it.
+    let issues = validate_plugin_runtime_dependency_gate("", &clean, Some(&adr));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("must admit runtime engine `wasmtime`")),
+        "silent policy should be reported, got: {issues:?}"
+    );
+
+    // The engine spreading beyond `legion-plugin`.
+    let mut spread = clean;
+    spread
+        .get_mut("legion-desktop")
+        .expect("legion-desktop fixture must exist")
+        .insert("wasmtime".to_string());
+    let issues = validate_plugin_runtime_dependency_gate(&policy, &spread, Some(&adr));
+    assert!(
+        issues
+            .iter()
+            .any(|issue| issue.contains("legion-desktop") && issue.contains("wasmtime")),
+        "engine outside legion-plugin should be reported, got: {issues:?}"
     );
 }
 
@@ -4690,6 +5770,52 @@ Final gate outputs archived from current commands.
                 .contains(&("legion-ui".to_string(), "legion-project".to_string()))
         );
         assert!(policy.protocol_symbols().contains("WorkspaceId"));
+    }
+
+    #[test]
+    fn grapheme_dependency_gate_covers_pin_owner_and_policy_cases() {
+        let policy = "`unicode-segmentation = 1.13.2`";
+        assert!(
+            validate_grapheme_dependency_specs(
+                &[("legion-text".to_string(), "=1.13.2".to_string())],
+                policy
+            )
+            .is_empty()
+        );
+        assert!(
+            validate_grapheme_dependency_specs(
+                &[("legion-text".to_string(), "^1.13.2".to_string())],
+                policy
+            )
+            .iter()
+            .any(|issue| issue.contains("must pin"))
+        );
+        assert!(
+            validate_grapheme_dependency_specs(&[], policy)
+                .iter()
+                .any(|issue| issue.contains("must directly depend"))
+        );
+        assert!(
+            validate_grapheme_dependency_specs(
+                &[("legion-editor".to_string(), "=1.13.2".to_string())],
+                policy
+            )
+            .iter()
+            .any(|issue| issue.contains("only `legion-text`"))
+        );
+        assert!(
+            validate_grapheme_dependency_specs(&[], policy)
+                .iter()
+                .all(|issue| !issue.contains("only `legion-text`"))
+        );
+        assert!(
+            validate_grapheme_dependency_specs(
+                &[("legion-text".to_string(), "=1.13.2".to_string())],
+                ""
+            )
+            .iter()
+            .any(|issue| issue.contains("dependency-policy.md"))
+        );
     }
 
     #[test]

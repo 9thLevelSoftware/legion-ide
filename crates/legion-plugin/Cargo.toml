@@ -14,6 +14,13 @@ legion-platform = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 wasmtime = { workspace = true }
+# P7.F2.T1/T3: signed extension artifacts. `sha2` binds the manifest to the
+# exact bytes on offer; `base64` encodes trust anchors and detached signatures
+# the same way `legion-security` encodes policy-bundle ones. The Ed25519
+# signing/verification primitives themselves stay in `legion-security` so the
+# workspace keeps exactly one signing scheme (ADR-0042).
+base64 = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 wat = { workspace = true }

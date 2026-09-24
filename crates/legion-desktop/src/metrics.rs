@@ -53,6 +53,9 @@ impl Default for FrameTimingSummary {
 #[derive(Debug)]
 pub struct FrameTimingRecorder {
     origin: Instant,
+    // One paint can reflect several input frames. Keep the oldest unresolved
+    // arrival so the resulting sample measures the full input-to-paint span;
+    // later arrivals are already covered by that same painted snapshot.
     pending_input: Option<Instant>,
     // Bounded sliding windows. `VecDeque` gives O(1) front eviction once the
     // retention cap is reached (a `Vec` would shift every element on each evict).
@@ -79,7 +82,9 @@ impl FrameTimingRecorder {
 
     /// Records an input event timestamp without storing the input payload.
     pub fn record_input(&mut self, at: Instant) {
-        self.pending_input = Some(at);
+        if self.pending_input.is_none() {
+            self.pending_input = Some(at);
+        }
     }
 
     /// Records an input event at the current instant.

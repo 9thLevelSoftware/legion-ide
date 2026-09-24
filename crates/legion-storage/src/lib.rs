@@ -8,6 +8,10 @@ pub mod plan;
 /// Local file history metadata store.
 pub mod local_history;
 
+/// Crash-safe unsaved-buffer snapshots, kept out of session JSON.
+pub mod hot_exit;
+pub use hot_exit::{HOT_EXIT_SCHEMA_VERSION, HotExitSnapshot, HotExitStore};
+
 /// OS keyring-backed and in-memory secret stores for BYOK provider credentials.
 pub mod secrets;
 
@@ -19,6 +23,8 @@ pub use secrets::{
 
 /// Durable checkpoint store for workspace-level file-mutation rollback.
 pub mod checkpoint;
+
+mod fs_atomic;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
@@ -855,7 +861,7 @@ fn write_file_atomically(path: &Path, body: &[u8]) -> StorageResult<()> {
             message: format!("sync storage temp file failed: {err}"),
         })?;
         drop(file);
-        atomic_replace(&temp, path).map_err(|err| StorageError::Failed {
+        fs_atomic::atomic_replace(&temp, path).map_err(|err| StorageError::Failed {
             message: format!("replace storage file failed: {err}"),
         })?;
         sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
@@ -920,7 +926,9 @@ fn sha256_digest(message: &[u8]) -> [u8; 32] {
     }
     padded.extend_from_slice(&bit_len.to_be_bytes());
 
-    for chunk in padded.chunks_exact(64) {
+    // `as_chunks` rather than `chunks_exact`: the block size is a constant, so
+    // it belongs in the type rather than being re-checked on every access.
+    for chunk in padded.as_chunks::<64>().0 {
         let mut w = [0u32; 64];
         for (index, word) in w.iter_mut().enumerate().take(16) {
             let base = index * 4;
@@ -3112,7 +3120,7 @@ impl FileBackedStorage {
                 message: format!("sync storage temp file failed: {err}"),
             })?;
             drop(file);
-            atomic_replace(&temp, &self.path).map_err(|err| StorageError::Failed {
+            fs_atomic::atomic_replace(&temp, &self.path).map_err(|err| StorageError::Failed {
                 message: format!("replace storage file failed: {err}"),
             })?;
             sync_parent_directory_when_supported(parent).map_err(|err| StorageError::Failed {
@@ -3125,41 +3133,6 @@ impl FileBackedStorage {
         }
         write_result
     }
-}
-
-#[cfg(windows)]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
-    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn MoveFileExW(existing: *const u16, new_name: *const u16, flags: u32) -> i32;
-    }
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-
-    let ok = unsafe {
-        MoveFileExW(
-            wide(temp).as_ptr(),
-            wide(target).as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(windows))]
-fn atomic_replace(temp: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(temp, target)
 }
 
 #[cfg(unix)]
@@ -7684,6 +7657,8 @@ mod tests {
             tab_groups: Vec::new(),
             layout_splits: Vec::new(),
             explorer_expansion: Vec::new(),
+            canvas_nodes: Vec::new(),
+            canvas_edges: Vec::new(),
             panel_state: legion_protocol::SessionPanelState {
                 bottom_visible: true,
                 side_visible: true,
@@ -7693,6 +7668,8 @@ mod tests {
             },
             dock_layouts: Vec::new(),
             workbench_settings: legion_protocol::WorkbenchSettingsRecord::default(),
+            language_toolchain_settings: legion_protocol::LanguageToolchainSettingsRecord::default(
+            ),
             memory_snapshot_json: None,
             dirty_indicators: Vec::new(),
             saved_at: legion_protocol::TimestampMillis(12),
@@ -7794,6 +7771,69 @@ mod tests {
         }
 
         let _ = fs::remove_file(path);
+    }
+
+    /// The two vectors above are both shorter than one 64-byte block.
+    ///
+    /// `storage_checksum_is_collision_resistant_and_order_sensitive` pins the
+    /// empty string and `"abc"`, so the compression loop never ran more than
+    /// once and a defect in how a message is split into blocks would not have
+    /// shown up. This checksum decides whether a stored record is intact, so a
+    /// wrong-but-deterministic digest stays self-consistent, keeps every test
+    /// green, and only surfaces as a value no other implementation agrees with.
+    ///
+    /// Expected digests come from an independent implementation, not from this
+    /// code's own output, so the table cannot drift with what it checks.
+    #[test]
+    fn storage_checksum_matches_the_published_vectors_across_block_boundaries() {
+        // Block boundaries, counted from the padding rule rather than from the
+        // message length: a message is padded to the next size congruent to 56
+        // mod 64, then an eight-byte length is appended.
+        //
+        // 55 bytes is the largest that still fits one block; 56 is the smallest
+        // needing two; 64 lands exactly on the boundary, where the padding rules
+        // are easiest to get wrong. 112 is **two** blocks, not three -- an
+        // earlier version of this comment said three, and the arithmetic above
+        // is why it was wrong. Three compression rounds start at 120 bytes, so
+        // the 128-byte vector is the one that exercises them.
+        const VECTORS: [(&str, &str); 7] = [
+            (
+                "",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                "abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            (
+                "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+                "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+            ),
+            (
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "6836cf13bac400e9105071cd6af47084dfacad4e5e302c94bfed24e013afb73e",
+            ),
+        ];
+        for (message, expected) in VECTORS {
+            assert_eq!(
+                storage_checksum(message.as_bytes()),
+                expected,
+                "sha256 of a {}-byte message",
+                message.len()
+            );
+        }
     }
 
     #[test]

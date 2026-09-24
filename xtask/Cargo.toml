@@ -10,8 +10,12 @@ clap = { version = "=4.5.61", features = ["derive"] }
 cargo_metadata = { version = "=0.18.1" }
 serde = { workspace = true }
 toml = { workspace = true }
+serde_json = { workspace = true }
 legion-text = { workspace = true }
 legion-protocol = { workspace = true }
+# P9.F4.T3: the consented-corpus exporter must build its dataset with the same
+# pipeline the consent gate lives in, not a reimplementation of it.
+legion-observability = { workspace = true }
 legion-project = { workspace = true }
 legion-platform = { workspace = true }
 legion-security = { workspace = true }

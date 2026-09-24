@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-06",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:d8cddbb5209341ca",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\"name\": \"read\", \"arguments\": {\"path\": \"src/dates.js\"}}\n{\"name\": \"grep\", \"arguments\": {\"pattern\": \"isoWeek\", \"path\": \"src/dates.js\"}}\n{\"name\": \"edit-as-proposal\", \"arguments\": {\n  \"path\": \"src/dates.js\",\n  \"proposal_reason\": \"Fix `isoWeek` to return the ISO week-numbering year instead of the calendar year\",\n  \"proposal_title\": \"Fix `isoWeek` to return ISO week-numbering year\",\n  \"start_line\": <start-line-number>,  // This should be the line number where the `isoWeek` function starts\n  \"end_line\": <end-line-number>,  // This should be the line number where the `isoWeek` function ends\n  \"old_str\": \"<complete-iso-week-function>\",  // The complete content of the `isoWeek` function as it is\n  \"new_str\": \"<complete-iso-week-function-with-correct-year-calculation>\"  // The same function content but with the year calculation corrected\n}}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119477,
+        "id": "chatcmpl-9",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 226,
+          "prompt_tokens": 696,
+          "total_tokens": 922
+        }
+      }
+    }
+  ]
+}

@@ -6,14 +6,16 @@
 pub mod diagnostics;
 /// LSP feature request builders and projection module.
 pub mod features;
+/// Pinned npm archive descriptors approved for downloaded language servers.
+pub mod pinned_archives;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -34,8 +36,20 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
+use pinned_archives::is_sha256_digest;
+// Re-exported at the crate root so the extraction is transparent: every
+// existing `legion_lsp::NAME` path keeps resolving after the move.
+pub use pinned_archives::{
+    LspPinnedArchive, TYPESCRIPT_COMPILER_ARCHIVE, TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE,
+    TYPESCRIPT_LANGUAGE_SERVER_POLICY_GATE, is_exact_pinned_version,
+};
+
 /// Result type used by the LSP runtime crate.
 pub type LspRuntimeResult<T> = Result<T, LspRuntimeError>;
+
+/// Maximum serialized parameter bytes accepted for an inbound
+/// `workspace/applyEdit` request.
+pub const MAX_APPLY_EDIT_PARAMS_BYTES: usize = 256 * 1024;
 
 /// LSP runtime errors.
 #[derive(Debug, Error)]
@@ -256,6 +270,184 @@ pub struct LspServerProcessConfig {
     pub env: Vec<(String, String)>,
 }
 
+/// A normalized Node.js semantic version supplied by the runtime approval
+/// boundary. The app must obtain this by actually running its approved Node
+/// executable with `--version`; this crate only compares the supplied value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LspNodeVersion {
+    /// Major version.
+    pub major: u32,
+    /// Minor version.
+    pub minor: u32,
+    /// Patch version.
+    pub patch: u32,
+}
+
+impl LspNodeVersion {
+    /// Parses one exact `node --version` line: `vMAJOR.MINOR.PATCH` or
+    /// `MAJOR.MINOR.PATCH`, with one optional terminal LF or CRLF. Internal
+    /// newlines, trailing text, and prerelease/build suffixes are rejected.
+    pub fn parse(value: &str) -> Result<Self, LspDownloadedArtifactResolveError> {
+        let value = value
+            .strip_suffix("\r\n")
+            .or_else(|| value.strip_suffix('\n'))
+            .unwrap_or(value);
+        let value = value.strip_prefix('v').unwrap_or(value);
+        if value.is_empty() || value.contains('\r') || value.contains('\n') {
+            return Err(invalid_runtime_version(value));
+        }
+        let mut parts = value.split('.');
+        let parse_component = |component: Option<&str>| {
+            let component = component.ok_or_else(|| invalid_runtime_version(value))?;
+            if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(invalid_runtime_version(value));
+            }
+            component
+                .parse()
+                .map_err(|_| invalid_runtime_version(value))
+        };
+        let version = Self {
+            major: parse_component(parts.next())?,
+            minor: parse_component(parts.next())?,
+            patch: parse_component(parts.next())?,
+        };
+        if parts.next().is_some() {
+            return Err(invalid_runtime_version(value));
+        }
+        Ok(version)
+    }
+}
+
+/// Runtime required to execute a downloaded language-server artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LspArtifactRuntime {
+    /// A Node.js executable must launch the package entrypoint.
+    Node {
+        /// Minimum compatible Node version.
+        minimum_version: LspNodeVersion,
+    },
+}
+
+/// Packaging metadata for a downloaded language-server artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspDownloadedArtifactMetadata {
+    /// Package name recorded by the package manifest.
+    pub package_name: String,
+    /// Pinned package version.
+    pub version: String,
+    /// Archive format (for example, `tar.gz`).
+    pub archive_format: String,
+    /// Relative package root inside the materialized artifact directory.
+    pub package_root: PathBuf,
+    /// Relative executable entrypoint below `package_root`.
+    pub entrypoint: PathBuf,
+    /// Runtime required to execute the entrypoint.
+    pub runtime: LspArtifactRuntime,
+}
+
+/// Failure while resolving a materialized downloaded artifact into a process.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LspDownloadedArtifactResolveError {
+    /// A downloaded artifact has no materialized process configuration yet.
+    #[error("downloaded artifact is not materialized")]
+    ArtifactNotMaterialized,
+    /// The adapter is not a downloaded artifact.
+    #[error("adapter is not a downloaded artifact")]
+    NotDownloadedArtifact,
+    /// A required path was not absolute.
+    #[error("{field} must be an absolute path")]
+    RelativePath {
+        /// Path role that must be absolute.
+        field: &'static str,
+    },
+    /// A metadata path contains an unsafe component.
+    #[error("{field} contains an unsafe path component")]
+    UnsafePath {
+        /// Metadata path role containing the unsafe component.
+        field: &'static str,
+    },
+    /// A required path is absent.
+    #[error("{field} does not exist: {path}")]
+    MissingPath {
+        /// Path role that is missing.
+        field: &'static str,
+        /// Missing filesystem path.
+        path: PathBuf,
+    },
+    /// A required path is not the expected filesystem kind.
+    #[error("{field} is not the expected filesystem entry: {path}")]
+    WrongPathKind {
+        /// Path role with the wrong kind.
+        field: &'static str,
+        /// Filesystem path with the wrong kind.
+        path: PathBuf,
+    },
+    /// A runtime version string was malformed.
+    #[error("invalid Node runtime version: {value}")]
+    InvalidRuntimeVersion {
+        /// Runtime version text that failed parsing.
+        value: String,
+    },
+    /// The supplied runtime does not satisfy the descriptor minimum.
+    #[error("Node runtime {observed:?} is older than required {required:?}")]
+    RuntimeTooOld {
+        /// Descriptor minimum.
+        required: LspNodeVersion,
+        /// Version observed by the app-owned approval boundary.
+        observed: LspNodeVersion,
+    },
+    /// A path cannot be represented by the process configuration string API.
+    #[error("{field} contains a non-UTF-8 path")]
+    NonUtf8Path {
+        /// Path role containing non-UTF-8 data.
+        field: &'static str,
+    },
+    /// A canonical path uses an unsupported device namespace for Node.
+    #[error("{field} uses an unsupported Windows device path namespace")]
+    UnsupportedPathNamespace {
+        /// Path role using the unsupported namespace.
+        field: &'static str,
+    },
+    /// Catalog metadata omitted the package name.
+    #[error("downloaded artifact package_name is empty")]
+    EmptyPackageName,
+    /// Catalog metadata pads the package name with surrounding whitespace.
+    ///
+    /// The name is compared byte for byte against the artifact descriptor by
+    /// the app-owned startup authority, so a padded name that passed a
+    /// trimming check here would fail there instead, far from its cause.
+    #[error("downloaded artifact package_name {value:?} has surrounding whitespace")]
+    PaddedPackageName {
+        /// Package name text carrying leading or trailing whitespace.
+        value: String,
+    },
+    /// Catalog metadata omitted the package version.
+    #[error("downloaded artifact version is empty")]
+    EmptyPackageVersion,
+    /// Catalog metadata records a range or dist-tag instead of an exact pin.
+    #[error("downloaded artifact version {value:?} is not an exact pinned release")]
+    UnpinnedPackageVersion {
+        /// Version text that is not an exact pinned release.
+        value: String,
+    },
+    /// The catalog checksum is not a SHA-256 digest, so no materializer
+    /// receipt can be verified against it.
+    #[error("downloaded artifact catalog checksum is not a SHA-256 digest")]
+    InvalidCatalogChecksum,
+    /// The materializer receipt is not a SHA-256 digest.
+    #[error("verified artifact checksum is not a SHA-256 digest")]
+    InvalidChecksum,
+    /// The materializer receipt does not match the catalog checksum.
+    #[error("verified artifact checksum does not match catalog receipt")]
+    ChecksumMismatch,
+}
+
+fn invalid_runtime_version(value: &str) -> LspDownloadedArtifactResolveError {
+    LspDownloadedArtifactResolveError::InvalidRuntimeVersion {
+        value: value.to_string(),
+    }
+}
+
 /// Binary-resolution metadata for one language-server adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LspServerBinarySource {
@@ -274,6 +466,8 @@ pub enum LspServerBinarySource {
         checksum_sha256: String,
         /// Policy gate that authorizes the download path.
         policy_gate: String,
+        /// Pinned packaging and runtime metadata.
+        metadata: Box<LspDownloadedArtifactMetadata>,
     },
 }
 
@@ -290,7 +484,8 @@ pub struct LanguageServerAdapterPlan {
     pub display_name: String,
     /// Binary-resolution metadata.
     pub binary_source: LspServerBinarySource,
-    /// Materialized process launch configuration.
+    /// Declared process configuration; downloaded entries require resolution
+    /// after app-owned materialization before they can launch.
     pub process: LspServerProcessConfig,
     /// Whether this adapter is the primary choice for the language.
     pub is_primary: bool,
@@ -327,9 +522,9 @@ impl LanguageServerAdapterPlan {
         }
     }
 
-    /// Creates a policy-gated artifact-backed adapter entry.
+    /// Creates a package-backed adapter with explicit archive and runtime metadata.
     #[allow(clippy::too_many_arguments)]
-    pub fn downloaded_artifact(
+    pub fn downloaded_package_artifact(
         server_id: legion_protocol::LanguageServerId,
         workspace_id: legion_protocol::WorkspaceId,
         language_id: legion_protocol::LanguageId,
@@ -338,6 +533,7 @@ impl LanguageServerAdapterPlan {
         artifact_uri: impl Into<String>,
         checksum_sha256: impl Into<String>,
         policy_gate: impl Into<String>,
+        metadata: LspDownloadedArtifactMetadata,
         args: Vec<String>,
         is_primary: bool,
     ) -> Self {
@@ -353,6 +549,7 @@ impl LanguageServerAdapterPlan {
                 artifact_uri: artifact_uri.into(),
                 checksum_sha256: checksum_sha256.into(),
                 policy_gate: policy_gate.into(),
+                metadata: Box::new(metadata),
             },
             process: LspServerProcessConfig {
                 command: binary_name,
@@ -364,10 +561,211 @@ impl LanguageServerAdapterPlan {
         }
     }
 
-    /// Returns the materialized process configuration.
-    pub fn process_config(&self) -> LspServerProcessConfig {
-        self.process.clone()
+    /// Returns a launch-ready process configuration for system-path adapters.
+    pub fn process_config(
+        &self,
+    ) -> Result<LspServerProcessConfig, LspDownloadedArtifactResolveError> {
+        match &self.binary_source {
+            LspServerBinarySource::DownloadedArtifact { .. } => {
+                Err(LspDownloadedArtifactResolveError::ArtifactNotMaterialized)
+            }
+            LspServerBinarySource::SystemPath { .. } => Ok(self.process.clone()),
+        }
     }
+
+    /// Resolves a materialized package into a shell-free Node process config.
+    ///
+    /// The app-owned materializer must verify the archive and approve the Node
+    /// executable first, then pass its observed `node --version` output and
+    /// the verified artifact SHA-256 receipt here. Path and compatibility
+    /// checks still run; the receipt binds this resolve to that materializer
+    /// identity rather than trusting an arbitrary directory.
+    pub fn resolve_downloaded_process(
+        &self,
+        artifact_root: &Path,
+        approved_node: &Path,
+        observed_node_version: &str,
+        verified_artifact_sha256: &str,
+    ) -> Result<LspServerProcessConfig, LspDownloadedArtifactResolveError> {
+        let LspServerBinarySource::DownloadedArtifact {
+            checksum_sha256,
+            metadata,
+            ..
+        } = &self.binary_source
+        else {
+            return Err(LspDownloadedArtifactResolveError::NotDownloadedArtifact);
+        };
+        if metadata.package_name.trim().is_empty() {
+            return Err(LspDownloadedArtifactResolveError::EmptyPackageName);
+        }
+        // Validate the bytes that are reported and compared, not a trimmed
+        // copy of them. `startup_authority` compares `metadata.package_name`
+        // and `metadata.version` byte for byte against the pinned descriptor,
+        // so a check that silently normalizes here only relocates the failure
+        // to a site that cannot explain it.
+        if metadata.package_name != metadata.package_name.trim() {
+            return Err(LspDownloadedArtifactResolveError::PaddedPackageName {
+                value: metadata.package_name.clone(),
+            });
+        }
+        if metadata.version.trim().is_empty() {
+            return Err(LspDownloadedArtifactResolveError::EmptyPackageVersion);
+        }
+        // A catalog entry that names a range or a dist-tag names no particular
+        // artifact: what it resolves to changes under the product's feet, so a
+        // digest recorded beside it cannot mean anything. Reject the unpinned
+        // catalog entry before comparing any materializer receipt against it.
+        // A padded version is rejected here too: ` 6.0.0 ` is not the byte
+        // string the descriptor literal contains.
+        if !is_exact_pinned_version(&metadata.version) {
+            return Err(LspDownloadedArtifactResolveError::UnpinnedPackageVersion {
+                value: metadata.version.clone(),
+            });
+        }
+        if !is_sha256_digest(checksum_sha256) {
+            return Err(LspDownloadedArtifactResolveError::InvalidCatalogChecksum);
+        }
+        if !is_sha256_digest(verified_artifact_sha256) {
+            return Err(LspDownloadedArtifactResolveError::InvalidChecksum);
+        }
+        if !checksum_sha256.eq_ignore_ascii_case(verified_artifact_sha256) {
+            return Err(LspDownloadedArtifactResolveError::ChecksumMismatch);
+        }
+        if !artifact_root.is_absolute() {
+            return Err(LspDownloadedArtifactResolveError::RelativePath {
+                field: "artifact_root",
+            });
+        }
+        if !approved_node.is_absolute() {
+            return Err(LspDownloadedArtifactResolveError::RelativePath {
+                field: "approved_node",
+            });
+        }
+        validate_relative_artifact_path(&metadata.package_root, "package_root")?;
+        validate_relative_artifact_path(&metadata.entrypoint, "entrypoint")?;
+        let observed = LspNodeVersion::parse(observed_node_version)?;
+        let LspArtifactRuntime::Node { minimum_version } = &metadata.runtime;
+        if observed < *minimum_version {
+            return Err(LspDownloadedArtifactResolveError::RuntimeTooOld {
+                required: *minimum_version,
+                observed,
+            });
+        }
+        let root = artifact_root.canonicalize().map_err(|_| {
+            LspDownloadedArtifactResolveError::MissingPath {
+                field: "artifact_root",
+                path: artifact_root.to_path_buf(),
+            }
+        })?;
+        if !root.is_dir() {
+            return Err(LspDownloadedArtifactResolveError::WrongPathKind {
+                field: "artifact_root",
+                path: artifact_root.to_path_buf(),
+            });
+        }
+        let node = approved_node.canonicalize().map_err(|_| {
+            LspDownloadedArtifactResolveError::MissingPath {
+                field: "approved_node",
+                path: approved_node.to_path_buf(),
+            }
+        })?;
+        if !node.is_file() {
+            return Err(LspDownloadedArtifactResolveError::WrongPathKind {
+                field: "approved_node",
+                path: approved_node.to_path_buf(),
+            });
+        }
+        let package = root.join(&metadata.package_root);
+        let entrypoint = package.join(&metadata.entrypoint);
+        let package =
+            package
+                .canonicalize()
+                .map_err(|_| LspDownloadedArtifactResolveError::MissingPath {
+                    field: "package_root",
+                    path: package,
+                })?;
+        if !package.starts_with(&root) || !package.is_dir() {
+            return Err(LspDownloadedArtifactResolveError::WrongPathKind {
+                field: "package_root",
+                path: package,
+            });
+        }
+        let entrypoint = entrypoint.canonicalize().map_err(|_| {
+            LspDownloadedArtifactResolveError::MissingPath {
+                field: "entrypoint",
+                path: entrypoint,
+            }
+        })?;
+        if !entrypoint.starts_with(&package) || !entrypoint.is_file() {
+            return Err(LspDownloadedArtifactResolveError::WrongPathKind {
+                field: "entrypoint",
+                path: entrypoint,
+            });
+        }
+        let command = node.into_os_string().into_string().map_err(|_| {
+            LspDownloadedArtifactResolveError::NonUtf8Path {
+                field: "approved_node",
+            }
+        })?;
+        let entrypoint = node_compatible_path(&entrypoint, "entrypoint")?;
+        let mut args = self.process.args.clone();
+        args.insert(0, entrypoint);
+        if !args.iter().any(|arg| arg == "--stdio") {
+            args.push("--stdio".to_string());
+        }
+        Ok(LspServerProcessConfig {
+            command,
+            args,
+            cwd: self.process.cwd.clone(),
+            env: self.process.env.clone(),
+        })
+    }
+}
+
+/// Serialize a canonical Windows path in the form accepted by Node's module
+/// loader. Rust may expose canonical paths with the `\\?\` prefix; retain
+/// drive and UNC identity while rejecting arbitrary device namespaces.
+pub fn node_compatible_path(
+    path: &Path,
+    field: &'static str,
+) -> Result<String, LspDownloadedArtifactResolveError> {
+    let value = path
+        .to_str()
+        .ok_or(LspDownloadedArtifactResolveError::NonUtf8Path { field })?;
+    #[cfg(windows)]
+    {
+        if let Some(rest) = value.strip_prefix("\\\\?\\") {
+            if rest.len() >= 2 && rest.as_bytes()[1] == b':' {
+                return Ok(rest.to_string());
+            }
+            if let Some(unc) = rest.strip_prefix("UNC\\") {
+                return Ok(format!("\\\\{unc}"));
+            }
+            return Err(LspDownloadedArtifactResolveError::UnsupportedPathNamespace { field });
+        }
+        if value.starts_with("\\\\.\\") {
+            return Err(LspDownloadedArtifactResolveError::UnsupportedPathNamespace { field });
+        }
+    }
+    Ok(value.to_string())
+}
+
+fn validate_relative_artifact_path(
+    path: &Path,
+    field: &'static str,
+) -> Result<(), LspDownloadedArtifactResolveError> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return Err(LspDownloadedArtifactResolveError::UnsafePath { field });
+    }
+    if path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::CurDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(LspDownloadedArtifactResolveError::UnsafePath { field });
+    }
+    Ok(())
 }
 
 /// Resolution inputs for locating a rust-analyzer binary (design §5).
@@ -492,10 +890,57 @@ pub struct LanguageServerAdapterRegistry {
     adapters_by_language: HashMap<legion_protocol::LanguageId, Vec<LanguageServerAdapterPlan>>,
 }
 
+/// Errors raised while binding catalog adapters to an opened workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageServerRegistryError {
+    /// Workspace identity zero is reserved and cannot own an adapter plan.
+    InvalidWorkspaceId,
+}
+
 impl LanguageServerAdapterRegistry {
     /// Creates an empty adapter registry.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebinds the immutable catalog to one real opened workspace identity.
+    ///
+    /// The catalog is cloned and every plan receives `workspace_id`; the
+    /// source registry is never mutated. Registration preserves the existing
+    /// primary/name/server ordering. A zero workspace identity is rejected so
+    /// callers cannot create fixture-like or fabricated bindings.
+    pub fn for_workspace(
+        &self,
+        workspace_id: legion_protocol::WorkspaceId,
+    ) -> Result<Self, LanguageServerRegistryError> {
+        if workspace_id.0 == 0 {
+            return Err(LanguageServerRegistryError::InvalidWorkspaceId);
+        }
+        let mut bound = Self::new();
+        for adapters in self.adapters_by_language.values() {
+            for adapter in adapters {
+                let mut rebound = adapter.clone();
+                rebound.workspace_id = workspace_id;
+                bound.register(rebound);
+            }
+        }
+        Ok(bound)
+    }
+
+    /// Returns the ordered adapter plans for a real workspace and language.
+    pub fn adapters_for_workspace_language(
+        &self,
+        workspace_id: legion_protocol::WorkspaceId,
+        language_id: &legion_protocol::LanguageId,
+    ) -> Result<Vec<&LanguageServerAdapterPlan>, LanguageServerRegistryError> {
+        if workspace_id.0 == 0 {
+            return Err(LanguageServerRegistryError::InvalidWorkspaceId);
+        }
+        Ok(self
+            .adapters_for_language(language_id)
+            .into_iter()
+            .filter(|adapter| adapter.workspace_id == workspace_id)
+            .collect())
     }
 
     /// Registers one adapter entry.
@@ -524,11 +969,17 @@ impl LanguageServerAdapterRegistry {
     }
 
     /// Returns the launch configs for one workspace/language pair.
+    ///
+    /// This method materializes the requested adapter list as an all-or-error
+    /// operation. If any selected entry is a downloaded artifact that has not
+    /// been materialized, it returns `ArtifactNotMaterialized`; higher-level
+    /// app code must select an adapter before resolution rather than treating
+    /// this method as a fallback-selection policy.
     pub fn process_configs_for_workspace_language(
         &self,
         workspace_id: legion_protocol::WorkspaceId,
         language_id: &legion_protocol::LanguageId,
-    ) -> Vec<LspServerProcessConfig> {
+    ) -> Result<Vec<LspServerProcessConfig>, LspDownloadedArtifactResolveError> {
         self.adapters_for_language(language_id)
             .into_iter()
             .filter(|adapter| adapter.workspace_id == workspace_id)
@@ -567,6 +1018,7 @@ impl LanguageServerAdapterRegistry {
                         artifact_uri,
                         checksum_sha256,
                         policy_gate,
+                        metadata,
                     } => {
                         if air_gap {
                             denied_downloads.push(format!(
@@ -585,6 +1037,7 @@ impl LanguageServerAdapterRegistry {
                                     artifact_uri: artifact_uri.clone(),
                                     checksum_sha256: checksum_sha256.clone(),
                                     policy_gate: policy_gate.clone(),
+                                    metadata: metadata.clone(),
                                 },
                                 workspace_version_pin,
                                 is_primary: adapter.is_primary,
@@ -624,15 +1077,36 @@ impl LanguageServerAdapterRegistry {
             Vec::new(),
             true,
         ));
-        registry.register(LanguageServerAdapterPlan::system_path(
-            legion_protocol::LanguageServerId(102),
-            workspace_id,
-            legion_protocol::LanguageId("typescript".to_string()),
+        // The approved TypeScript/JavaScript server is a pinned npm archive:
+        // exact release, exact SHA-256, exact package root and entrypoint, and
+        // the Node minimum that release declares. Its peer compiler archive is
+        // pinned separately as `TYPESCRIPT_COMPILER_ARCHIVE`, because a
+        // descriptor describes one archive and one entrypoint only.
+        let typescript_family_server = |server_id: u64, language_id: &str, display_name: &str| {
+            LanguageServerAdapterPlan::downloaded_package_artifact(
+                legion_protocol::LanguageServerId(server_id),
+                workspace_id,
+                legion_protocol::LanguageId(language_id.to_string()),
+                display_name,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.package_name,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.archive_url,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.checksum_sha256,
+                TYPESCRIPT_LANGUAGE_SERVER_POLICY_GATE,
+                TYPESCRIPT_LANGUAGE_SERVER_ARCHIVE.metadata(),
+                vec!["--stdio".to_string()],
+                true,
+            )
+        };
+        registry.register(typescript_family_server(
+            102,
+            "typescript",
             "typescript-language-server",
-            "typescript-language-server",
-            vec!["--stdio".to_string()],
-            true,
         ));
+        // `tailwindcss-language-server` has no retained artifact and no
+        // verified digest on this host, so it stays an unpinned PATH lookup
+        // until an approved archive exists. It is the one documented
+        // exception in the TypeScript family, and the registry contract test
+        // names it explicitly rather than allowing it by a loose predicate.
         registry.register(LanguageServerAdapterPlan::system_path(
             legion_protocol::LanguageServerId(103),
             workspace_id,
@@ -642,15 +1116,47 @@ impl LanguageServerAdapterRegistry {
             vec!["--stdio".to_string()],
             false,
         ));
-        registry.register(LanguageServerAdapterPlan::downloaded_artifact(
+        // The TypeScript language server also serves JavaScript/JSX/TSX. Keep
+        // a distinct language identity so initialize/text-document language
+        // IDs are advertised correctly while reusing the same pinned archive.
+        registry.register(typescript_family_server(
+            106,
+            "javascript",
+            "typescript-language-server (JavaScript)",
+        ));
+        registry.register(typescript_family_server(
+            107,
+            "javascriptreact",
+            "typescript-language-server (JSX)",
+        ));
+        registry.register(typescript_family_server(
+            108,
+            "typescriptreact",
+            "typescript-language-server (TSX)",
+        ));
+        registry.register(LanguageServerAdapterPlan::downloaded_package_artifact(
             legion_protocol::LanguageServerId(104),
             workspace_id,
             legion_protocol::LanguageId("python".to_string()),
             "pyright",
             "pyright-langserver",
-            "https://registry.example.invalid/pyright-1.1.400.tgz",
-            "sha256:pyright-1.1.400",
+            "https://registry.npmjs.org/pyright/-/pyright-1.1.400.tgz",
+            "2ccba7af9c8b14bb81c8fa9bb558d8b5181b586ec4dfc448b78eb4209e7a429a",
             "policy://lsp-download/pyright",
+            LspDownloadedArtifactMetadata {
+                package_name: "pyright".to_string(),
+                version: "1.1.400".to_string(),
+                archive_format: "tar.gz".to_string(),
+                package_root: PathBuf::from("package"),
+                entrypoint: PathBuf::from("langserver.index.js"),
+                runtime: LspArtifactRuntime::Node {
+                    minimum_version: LspNodeVersion {
+                        major: 14,
+                        minor: 0,
+                        patch: 0,
+                    },
+                },
+            },
             vec!["--stdio".to_string()],
             true,
         ));
@@ -894,6 +1400,34 @@ pub struct LspCorrelatedResponse {
     pub result: Value,
     /// Optional JSON-RPC error payload.
     pub error: Option<Value>,
+}
+
+/// Bounded server-originated `workspace/applyEdit` request passed to an
+/// explicitly installed application callback.
+#[derive(Debug, Clone)]
+pub struct LspApplyWorkspaceEditRequest {
+    /// Original JSON-RPC request identifier, preserved for the response.
+    pub json_rpc_id: u64,
+    /// Bounded raw request parameters for app-owned proposal translation.
+    pub params: Value,
+    /// Active outgoing-request context, when the inbound request arrived while
+    /// `read_response_for` was waiting for a response.
+    pub context: Option<LspOperationContext>,
+    /// Deadline inherited from the active worker request, if any. The app
+    /// must use this same deadline for proposal authorization.
+    pub deadline: Option<std::time::Instant>,
+}
+
+/// Transport-only result for an inbound `workspace/applyEdit` request.
+///
+/// The callback reports whether an app authority accepted the request. The
+/// transport never applies the workspace edit itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspApplyWorkspaceEditResponse {
+    /// Whether the app authority accepted the edit for proposal processing.
+    pub applied: bool,
+    /// Bounded failure reason when `applied` is false.
+    pub failure_reason: Option<String>,
 }
 
 /// Cancellation metadata produced when a pending request is cancelled.
@@ -2688,32 +3222,45 @@ fn metadata_fingerprint(label: &str, input: &str) -> FileFingerprint {
     }
 }
 
-/// Normalizes the Windows drive designator of a `file:///` URI so the
-/// fingerprint is stable across the client's form and the server's echoed
-/// form (PKT-S3-WEDGE-R3 root cause #1).
+/// Canonicalize the hexadecimal casing of valid percent escapes in a file URI.
 ///
-/// rust-analyzer echoes document URIs in its own canonical form: a document
-/// opened as `file:///C:/…` comes back in `publishDiagnostics` as
-/// `file:///c:/…` (lowercase drive), and lsp-types' `Url` can also produce
-/// percent-encoded `%3A` colon forms. Hashing the raw string meant those
-/// forms never matched the URI the client opened: diagnostics sat in the
-/// notification buffer while every pump filter reported server silence.
-///
-/// Only the drive designator (`X:` or `X%3A` immediately after `file:///`)
-/// is normalized — lowercased with a literal colon. Path-component case is
-/// preserved: on case-sensitive filesystems it is real document identity.
-///
-/// Public so URI-keyed maps outside this crate (e.g. the rename-translation
-/// document resolver in `legion-app`) can normalize both their keys and
-/// their lookups to the same form.
+/// URI path spelling and literal percent characters remain unchanged; only a
+/// `%` followed by two hexadecimal digits is rewritten to uppercase hex. Other
+/// URI schemes are returned unchanged.
+pub fn normalize_file_uri_percent_escapes(uri: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    if !uri.starts_with("file://") {
+        return Cow::Borrowed(uri);
+    }
+    let bytes = uri.as_bytes();
+    let mut normalized = None;
+    for index in 0..bytes.len().saturating_sub(2) {
+        if bytes[index] != b'%'
+            || !bytes[index + 1].is_ascii_hexdigit()
+            || !bytes[index + 2].is_ascii_hexdigit()
+        {
+            continue;
+        }
+        let output = normalized.get_or_insert_with(|| uri.to_string());
+        output.replace_range(
+            index + 1..index + 3,
+            &uri[index + 1..index + 3].to_ascii_uppercase(),
+        );
+    }
+    normalized.map_or(Cow::Borrowed(uri), Cow::Owned)
+}
+
+/// Normalize the Windows drive designator of a `file:///` URI after
+/// canonicalizing percent-escape hex casing.
 pub fn normalize_file_uri_drive(uri: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
-    let Some(rest) = uri.strip_prefix("file:///") else {
-        return Cow::Borrowed(uri);
+    let normalized = normalize_file_uri_percent_escapes(uri);
+    let Some(rest) = normalized.strip_prefix("file:///") else {
+        return normalized;
     };
     let bytes = rest.as_bytes();
     if bytes.is_empty() || !bytes[0].is_ascii_alphabetic() {
-        return Cow::Borrowed(uri);
+        return normalized;
     }
     let drive = bytes[0].to_ascii_lowercase() as char;
     // `X:` form — a path segment is only a drive designator with the colon.
@@ -2721,13 +3268,13 @@ pub fn normalize_file_uri_drive(uri: &str) -> std::borrow::Cow<'_, str> {
         if bytes[0].is_ascii_uppercase() {
             return Cow::Owned(format!("file:///{drive}{}", &rest[1..]));
         }
-        return Cow::Borrowed(uri);
+        return normalized;
     }
     // `X%3A` form (percent-encoded colon, either hex case).
     if rest.len() >= 4 && rest[1..4].eq_ignore_ascii_case("%3a") {
         return Cow::Owned(format!("file:///{drive}:{}", &rest[4..]));
     }
-    Cow::Borrowed(uri)
+    normalized
 }
 
 /// Returns the stable fingerprint used to key `publishDiagnostics` records by URI.
@@ -2748,6 +3295,24 @@ pub fn lsp_diagnostic_uri_fingerprint(uri: &str) -> FileFingerprint {
 // Process-backed stdio transport (WS03.T1).
 // -----------------------------------------------------------------------------
 
+/// Count cap on parsed envelopes waiting between the stdout reader and the
+/// session. Memory is bounded separately by
+/// [`STDOUT_READER_QUEUED_BYTE_BUDGET`].
+pub const STDOUT_READER_QUEUE_CAP: usize = 8;
+
+/// Maximum parsed payload bytes retained in the stdout mailbox.
+///
+/// One in-flight frame may exceed this when the mailbox is empty so a single
+/// large response (up to [`LspFramer::MAX_FRAME_PAYLOAD_BYTES`]) can still
+/// be delivered. Combined with the count cap this replaces an unbounded
+/// `mpsc` that could retain every boxed 64 MiB envelope.
+pub const STDOUT_READER_QUEUED_BYTE_BUDGET: usize = 2 * 1024 * 1024;
+
+/// How long teardown waits for the stdout reader after dropping the mailbox
+/// and signalling the process tree. A grandchild that still holds stdout
+/// after a failed tree kill must not hang session reset forever.
+const STDOUT_READER_JOIN_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Message produced by the background stdout reader thread and consumed by
 /// the session on the request-driving thread. Carrying parsed frames over a
 /// channel decouples the (blocking) pipe read from the caller, so a fully
@@ -2755,11 +3320,66 @@ pub fn lsp_diagnostic_uri_fingerprint(uri: &str) -> FileFingerprint {
 /// blocking a pipe read that `std` cannot time out.
 enum StdoutReaderEvent {
     /// A successfully framed and parsed JSON-RPC envelope.
-    Frame(Box<JsonRpcEnvelope>),
+    Frame {
+        envelope: Box<JsonRpcEnvelope>,
+        payload_bytes: usize,
+    },
     /// The peer closed stdout cleanly (clean EOF between frames).
     Eof,
     /// A framing or parse error terminated the reader.
     Err(Box<LspRuntimeError>),
+}
+
+/// Credits for parsed payload sitting in the stdout mailbox.
+struct MailboxBudget {
+    queued_bytes: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl MailboxBudget {
+    fn new() -> Self {
+        Self {
+            queued_bytes: Mutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn lock_queued_bytes(&self) -> std::sync::MutexGuard<'_, usize> {
+        self.queued_bytes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Reserve `n` bytes. An empty mailbox always accepts one frame so a
+    /// single large response can still be delivered. Returns `false` when
+    /// teardown has asked the reader to stop.
+    fn acquire(&self, n: usize, stop: &AtomicBool) -> bool {
+        let mut guard = self.lock_queued_bytes();
+        loop {
+            if stop.load(Ordering::Acquire) {
+                return false;
+            }
+            if *guard == 0 || *guard + n <= STDOUT_READER_QUEUED_BYTE_BUDGET {
+                *guard = guard.saturating_add(n);
+                return true;
+            }
+            let (next, _) = self
+                .cv
+                .wait_timeout(guard, Duration::from_millis(50))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
+        }
+    }
+
+    fn release(&self, n: usize) {
+        let mut guard = self.lock_queued_bytes();
+        *guard = guard.saturating_sub(n);
+        self.cv.notify_all();
+    }
+
+    fn wake(&self) {
+        self.cv.notify_all();
+    }
 }
 
 /// Background reader that owns the child's stdout pipe and forwards parsed
@@ -2800,6 +3420,8 @@ pub struct LspReaderStatsSnapshot {
     pub payload_bytes: u64,
     /// Terminal event that ended the reader thread, if it has ended.
     pub terminal: Option<LspReaderTerminal>,
+    /// Teardown could not confirm that descendants holding stdout were killed.
+    pub tree_kill_failed: bool,
 }
 
 /// Shared counters written by the reader thread and snapshot by the session.
@@ -2810,6 +3432,7 @@ struct ReaderStatsShared {
     frames_forwarded: AtomicU64,
     payload_bytes: AtomicU64,
     terminal: Mutex<Option<LspReaderTerminal>>,
+    tree_kill_failed: AtomicBool,
 }
 
 impl ReaderStatsShared {
@@ -2818,7 +3441,13 @@ impl ReaderStatsShared {
             frames_forwarded: self.frames_forwarded.load(Ordering::Acquire),
             payload_bytes: self.payload_bytes.load(Ordering::Acquire),
             terminal: self.terminal.lock().map_or(None, |slot| slot.clone()),
+            tree_kill_failed: self.tree_kill_failed.load(Ordering::Acquire),
         }
+    }
+
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn record_tree_kill_failure(&self) {
+        self.tree_kill_failed.store(true, Ordering::Release);
     }
 }
 
@@ -2852,12 +3481,34 @@ pub struct LspStdioProcess {
     stderr: Option<ChildStderr>,
     reader: Option<StdoutReader>,
     reader_stats: Arc<ReaderStatsShared>,
+    mailbox_budget: Arc<MailboxBudget>,
+    reader_stop: Arc<AtomicBool>,
+    /// `true` only when this handle spawned the child in its own process
+    /// group via [`spawn_stdio_child`]. [`Self::new`] wraps an arbitrary
+    /// `Child` and must not SIGKILL `-pid` as if it were a group leader.
+    /// Windows stores that ownership on `windows_job` instead.
+    #[cfg(unix)]
+    owns_process_group: bool,
+    #[cfg(windows)]
+    windows_job: Option<WindowsStdioJob>,
     killed: bool,
 }
 
 impl LspStdioProcess {
     /// Wraps an already-spawned child with captured pipes.
+    ///
+    /// This constructor does **not** put the child in its own process group.
+    /// Teardown therefore kills only the direct child on Unix. Prefer
+    /// [`LspStdioLauncher`] when the handle should own the descendant tree.
     pub fn new(child: Child) -> LspRuntimeResult<Self> {
+        Self::from_child(child, false)
+    }
+
+    fn from_supervised_child(child: Child) -> LspRuntimeResult<Self> {
+        Self::from_child(child, true)
+    }
+
+    fn from_child(child: Child, owns_process_group: bool) -> LspRuntimeResult<Self> {
         let mut child = child;
         let stdin = child.stdin.take().ok_or(LspRuntimeError::StdioIo {
             message: "child stdin unavailable".to_string(),
@@ -2867,15 +3518,40 @@ impl LspStdioProcess {
         })?;
         let stderr = child.stderr.take();
         let reader_stats = Arc::new(ReaderStatsShared::default());
-        let reader = StdoutReader::spawn(stdout, Arc::clone(&reader_stats))?;
+        let mailbox_budget = Arc::new(MailboxBudget::new());
+        let reader_stop = Arc::new(AtomicBool::new(false));
+        let reader = StdoutReader::spawn(
+            stdout,
+            Arc::clone(&reader_stats),
+            Arc::clone(&mailbox_budget),
+            Arc::clone(&reader_stop),
+        )?;
+        #[cfg(windows)]
+        let windows_job = if owns_process_group {
+            assign_windows_stdio_job(&child)
+        } else {
+            None
+        };
         Ok(Self {
             child: Some(child),
             stdin: Some(stdin),
             stderr,
             reader: Some(reader),
             reader_stats,
+            mailbox_budget,
+            reader_stop,
+            #[cfg(unix)]
+            owns_process_group,
+            #[cfg(windows)]
+            windows_job,
             killed: false,
         })
+    }
+
+    fn release_mailbox(&self, event: &StdoutReaderEvent) {
+        if let StdoutReaderEvent::Frame { payload_bytes, .. } = event {
+            self.mailbox_budget.release(*payload_bytes);
+        }
     }
 
     /// Snapshot of the stdout reader thread's counters (frames forwarded,
@@ -2926,17 +3602,23 @@ impl LspStdioProcess {
     /// [`Self::read_envelope_until`] when an unresponsive server must be
     /// bounded by a deadline.
     pub fn read_envelope(&mut self) -> LspRuntimeResult<Option<JsonRpcEnvelope>> {
-        let reader = self
-            .reader
-            .as_ref()
-            .ok_or(LspRuntimeError::SessionNotRunning)?;
-        match reader.rx.recv() {
-            Ok(StdoutReaderEvent::Frame(envelope)) => Ok(Some(*envelope)),
-            Ok(StdoutReaderEvent::Eof) => Ok(None),
-            Ok(StdoutReaderEvent::Err(err)) => Err(*err),
-            // The reader thread ended without a terminal message we observed
-            // (e.g. it was already drained); treat a closed channel as EOF.
-            Err(_) => Ok(None),
+        let event = {
+            let reader = self
+                .reader
+                .as_ref()
+                .ok_or(LspRuntimeError::SessionNotRunning)?;
+            match reader.rx.recv() {
+                Ok(event) => event,
+                // The reader thread ended without a terminal message we observed
+                // (e.g. it was already drained); treat a closed channel as EOF.
+                Err(_) => return Ok(None),
+            }
+        };
+        self.release_mailbox(&event);
+        match event {
+            StdoutReaderEvent::Frame { envelope, .. } => Ok(Some(*envelope)),
+            StdoutReaderEvent::Eof => Ok(None),
+            StdoutReaderEvent::Err(err) => Err(*err),
         }
     }
 
@@ -2946,18 +3628,24 @@ impl LspStdioProcess {
     /// when the server goes fully silent, because the actual blocking pipe
     /// read happens on a background thread and this only waits on a channel.
     pub fn read_envelope_until(&mut self, deadline: Instant) -> LspRuntimeResult<LspReadOutcome> {
-        let reader = self
-            .reader
-            .as_ref()
-            .ok_or(LspRuntimeError::SessionNotRunning)?;
         let remaining = deadline.saturating_duration_since(Instant::now());
-        match reader.rx.recv_timeout(remaining) {
-            Ok(StdoutReaderEvent::Frame(envelope)) => Ok(LspReadOutcome::Envelope(*envelope)),
-            Ok(StdoutReaderEvent::Eof) => Ok(LspReadOutcome::Eof),
-            Ok(StdoutReaderEvent::Err(err)) => Err(*err),
-            Err(RecvTimeoutError::Timeout) => Ok(LspReadOutcome::TimedOut),
-            // Reader thread ended; treat a closed channel as EOF.
-            Err(RecvTimeoutError::Disconnected) => Ok(LspReadOutcome::Eof),
+        let event = {
+            let reader = self
+                .reader
+                .as_ref()
+                .ok_or(LspRuntimeError::SessionNotRunning)?;
+            match reader.rx.recv_timeout(remaining) {
+                Ok(event) => event,
+                Err(RecvTimeoutError::Timeout) => return Ok(LspReadOutcome::TimedOut),
+                // Reader thread ended; treat a closed channel as EOF.
+                Err(RecvTimeoutError::Disconnected) => return Ok(LspReadOutcome::Eof),
+            }
+        };
+        self.release_mailbox(&event);
+        match event {
+            StdoutReaderEvent::Frame { envelope, .. } => Ok(LspReadOutcome::Envelope(*envelope)),
+            StdoutReaderEvent::Eof => Ok(LspReadOutcome::Eof),
+            StdoutReaderEvent::Err(err) => Err(*err),
         }
     }
 
@@ -2968,13 +3656,20 @@ impl LspStdioProcess {
     /// diagnostic notification draining (e.g. the session worker thread) should
     /// call this in a loop, breaking on `None`.
     pub fn try_recv_envelope(&mut self) -> Option<LspRuntimeResult<JsonRpcEnvelope>> {
-        let reader = self.reader.as_ref()?;
-        match reader.rx.try_recv() {
-            Ok(StdoutReaderEvent::Frame(envelope)) => Some(Ok(*envelope)),
-            Ok(StdoutReaderEvent::Eof) => None,
-            Ok(StdoutReaderEvent::Err(err)) => Some(Err(*err)),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => None,
+        let event = {
+            let reader = self.reader.as_ref()?;
+            match reader.rx.try_recv() {
+                Ok(event) => event,
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => {
+                    return None;
+                }
+            }
+        };
+        self.release_mailbox(&event);
+        match event {
+            StdoutReaderEvent::Frame { envelope, .. } => Some(Ok(*envelope)),
+            StdoutReaderEvent::Eof => None,
+            StdoutReaderEvent::Err(err) => Some(Err(*err)),
         }
     }
 
@@ -3001,22 +3696,29 @@ impl LspProcessHandle for LspStdioProcess {
 
     fn kill(&mut self) {
         self.killed = true;
+        self.reader_stop.store(true, Ordering::Release);
+        self.mailbox_budget.wake();
         if let Some(child) = self.child.as_mut() {
-            // Best-effort kill + reap so the test process does not
-            // leave a zombie if it exits between kill and drop.
-            let _ = child.kill();
-            let _ = child.wait();
+            // Kill the process group (Unix, when we created it) or the Job
+            // Object / process tree (Windows) before joining the stdout
+            // reader. A grandchild that inherited stdout keeps the pipe open
+            // after `Child::kill`, so `read_lsp_frame` never returns.
+            #[cfg(windows)]
+            terminate_stdio_process_tree(child, self.windows_job.take(), &self.reader_stats);
+            #[cfg(unix)]
+            terminate_stdio_process_tree(child, self.owns_process_group);
         }
-        // Drop pipes so any blocked reader/writer unblocks.
         self.stdin.take();
         self.stderr.take();
-        // The child is dead, so its stdout closes; the reader thread observes
-        // EOF and exits. Drop the receiver and join the thread so it does not
-        // outlive the process handle.
-        if let Some(mut reader) = self.reader.take()
-            && let Some(handle) = reader.handle.take()
-        {
-            let _ = handle.join();
+        // Drop the mailbox *before* joining. A reader parked on `send` after
+        // the count cap is reached is only unblocked when `rx` is dropped.
+        // Joining first deadlocks teardown.
+        if let Some(reader) = self.reader.take() {
+            let StdoutReader { rx, handle } = reader;
+            drop(rx);
+            if let Some(handle) = handle {
+                join_stdout_reader(handle, &self.reader_stats);
+            }
         }
     }
 }
@@ -3027,21 +3729,35 @@ impl StdoutReader {
     /// EOF or a framing/parse error. Counters and the terminal event are
     /// recorded in `stats` so a dead reader is observable after the fact
     /// (PKT-S3-WEDGE-R3).
-    fn spawn(stdout: ChildStdout, stats: Arc<ReaderStatsShared>) -> LspRuntimeResult<Self> {
-        let (tx, rx) = mpsc::channel();
+    fn spawn(
+        stdout: ChildStdout,
+        stats: Arc<ReaderStatsShared>,
+        budget: Arc<MailboxBudget>,
+        stop: Arc<AtomicBool>,
+    ) -> LspRuntimeResult<Self> {
+        let (tx, rx) = mpsc::sync_channel(STDOUT_READER_QUEUE_CAP);
         let handle = std::thread::Builder::new()
             .name("legion-lsp-stdout-reader".to_string())
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 loop {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
                     let event = match read_lsp_frame(&mut reader) {
                         Ok(Some(payload)) => match serde_json::from_slice(&payload) {
                             Ok(envelope) => {
+                                if !budget.acquire(payload.len(), &stop) {
+                                    return;
+                                }
                                 stats.frames_forwarded.fetch_add(1, Ordering::AcqRel);
                                 stats
                                     .payload_bytes
                                     .fetch_add(payload.len() as u64, Ordering::AcqRel);
-                                StdoutReaderEvent::Frame(Box::new(envelope))
+                                StdoutReaderEvent::Frame {
+                                    envelope: Box::new(envelope),
+                                    payload_bytes: payload.len(),
+                                }
                             }
                             Err(err) => StdoutReaderEvent::Err(Box::new(err.into())),
                         },
@@ -3052,7 +3768,7 @@ impl StdoutReader {
                     // consumer that observes the channel event also observes
                     // the stats.
                     let terminal_event = match &event {
-                        StdoutReaderEvent::Frame(_) => None,
+                        StdoutReaderEvent::Frame { .. } => None,
                         StdoutReaderEvent::Eof => Some(LspReaderTerminal::Eof),
                         StdoutReaderEvent::Err(err) => {
                             Some(LspReaderTerminal::Error(err.to_string()))
@@ -3064,8 +3780,17 @@ impl StdoutReader {
                     {
                         *slot = Some(terminal_event);
                     }
-                    // If the receiver is gone the session no longer cares; stop.
+                    // Blocking send applies backpressure when the session is
+                    // not draining. Dropping the receiver (session kill)
+                    // unblocks this with an error so the thread can exit.
+                    let payload_bytes = match &event {
+                        StdoutReaderEvent::Frame { payload_bytes, .. } => Some(*payload_bytes),
+                        _ => None,
+                    };
                     if tx.send(event).is_err() || terminal {
+                        if let Some(payload_bytes) = payload_bytes {
+                            budget.release(payload_bytes);
+                        }
                         return;
                     }
                 }
@@ -3125,7 +3850,7 @@ impl LspStdioSpawner for LspStdioLauncher {
         config: &LspServerProcessConfig,
     ) -> LspRuntimeResult<LspStdioProcess> {
         let child = spawn_stdio_child(config)?;
-        LspStdioProcess::new(child)
+        LspStdioProcess::from_supervised_child(child)
     }
 }
 
@@ -3153,9 +3878,144 @@ fn spawn_stdio_child(config: &LspServerProcessConfig) -> LspRuntimeResult<Child>
     for (key, value) in &config.env {
         command.env(key, value);
     }
+    // Put the child in its own process group so teardown can SIGKILL
+    // descendants that inherited stdout (see `terminate_stdio_process_tree`).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     command.spawn().map_err(|err| LspRuntimeError::SpawnFailed {
         code: format!("stdio.spawn_failed: {err}"),
     })
+}
+
+/// Forcibly terminates the stdio child and any descendants that still hold
+/// the inherited stdout write end, then reaps the direct child.
+#[cfg(unix)]
+fn terminate_stdio_process_tree(child: &mut Child, owns_process_group: bool) {
+    if owns_process_group {
+        // Negative pid addresses the group this handle created in
+        // `spawn_stdio_child`. Do not signal `-pid` for a `Child` wrapped
+        // by [`LspStdioProcess::new`]; that process is not a group leader.
+        let pid = child.id() as i32;
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(-pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn terminate_stdio_process_tree(
+    child: &mut Child,
+    job: Option<WindowsStdioJob>,
+    stats: &ReaderStatsShared,
+) {
+    let had_spawn_job = job.is_some();
+    // Closing a KILL_ON_JOB_CLOSE job takes down every descendant that
+    // inherited membership from the supervised spawn.
+    drop(job);
+    if !had_spawn_job && !terminate_windows_process_tree(child.id()) {
+        // taskkill.exe missing, spawn denied, or non-zero exit: last-resort
+        // Job Object covers the direct child only. Existing grandchildren
+        // are not pulled in, so the tree kill stays unconfirmed.
+        drop(assign_windows_stdio_job(child));
+        stats.record_tree_kill_failure();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Joins the stdout reader, giving up after [`STDOUT_READER_JOIN_TIMEOUT`]
+/// so a failed tree-kill cannot hang session reset.
+fn join_stdout_reader(handle: JoinHandle<()>, stats: &ReaderStatsShared) {
+    let (done_tx, done_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    if done_rx.recv_timeout(STDOUT_READER_JOIN_TIMEOUT).is_err()
+        && stats.tree_kill_failed.load(Ordering::Acquire)
+        && let Ok(mut slot) = stats.terminal.lock()
+        && slot.is_none()
+    {
+        *slot = Some(LspReaderTerminal::Error(
+            "stdout reader join timed out after unconfirmed process-tree kill".to_string(),
+        ));
+    }
+}
+
+#[cfg(windows)]
+fn terminate_windows_process_tree(pid: u32) -> bool {
+    let taskkill = std::env::var_os("SYSTEMROOT")
+        .or_else(|| std::env::var_os("SystemRoot"))
+        .map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"));
+    let Some(taskkill) = taskkill.filter(|path| path.is_file()) else {
+        return false;
+    };
+    Command::new(taskkill)
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+struct WindowsStdioJob(::windows::Win32::Foundation::HANDLE);
+
+// Exclusive owner of the job-object handle. The raw HANDLE is !Send
+// because it is a pointer newtype; this wrapper is Send so
+// LspStdioProcess can satisfy LspProcessHandle: Send.
+#[cfg(windows)]
+unsafe impl Send for WindowsStdioJob {}
+
+#[cfg(windows)]
+impl Drop for WindowsStdioJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ::windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn assign_windows_stdio_job(child: &Child) -> Option<WindowsStdioJob> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows::core::PCWSTR;
+
+    unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+        .is_err()
+        {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        // windows 0.62 `HANDLE` is a `*mut c_void` newtype; `as _` also
+        // covers the `isize` spelling used by some crate revisions.
+        let process = HANDLE(child.as_raw_handle() as _);
+        if AssignProcessToJobObject(job, process).is_err() {
+            let _ = CloseHandle(job);
+            return None;
+        }
+        Some(WindowsStdioJob(job))
+    }
 }
 
 /// Metadata-only progress notification observed while reading LSP frames.
@@ -3268,6 +4128,10 @@ pub struct LspStdioSession {
     /// [`Self::read_response_for`] so an out-of-order response is never
     /// dropped and its request left stranded.
     response_stash: HashMap<u64, LspCorrelatedResponse>,
+    /// Optional app-owned bridge for server-originated workspace edits.
+    apply_edit_handler: Option<
+        Box<dyn FnMut(LspApplyWorkspaceEditRequest) -> LspApplyWorkspaceEditResponse + Send>,
+    >,
 }
 
 impl LspStdioSession {
@@ -3311,7 +4175,25 @@ impl LspStdioSession {
             diagnostic_notifications: Vec::new(),
             raw_diagnostic_params: HashMap::new(),
             response_stash: HashMap::new(),
+            apply_edit_handler: None,
         })
+    }
+
+    /// Installs the explicit app-owned handler for inbound `workspace/applyEdit`.
+    ///
+    /// The callback receives bounded metadata and parameters only; it is
+    /// responsible for routing any edit through proposal authority. Without a
+    /// handler, the transport returns an explicit negative result.
+    pub fn set_apply_edit_handler<F>(&mut self, handler: F)
+    where
+        F: FnMut(LspApplyWorkspaceEditRequest) -> LspApplyWorkspaceEditResponse + Send + 'static,
+    {
+        self.apply_edit_handler = Some(Box::new(handler));
+    }
+
+    /// Removes the inbound `workspace/applyEdit` handler.
+    pub fn clear_apply_edit_handler(&mut self) {
+        self.apply_edit_handler = None;
     }
 
     /// Returns the lifecycle state observed when the session was started.
@@ -3392,6 +4274,7 @@ impl LspStdioSession {
             pending.json_rpc_id,
             pending.request_id,
             pending.timeout_ms,
+            Some(&pending.context),
         )
     }
 
@@ -3490,7 +4373,7 @@ impl LspStdioSession {
             // per-frame drain is the only consumer running between explicit
             // requests, so an unanswered registration would otherwise sit
             // until the next blocking call (or forever).
-            if let Ok(true) = self.answer_server_request(&envelope) {
+            if let Ok(true) = self.answer_server_request(&envelope, None, None) {
                 continue;
             }
             if envelope.method.as_deref() == Some("textDocument/publishDiagnostics")
@@ -3520,10 +4403,63 @@ impl LspStdioSession {
     /// the associated events. Any other server request receives the
     /// protocol-correct JSON-RPC MethodNotFound (-32601) error, signalling
     /// "unsupported" so the server can degrade instead of waiting.
-    fn answer_server_request(&mut self, envelope: &JsonRpcEnvelope) -> LspRuntimeResult<bool> {
+    fn answer_server_request(
+        &mut self,
+        envelope: &JsonRpcEnvelope,
+        context: Option<&LspOperationContext>,
+        deadline: Option<std::time::Instant>,
+    ) -> LspRuntimeResult<bool> {
         let (Some(id), Some(method)) = (envelope.id, envelope.method.as_deref()) else {
             return Ok(false);
         };
+        if method == "workspace/applyEdit" {
+            let response = match envelope.params.as_ref() {
+                Some(params) => {
+                    match Self::bounded_json_size(params, MAX_APPLY_EDIT_PARAMS_BYTES) {
+                        Ok(_) => {
+                            if !Self::apply_edit_params_have_edit(params) {
+                                LspApplyWorkspaceEditResponse {
+                                applied: false,
+                                failure_reason: Some(
+                                    "workspace/applyEdit parameters must contain an object edit"
+                                        .to_string(),
+                                ),
+                            }
+                            } else if let Some(handler) = self.apply_edit_handler.as_mut() {
+                                handler(LspApplyWorkspaceEditRequest {
+                                    json_rpc_id: id,
+                                    params: params.clone(),
+                                    context: context.cloned(),
+                                    deadline,
+                                })
+                            } else {
+                                LspApplyWorkspaceEditResponse {
+                                    applied: false,
+                                    failure_reason: Some(
+                                        "workspace/applyEdit handler is not installed".to_string(),
+                                    ),
+                                }
+                            }
+                        }
+                        Err(reason) => LspApplyWorkspaceEditResponse {
+                            applied: false,
+                            failure_reason: Some(reason.to_string()),
+                        },
+                    }
+                }
+                None => LspApplyWorkspaceEditResponse {
+                    applied: false,
+                    failure_reason: Some("workspace/applyEdit parameters are missing".to_string()),
+                },
+            };
+            let result = json!({
+                "applied": response.applied,
+                "failureReason": response.failure_reason,
+            });
+            self.process
+                .write_envelope(&JsonRpcEnvelope::response(id, result))?;
+            return Ok(true);
+        }
         let response = match method {
             "client/registerCapability" | "client/unregisterCapability" => JsonRpcEnvelope {
                 jsonrpc: "2.0".to_string(),
@@ -3547,6 +4483,53 @@ impl LspStdioSession {
         };
         self.process.write_envelope(&response)?;
         Ok(true)
+    }
+
+    fn apply_edit_params_have_edit(params: &Value) -> bool {
+        params
+            .as_object()
+            .and_then(|params| params.get("edit"))
+            .is_some_and(Value::is_object)
+    }
+
+    fn bounded_json_size(value: &Value, limit: usize) -> Result<usize, &'static str> {
+        struct LimitedWriter {
+            used: usize,
+            limit: usize,
+            exceeded: bool,
+        }
+
+        impl Write for LimitedWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                let Some(next) = self.used.checked_add(bytes.len()) else {
+                    self.exceeded = true;
+                    return Err(std::io::Error::other("JSON payload size overflow"));
+                };
+                if next > self.limit {
+                    self.exceeded = true;
+                    return Err(std::io::Error::other("JSON payload exceeds bound"));
+                }
+                self.used = next;
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut writer = LimitedWriter {
+            used: 0,
+            limit,
+            exceeded: false,
+        };
+        match serde_json::to_writer(&mut writer, value) {
+            Ok(()) => Ok(writer.used),
+            Err(_) if writer.exceeded => {
+                Err("workspace/applyEdit parameters exceed bounded transport limit")
+            }
+            Err(_) => Err("workspace/applyEdit parameters are not serializable"),
+        }
     }
 
     /// Routes a notification-shaped frame into the durable buffers and, when
@@ -3622,7 +4605,7 @@ impl LspStdioSession {
                 // out-of-band responses: callers must not pump with an
                 // outstanding request, so those are skipped rather than
                 // stashed.
-                self.answer_server_request(&envelope)?;
+                self.answer_server_request(&envelope, None, None)?;
                 continue;
             }
             self.record_notification(&envelope, Some(&mut acc));
@@ -3642,6 +4625,7 @@ impl LspStdioSession {
         target_json_rpc_id: u64,
         expected_request_id: LspRequestId,
         timeout_ms: u64,
+        context: Option<&LspOperationContext>,
     ) -> LspRuntimeResult<LspCorrelatedResponse> {
         let started = Instant::now();
         // A non-zero budget yields a hard deadline. The frame reader waits on
@@ -3698,7 +4682,7 @@ impl LspStdioSession {
             // A frame with BOTH id and method is a server→client request —
             // answer it and keep waiting for the target response.
             if envelope.method.is_some() {
-                self.answer_server_request(&envelope)?;
+                self.answer_server_request(&envelope, context, deadline)?;
                 continue;
             }
             if id != target_json_rpc_id {
@@ -3973,4 +4957,36 @@ fn read_lsp_frame<R: BufRead>(reader: &mut R) -> LspRuntimeResult<Option<Vec<u8>
         }
     })?;
     Ok(Some(payload))
+}
+
+#[cfg(test)]
+mod stdout_teardown_tests {
+    use super::{
+        LspReaderTerminal, ReaderStatsShared, STDOUT_READER_JOIN_TIMEOUT, join_stdout_reader,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn join_timeout_after_unconfirmed_tree_kill_records_terminal() {
+        let stats = ReaderStatsShared::default();
+        stats.record_tree_kill_failure();
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(STDOUT_READER_JOIN_TIMEOUT + Duration::from_secs(8));
+        });
+        join_stdout_reader(handle, &stats);
+        let snapshot = stats.snapshot();
+        assert!(
+            snapshot.tree_kill_failed,
+            "forced tree-kill failure must remain visible on the snapshot"
+        );
+        match snapshot.terminal {
+            Some(LspReaderTerminal::Error(message)) => {
+                assert!(
+                    message.contains("unconfirmed process-tree kill"),
+                    "join timeout after a failed tree kill must not look like a clean reader death, got {message}"
+                );
+            }
+            other => panic!("expected unconfirmed-kill terminal error, got {other:?}"),
+        }
+    }
 }

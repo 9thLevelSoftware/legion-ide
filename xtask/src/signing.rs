@@ -123,30 +123,31 @@ impl Signer for DalekSigner {
 ///
 /// Returns `Ok(())` on a valid signature, `Err(SigningError::VerifyFailed)` when
 /// tamper detection fires, or another `SigningError` variant for malformed inputs.
+/// # Single implementation
+///
+/// The verification itself lives in `legion_security::verify_ed25519_signature`
+/// and this is a thin adapter over it. Release manifests (ADR-0042) and signed
+/// org policy bundles (P9.F2.T3) are therefore checked by the same code with the
+/// same `verify_strict` semantics, rather than by two implementations that could
+/// drift apart. `legion-security` is the right home because `xtask` sits at the
+/// top of the dependency graph and no crate may depend on it
+/// (`plans/dependency-policy.md`), so the primitive could not have gone the
+/// other way.
 pub fn verify_ed25519_signature(
     data: &[u8],
     signature: &[u8],
     verifying_key: &[u8],
 ) -> Result<(), SigningError> {
-    let key_bytes: &[u8; 32] = verifying_key.try_into().map_err(|_| {
-        SigningError::InvalidKey(format!(
-            "verifying key must be 32 bytes, got {}",
-            verifying_key.len()
-        ))
-    })?;
-    let vk = ed25519_dalek::VerifyingKey::from_bytes(key_bytes)
-        .map_err(|err| SigningError::InvalidKey(err.to_string()))?;
-
-    let sig_bytes: &[u8; 64] = signature.try_into().map_err(|_| {
-        SigningError::VerifyFailed(format!(
-            "signature must be 64 bytes, got {}",
-            signature.len()
-        ))
-    })?;
-    let sig = ed25519_dalek::Signature::from_bytes(sig_bytes);
-
-    vk.verify_strict(data, &sig)
-        .map_err(|err| SigningError::VerifyFailed(err.to_string()))
+    legion_security::verify_ed25519_signature(data, signature, verifying_key).map_err(|err| {
+        match err {
+            legion_security::Ed25519VerifyFailure::InvalidKey(reason) => {
+                SigningError::InvalidKey(reason)
+            }
+            legion_security::Ed25519VerifyFailure::VerifyFailed(reason) => {
+                SigningError::VerifyFailed(reason)
+            }
+        }
+    })
 }
 
 /// Resolve a signer from a [`SigningConfig`].

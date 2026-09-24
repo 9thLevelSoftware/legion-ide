@@ -3,7 +3,9 @@ use legion_ui::ShellProjectionSnapshot;
 
 use crate::{bridge::DesktopAction, theme};
 
-use super::{DesktopProjectionViewModel, render_code_lines};
+use super::{
+    DesktopLineSource, DesktopProjectionViewModel, StreamedLayoutCachePool, render_code_lines,
+};
 
 /// Renderer-portable code-canvas painting seam.
 ///
@@ -20,6 +22,8 @@ pub trait CodeCanvasPainter {
         snapshot: &ShellProjectionSnapshot,
         model: &DesktopProjectionViewModel,
         actions: &mut Vec<DesktopAction>,
+        source: Option<&dyn DesktopLineSource>,
+        streamed_cache: &mut StreamedLayoutCachePool,
     );
 }
 
@@ -50,8 +54,10 @@ impl CodeCanvasPainter for EguiCodeCanvasPainter {
         snapshot: &ShellProjectionSnapshot,
         model: &DesktopProjectionViewModel,
         actions: &mut Vec<DesktopAction>,
+        source: Option<&dyn DesktopLineSource>,
+        streamed_cache: &mut StreamedLayoutCachePool,
     ) {
-        render_code_lines(ui, snapshot, model, actions);
+        render_code_lines(ui, snapshot, model, actions, source, streamed_cache);
     }
 }
 

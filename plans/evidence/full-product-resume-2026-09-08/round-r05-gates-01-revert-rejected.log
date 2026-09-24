@@ -1,0 +1,13 @@
+CMD: git status --porcelain -- plans/completion/scenarios.json plans/completion/requirements.json && ls -la .superpowers/sdd/2026-09-04-full-product-completion/s0-05c-residue-coverage-rejected.patch .superpowers/sdd/2026-09-04-full-product-completion/s0-05c-residue-coverage-rejected-newfiles/
+CWD: D:/legion-ide-completion
+BEGIN
+-rw-r--r-- 1 dasbl 197610 220814 Sep  8 17:28 .superpowers/sdd/2026-09-04-full-product-completion/s0-05c-residue-coverage-rejected.patch
+
+.superpowers/sdd/2026-09-04-full-product-completion/s0-05c-residue-coverage-rejected-newfiles/:
+total 388
+drwxr-xr-x 1 dasbl 197610      0 Sep  8 17:28 .
+drwxr-xr-x 1 dasbl 197610      0 Sep  8 17:28 ..
+-rwxr-xr-x 1 dasbl 197610 366650 Sep  8 17:21 bind-register-coverage.js
+-rw-r--r-- 1 dasbl 197610  26048 Sep  8 17:23 s0-05c-residue-coverage-report.md
+END
+EXIT=0

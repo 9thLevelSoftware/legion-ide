@@ -12,6 +12,7 @@ ropey = "1"
 sha2 = "0.10"
 hex = "0.4"
 memchr = "2"
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
 quickcheck = "1"

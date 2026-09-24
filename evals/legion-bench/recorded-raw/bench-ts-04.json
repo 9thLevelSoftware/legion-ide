@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-04",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:c38cc9aa1a5e7260",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"type\": \"function\",\n  \"function\": {\n    \"type\": \"edit-as-proposal\",\n    \"arguments\": {\n      \"path\": \"src/monthly.js\",\n      \"replacement\": \"const groupByMonth = (entries) => {\\n  const result = {};\\n  entries.forEach(entry => {\\n    const monthKey = entry.date.substring(0, 7);\\n    result[monthKey] = (result[monthKey] || 0) + entry.amountCents;\\n  });\\n  return result;\\n};\\n\\nconst renderMonthly = (byMonth) => {\\n  const lines = Object.keys(byMonth)\\n    .sort()\\n    .map(monthKey => `${monthKey} ${(byMonth[monthKey] / 100).toFixed(2)}`);\\n  return lines.join('\\\\n');\\n};\\n\\nmodule.exports = { groupByMonth, renderMonthly };\"\n    }\n  }\n}\n\n{\n  \"type\": \"function\",\n  \"function\": {\n    \"type\": \"edit-as-proposal\",\n    \"arguments\": {\n      \"path\": \"src/cli.js\",\n      \"replacement\": \"const fs = require('fs');\\nconst parse = require('./parse');\\nconst { groupByMonth, renderMonthly } = require('./monthly');\\n\\nconst commands = {\\n  balance: (ledgerPath) => {\\n    const entries = parse(fs.readFileSync(ledgerPath, 'utf8'));\\n    console.log(entries.reduce((total, entry) => total + entry.amountCents, 0) / 100);\\n  },\\n  report: (ledgerPath) => {\\n    const entries = parse(fs.readFileSync(ledgerPath, 'utf8'));\\n    entries.sort((a, b) => a.date.localeCompare(b.date)).forEach(entry => {\\n      console.log(`${entry.date} ${entry.amountCents / 100}`);\\n    });\\n  },\\n  monthly: (ledgerPath) => {\\n    const entries = parse(fs.readFileSync(ledgerPath, 'utf8'));\\n    console.log(renderMonthly(groupByMonth(entries)));\\n  }\\n};\\n\\nif (process.argv.length < 3) {\\n  console.log('Usage: node cli.js [balance|report|monthly] <ledger.csv>');\\n  process.exit(1);\\n}\\n\\nconst commandName = process.argv[2];\\nconst ledgerPath = process.argv[3];\\n\\nif (!commands[commandName]) {\\n  console.log(`Unknown command: ${commandName}`);\\n  console.log('Please specify a known command: balance, report, or monthly.');\\n  process.exit(1);\\n}\\n\\ncommands[commandName](ledgerPath);\\n\"\n    }\n  }\n}\n\nend_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787120017,
+        "id": "chatcmpl-38",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 604,
+          "prompt_tokens": 847,
+          "total_tokens": 1451
+        }
+      }
+    }
+  ]
+}

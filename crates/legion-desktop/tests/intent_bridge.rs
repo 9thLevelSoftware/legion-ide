@@ -10,7 +10,9 @@ use legion_protocol::{
     AssistedAiProviderInvocationState, BufferId, BufferVersion, CanonicalPath,
     DebugConfigurationId, DebugSessionId, FileFingerprint, FileId, ProposalPrivacyLabel,
     ProposalRiskLabel, ProtocolTextRange, SnapshotId, TextCoordinate, TimestampMillis,
-    ViewportScroll, WorkspaceId,
+    ViewportScroll, VisualNavigationCaret, VisualNavigationDirection, VisualNavigationLayoutId,
+    VisualNavigationPosition, VisualNavigationRequest, VisualNavigationRow,
+    VisualNavigationSourceRow, VisualNavigationStop, VisualNavigationX, WorkspaceId,
 };
 use legion_ui::ui::{DailyEditingProjection, EditorTabProjection, EditorTabsProjection};
 use legion_ui::{
@@ -86,12 +88,14 @@ fn snapshot_with_daily_tabs() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("src".to_string()),
                 name: "src".to_string(),
                 children: vec![FileId(3)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(3),
                 canonical_path: CanonicalPath("src/main.rs".to_string()),
                 name: "main.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: None,
@@ -377,6 +381,79 @@ fn intent_bridge_routes_daily_editing_actions() {
             cursor,
         })
     );
+    let visual_request = VisualNavigationRequest {
+        expected_snapshot_id: SnapshotId(5),
+        expected_buffer_version: BufferVersion(12),
+        expected_carets: vec![VisualNavigationCaret {
+            head: VisualNavigationPosition {
+                line: 0,
+                byte_column: 1,
+            },
+            anchor: None,
+            affinity: legion_protocol::CaretAffinity::Upstream,
+            preferred_x: Some(VisualNavigationX { value: 7.0 }),
+        }],
+        layout_id: VisualNavigationLayoutId(9),
+        direction: VisualNavigationDirection::Down,
+        extend: false,
+        source_rows: vec![VisualNavigationSourceRow {
+            row: VisualNavigationRow {
+                logical_line: 0,
+                row_index: Some(0),
+                row_count: Some(2),
+                start: VisualNavigationPosition {
+                    line: 0,
+                    byte_column: 0,
+                },
+                end: VisualNavigationPosition {
+                    line: 0,
+                    byte_column: 2,
+                },
+                stops: vec![VisualNavigationStop {
+                    position: VisualNavigationPosition {
+                        line: 0,
+                        byte_column: 1,
+                    },
+                    x: VisualNavigationX { value: 7.0 },
+                    affinity: legion_protocol::CaretAffinity::Upstream,
+                }],
+            },
+            source_x: VisualNavigationX { value: 7.0 },
+        }],
+        target_rows: Vec::new(),
+    };
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::MoveVertically {
+                buffer_id: None,
+                request: visual_request.clone(),
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::MoveVertically {
+            buffer_id: BufferId(9),
+            request: visual_request,
+        })
+    );
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::SetVisualCursor {
+                buffer_id: None,
+                expected_snapshot_id: SnapshotId(5),
+                expected_buffer_version: BufferVersion(12),
+                cursor,
+                affinity: legion_protocol::CaretAffinity::Downstream,
+            },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetVisualCursor {
+            buffer_id: BufferId(9),
+            expected_snapshot_id: SnapshotId(5),
+            expected_buffer_version: BufferVersion(12),
+            cursor,
+            affinity: legion_protocol::CaretAffinity::Downstream,
+        })
+    );
     assert_eq!(
         bridge.translate(
             DesktopAction::SetSelection {
@@ -426,7 +503,24 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
             DesktopAction::SelectExplorerFile { file_id: FileId(3) },
             &snapshot,
         ),
-        DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id: FileId(3) })
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+            file_id: FileId(3),
+            path: "src/main.rs".to_string(),
+            is_directory: false,
+        })
+    );
+    // The same gesture on a directory row carries the directory flag, so the
+    // workflow expands instead of trying to open a folder as text.
+    assert_eq!(
+        bridge.translate(
+            DesktopAction::SelectExplorerFile { file_id: FileId(2) },
+            &snapshot,
+        ),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+            file_id: FileId(2),
+            path: "src".to_string(),
+            is_directory: true,
+        })
     );
     assert_eq!(
         bridge.translate(DesktopAction::RefreshGit, &snapshot),
@@ -873,6 +967,14 @@ fn intent_bridge_routes_settings_actions() {
     assert_eq!(
         translate(DesktopAction::OpenSettings),
         DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
+    );
+    assert_eq!(
+        translate(DesktopAction::OpenAbout),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenAbout)
+    );
+    assert_eq!(
+        translate(DesktopAction::ExportSupportBundle),
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::ExportSupportBundle)
     );
     assert_eq!(
         translate(DesktopAction::SetThemePreference {

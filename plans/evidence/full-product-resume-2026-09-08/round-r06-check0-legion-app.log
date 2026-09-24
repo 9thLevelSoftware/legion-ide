@@ -1,0 +1,8 @@
+CMD: cargo check -p legion-app --all-targets -j 1
+CWD: /d/legion-ide-completion
+BEGIN
+    Checking legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+    Checking legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.49s
+END
+EXIT=0

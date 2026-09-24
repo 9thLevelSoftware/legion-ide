@@ -37,6 +37,27 @@ use legion_protocol::{
 };
 use uuid::Uuid;
 
+fn fixture_context(
+    snapshot_id: legion_protocol::SnapshotId,
+) -> legion_protocol::LspOperationContext {
+    legion_protocol::LspOperationContext {
+        request_id: legion_protocol::LspRequestId(Uuid::now_v7()),
+        workspace_id: WorkspaceId(7),
+        file_id: legion_protocol::FileId(11),
+        buffer_id: legion_protocol::BufferId(13),
+        snapshot_id,
+        buffer_version: legion_protocol::BufferVersion(1),
+        language_id: LanguageId("rust".to_string()),
+        correlation_id: CorrelationId(7),
+        causality_id: CausalityId(Uuid::now_v7()),
+        timeout_ms: 5_000,
+        cancellation_token: legion_protocol::CancellationTokenId(Uuid::now_v7()),
+        content_hash: None,
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        schema_version: 1,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Support helpers
 // ---------------------------------------------------------------------------
@@ -87,7 +108,7 @@ fn launch_policy(command: &str) -> LspLaunchPolicyDecision {
             workspace_trust_state: WorkspaceTrustState::Trusted,
             privacy_scope: SemanticPrivacyScope::Workspace,
             privacy_scope_allowed: true,
-            required_capability: CapabilityId("process.spawn".to_string()),
+            required_capability: CapabilityId("lsp.launch".to_string()),
             decision_id: Some(CapabilityDecisionId(2)),
             diagnostics: Vec::new(),
             schema_version: 1,
@@ -144,12 +165,36 @@ fn path_to_file_uri(path: &std::path::Path) -> String {
 // Smoke test
 // ---------------------------------------------------------------------------
 
+/// Whether a missing or uncooperative rust-analyzer must fail rather than skip.
+///
+/// `LEGION_RA_DOGFOOD=1` mirrors `LEGION_DAP_DOGFOOD` exactly, and for the same
+/// reason. These smokes treat "not on PATH", "session refused" and "startup
+/// timed out after 60s" as reasons to return early and report `ok` — so on a
+/// runner that provisions rust-analyzer and then fails to start it, the suite
+/// stays green while proving nothing. A clean skip is not proof, and that
+/// lesson cost this project two days on the debug adapter.
+///
+/// Off by default so a developer without rust-analyzer installed is not blocked.
+/// CI provisions it and sets this, which is where the claim matters.
+fn skips_are_failures() -> bool {
+    std::env::var("LEGION_RA_DOGFOOD").as_deref() == Ok("1")
+}
+
+/// Give up on a smoke, or fail it, depending on that switch.
+fn skip_or_fail(reason: &str) {
+    assert!(
+        !skips_are_failures(),
+        "LEGION_RA_DOGFOOD=1 requires a working rust-analyzer smoke, and this run would have skipped: {reason}"
+    );
+    eprintln!("{reason}; skipping");
+}
+
 #[test]
 #[ignore = "requires rust-analyzer on PATH; run with --ignored"]
 fn rust_analyzer_full_workflow() {
     // --- Discovery ---
     let Some(bin) = discovered() else {
-        eprintln!("rust-analyzer not found on PATH; skipping");
+        skip_or_fail("rust-analyzer not found on PATH");
         return;
     };
 
@@ -233,10 +278,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 10 },
     });
     let completion_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/completion",
             completion_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("completion request_read should not error");
     eprintln!(
@@ -258,10 +304,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 7 },
     });
     let hover_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/hover",
             hover_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("hover request_read should not error");
     eprintln!(
@@ -280,10 +327,11 @@ fn rust_analyzer_full_workflow() {
         "position": { "line": 1, "character": 7 },
     });
     let definition_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/definition",
             definition_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("definition request_read should not error");
     eprintln!(
@@ -305,10 +353,11 @@ fn rust_analyzer_full_workflow() {
         "context": { "includeDeclaration": true },
     });
     let references_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/references",
             references_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("references request_read should not error");
     eprintln!(
@@ -327,10 +376,11 @@ fn rust_analyzer_full_workflow() {
         "options": { "tabSize": 4, "insertSpaces": true },
     });
     let formatting_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/formatting",
             formatting_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("formatting request_read should not error");
     eprintln!(
@@ -358,10 +408,11 @@ fn rust_analyzer_full_workflow() {
         "newName": "add_renamed",
     });
     let rename_outcome = session
-        .request_read(
+        .request_read_with_context(
             "textDocument/rename",
             rename_params,
             legion_protocol::SnapshotId(0),
+            Some(fixture_context(legion_protocol::SnapshotId(0))),
         )
         .expect("rename request_read should not fail at the transport layer");
     eprintln!(
@@ -456,7 +507,7 @@ fn rust_analyzer_product_composition_smoke() {
 
     // --- Discovery ---
     let Some(bin) = discovered() else {
-        eprintln!("rust-analyzer not found on PATH; skipping product composition smoke");
+        skip_or_fail("rust-analyzer not found on PATH for the product composition smoke");
         return;
     };
     eprintln!("rust-analyzer binary: {}", bin.display());
@@ -488,13 +539,13 @@ fn rust_analyzer_product_composition_smoke() {
                 break;
             }
             if health.init_status == LspResultStatus::Unavailable {
-                eprintln!("LSP session refused/unavailable — skipping rest of smoke");
+                skip_or_fail("LSP session refused or unavailable");
                 let _ = fs::remove_dir_all(&fixture_dir);
                 return;
             }
         }
         if std::time::Instant::now() > deadline {
-            eprintln!("LSP startup timeout after 60s — skipping rest of smoke");
+            skip_or_fail("LSP startup timed out after 60s");
             let _ = fs::remove_dir_all(&fixture_dir);
             return;
         }

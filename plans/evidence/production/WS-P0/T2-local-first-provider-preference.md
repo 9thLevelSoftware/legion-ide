@@ -2,6 +2,11 @@
 
 **Date:** 2026-07-21
 
+> **Superseded in part (2026-08-22).** The `Auto` arm described below no longer
+> falls through to Anthropic when BYOK credentials are present; it routes Ollama
+> then the deterministic fixture, and a remote provider has to be selected
+> explicitly. This record is kept as written for what was done on the date above.
+
 ## Changes
 
 | Item | Detail |

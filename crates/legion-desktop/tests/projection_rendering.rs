@@ -202,12 +202,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
                 canonical_path: CanonicalPath("Cargo.toml".to_string()),
                 name: "Cargo.toml".to_string(),
                 children: vec![FileId(8)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(8),
                 canonical_path: CanonicalPath("src/lib.rs".to_string()),
                 name: "lib.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
@@ -249,13 +251,14 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
             ],
             active_buffer_id: Some(BufferId(3)),
         },
-        close_dirty_prompt: Some(CloseDirtyPromptProjection {
-            buffer_id: BufferId(3),
-            file_id: Some(FileId(2)),
-            file_path: Some(CanonicalPath("Cargo.toml".to_string())),
-            title: "Cargo.toml".to_string(),
-            message: "Save changes before closing Cargo.toml?".to_string(),
-        }),
+        // Deliberately `None`. The unsaved-changes prompt is a modal: while it
+        // is raised it blocks interaction with the whole shell, which is what a
+        // modal is for. Leaving it set in the shared fixture meant every test
+        // in this file rendered a shell no one could click, and the tests only
+        // passed because the prompt used to be inert flow content laid out off
+        // the bottom of the window. Tests that want the prompt raise it
+        // themselves; see `close_dirty_prompt_snapshot`.
+        close_dirty_prompt: None,
         viewport_states: vec![EditorViewportStateProjection {
             buffer_id: BufferId(3),
             scroll: ViewportScroll {
@@ -440,6 +443,7 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
             selections: Vec::new(),
             cursor: coord(0, 0, 0),
             cursors: vec![coord(0, 0, 0)],
+            cursor_affinities: vec![],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,
@@ -511,6 +515,7 @@ fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
             selections: Vec::new(),
             cursor: coord(0, 0, 0),
             cursors: vec![coord(0, 0, 0)],
+            cursor_affinities: vec![],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,
@@ -571,6 +576,7 @@ fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
             selections: Vec::new(),
             cursor: coord(0, 4, 4),
             cursors: vec![coord(0, 4, 4)],
+            cursor_affinities: vec![],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,
@@ -820,18 +826,19 @@ fn state_matrix_case(
                 description: "Unsaved changes",
             }
         }
+        // Assist's one prerequisite is a buffer to predict into: inline
+        // prediction routes through the always-registered deterministic local
+        // provider, so no provider setup appears in any of these cases. The
+        // Blocked row asserts the resolution control the empty row only names.
         (DockMode::Assist, UiStateMatrixState::Empty) => {
-            snapshot.assisted_ai_projection.provider_count = 1;
-            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
             UiStateMatrixExpectation::Text("Open a file to enable predictions.")
         }
         (DockMode::Assist, UiStateMatrixState::Blocked) => {
-            UiStateMatrixExpectation::Text("Choose an AI provider to enable predictions.")
+            snapshot.active_buffer_projection.workspace_id = Some(WorkspaceId(1));
+            UiStateMatrixExpectation::Clickable("Open file")
         }
         (DockMode::Assist, UiStateMatrixState::Ready) => {
             state_matrix_active_buffer(&mut snapshot, false);
-            snapshot.assisted_ai_projection.provider_count = 1;
-            snapshot.assisted_ai_projection.providers = vec![available_local_provider()];
             UiStateMatrixExpectation::Clickable("Predict")
         }
         (DockMode::Assist, UiStateMatrixState::Active) => {
@@ -965,8 +972,20 @@ fn projection_rendering_populates_required_phase2_surfaces() {
             .iter()
             .any(|row| row.contains("scroll=2:4"))
     );
+    // The prompt is not part of the shared fixture (it is a modal and would
+    // block every other surface), so raise it here to check the row it
+    // produces.
+    let mut prompted = populated_snapshot();
+    prompted.daily_editing_projection.close_dirty_prompt = Some(CloseDirtyPromptProjection {
+        buffer_id: BufferId(3),
+        file_id: Some(FileId(2)),
+        file_path: Some(CanonicalPath("Cargo.toml".to_string())),
+        title: "Cargo.toml".to_string(),
+        message: "Save changes before closing Cargo.toml?".to_string(),
+    });
+    let prompted_model = DesktopProjectionViewModel::from_snapshot(&prompted);
     assert!(
-        model
+        prompted_model
             .close_prompt_rows
             .iter()
             .any(|row| row.contains("close_dirty"))
@@ -1704,6 +1723,7 @@ fn projection_rendering_projects_editor_polish_summary_rows() {
         selections: Vec::new(),
         cursor: coord(0, 0, 0),
         cursors: vec![coord(0, 0, 0)],
+        cursor_affinities: vec![],
         scroll: ViewportScroll {
             top_line: 0,
             left_column: 0,
@@ -1918,12 +1938,40 @@ fn projection_rendering_maps_editor_pointer_to_text_coordinate() {
                 kind: ViewportSemanticTokenKind::Ident,
             }],
             truncation_state: ViewportLineTruncationState::None,
+            byte_range: ByteRange::new(0, 5),
+            utf16_range: Utf16Range {
+                start: Utf16Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Utf16Position {
+                    line: 0,
+                    character: 5,
+                },
+            },
+            line_start_byte_offset: Some(0),
+            logical_end_byte: Some(5),
+            line_start_utf16_offset: None,
         },
         DesktopCodeLineViewModel {
             number: 5,
             text: "beta_value".to_string(),
             highlights: Vec::new(),
             truncation_state: ViewportLineTruncationState::None,
+            byte_range: ByteRange::new(0, 10),
+            utf16_range: Utf16Range {
+                start: Utf16Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Utf16Position {
+                    line: 0,
+                    character: 10,
+                },
+            },
+            line_start_byte_offset: Some(0),
+            logical_end_byte: Some(10),
+            line_start_utf16_offset: None,
         },
     ];
 
@@ -1960,14 +2008,28 @@ fn projection_rendering_computes_word_and_line_selection_ranges() {
         text: "let beta_value = 42;".to_string(),
         highlights: Vec::new(),
         truncation_state: ViewportLineTruncationState::None,
+        byte_range: ByteRange::new(0, 20),
+        utf16_range: Utf16Range {
+            start: Utf16Position {
+                line: 0,
+                character: 0,
+            },
+            end: Utf16Position {
+                line: 0,
+                character: 20,
+            },
+        },
+        line_start_byte_offset: Some(0),
+        logical_end_byte: Some(20),
+        line_start_utf16_offset: None,
     };
-    let word = word_range_for_coordinate(&line, coord(7, 6, 0)).expect("word range");
+    let word = word_range_for_coordinate(&line, coord(7, 6, 6)).expect("word range");
     assert_eq!(word.start.line, 7);
     assert_eq!(word.start.character, 4);
     assert_eq!(word.end.line, 7);
     assert_eq!(word.end.character, 14);
 
-    let full_line = line_range_for_code_line(&line);
+    let full_line = line_range_for_code_line(&line).expect("complete line origin should map");
     assert_eq!(full_line.start.line, 7);
     assert_eq!(full_line.start.character, 0);
     assert_eq!(full_line.end.line, 7);
@@ -1981,6 +2043,20 @@ fn projection_rendering_anchors_drag_selection_at_gesture_start() {
         text: "let beta_value = 42;".to_string(),
         highlights: Vec::new(),
         truncation_state: ViewportLineTruncationState::None,
+        byte_range: ByteRange::new(0, 20),
+        utf16_range: Utf16Range {
+            start: Utf16Position {
+                line: 0,
+                character: 0,
+            },
+            end: Utf16Position {
+                line: 0,
+                character: 20,
+            },
+        },
+        line_start_byte_offset: Some(0),
+        logical_end_byte: Some(20),
+        line_start_utf16_offset: None,
     };
     let old_cursor = coord(20, 0, 0);
     let end = coord(7, 14, 14);
@@ -1994,6 +2070,38 @@ fn projection_rendering_anchors_drag_selection_at_gesture_start() {
     let fallback = drag_selection_range(None, old_cursor, end);
     assert_eq!(fallback.start, old_cursor);
     assert_eq!(fallback.end, end);
+}
+
+#[test]
+fn projection_rendering_drag_coordinates_use_utf8_byte_columns_and_keep_direction() {
+    let line = DesktopCodeLineViewModel {
+        number: 1,
+        text: "aé🙂z".to_string(),
+        highlights: Vec::new(),
+        truncation_state: ViewportLineTruncationState::None,
+        byte_range: ByteRange::new(0, 8),
+        utf16_range: Utf16Range {
+            start: Utf16Position {
+                line: 0,
+                character: 0,
+            },
+            end: Utf16Position {
+                line: 0,
+                character: 5,
+            },
+        },
+        line_start_byte_offset: Some(0),
+        logical_end_byte: Some(8),
+        line_start_utf16_offset: None,
+    };
+    let anchor = drag_anchor_for_line_pointer(&line, 18.0, egui::vec2(0.0, 0.0), 0.0, 8.0);
+    assert_eq!(anchor.character, 3); // after `aé`, before the four-byte scalar
+    let forward = drag_selection_range(Some(anchor), coord(0, 0, 0), coord(0, 5, 5));
+    assert_eq!(forward.start.character, 3);
+    assert_eq!(forward.end.character, 5);
+    let backward = drag_selection_range(Some(coord(0, 5, 5)), coord(0, 0, 0), anchor);
+    assert_eq!(backward.start.character, 5);
+    assert_eq!(backward.end.character, 3);
 }
 
 #[test]
@@ -3833,7 +3941,7 @@ fn projection_rendering_provider_credentials_live_in_settings_ai_providers_secti
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(
         &full,
-        "Preferred AI provider: auto. Auto tries providers available on this computer before remote providers."
+        "Preferred AI provider: auto. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
     ));
     assert!(accesskit_has_label(
         &full,
@@ -4195,31 +4303,58 @@ fn projection_rendering_primary_shell_controls_meet_28px_semantic_target() {
     }
 }
 
+/// Assist's prerequisite is a buffer, and it says so.
+///
+/// This test used to assert the opposite: that an Assist rail with no projected
+/// AI providers reads "Choose an AI provider to enable predictions." and offers
+/// Settings. Both halves of that were wrong in the shipped app.
+/// `assisted_ai_projection.providers` describes a Phase-4 assisted-AI *run* and
+/// is populated only by one, no rendered control starts one, and choosing a
+/// preferred provider in Settings never adds a row to it — so the block could
+/// never clear and Assist mode was unusable with a mouse. Meanwhile `Predict`,
+/// which the block was hiding, works with zero configuration through the
+/// always-registered deterministic local provider.
 #[test]
-fn projection_rendering_missing_assist_provider_uses_plain_product_copy() {
+fn projection_rendering_assist_requires_only_a_buffer_not_a_configured_provider() {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut view = ProjectionView::new();
     let mut snapshot = Shell::empty("Provider prerequisite").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
+    assert!(
+        snapshot.assisted_ai_projection.providers.is_empty(),
+        "this test is about the no-projected-provider case; the fixture must have none"
+    );
 
     let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
+    // With no buffer the rail names the one thing that is actually missing,
+    // and offers the control that fixes it.
     assert_eq!(
-        accesskit_label_count(&full, "Choose an AI provider to enable predictions."),
+        accesskit_label_count(&full, "Open a file to enable predictions."),
         1
     );
-    assert!(accesskit_has_clickable_label(&full, "Settings"));
+    assert!(accesskit_has_clickable_label(&full, "Open file"));
+    assert!(!accesskit_has_label(
+        &full,
+        "Choose an AI provider to enable predictions."
+    ));
     assert!(!accesskit_has_label(&full, "Assist workbench"));
-    assert!(!accesskit_has_label(&full, "Inline prediction"));
     assert!(!accesskit_has_label(&full, "Context Chips"));
     assert!(!accesskit_has_label(&full, "Model Picker"));
     assert!(!accesskit_has_label(&full, "Anthropic BYOK"));
 
-    let (opened, _full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Settings");
-    assert_eq!(opened.actions, vec![DesktopAction::OpenSettings]);
-    let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
-    assert!(accesskit_has_label(&full, "AI Providers"));
+    // With a buffer — and still no projected provider — the prediction surface
+    // is present and requestable.
+    state_matrix_active_buffer(&mut snapshot, false);
+    let (_frame, full) = render_projection_frame(&ctx, &mut view, &snapshot);
+    assert!(accesskit_has_label(&full, "Inline prediction"));
+    assert!(
+        accesskit_has_clickable_label(&full, "Predict"),
+        "Assist must offer Predict without a projected provider; predictions \
+         route through the deterministic local provider, so requiring one is a \
+         block the user cannot clear"
+    );
 }
 
 #[test]
@@ -4809,7 +4944,14 @@ fn projection_rendering_activity_surfaces_keep_explorer_workspace_only_and_actio
 
     let (source_control, full) =
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "Source Control");
-    assert!(source_control.actions.is_empty());
+    // This used to assert the selection emitted *no* action, and that claim was
+    // the bug: `GitProjection` is filled in only by an explicit `RefreshGit`,
+    // and nothing issued one on workspace open or on selecting the surface, so
+    // opening Source Control against a real repository showed the empty state
+    // "No source-control status" over a tree full of changes. Selecting the
+    // surface now asks for the status it is about to display, the same way the
+    // Search and Symbols rail entries dispatch the palette that fills them.
+    assert_eq!(source_control.actions, vec![DesktopAction::RefreshGit]);
     assert!(accesskit_has_label(&full, "SOURCE CONTROL"));
     assert!(!accesskit_has_label(&full, "EXPLORER ·"));
     let (git, full) = click_accessible_control(&ctx, &mut view, &snapshot, &full, "Refresh Git");
@@ -6047,4 +6189,167 @@ fn projection_rendering_tests_preserve_app_boundary() {
         .expect("renderer source should be readable");
 
     common::assert_source_excludes(&source, "src/view.rs", &["legion_app", "AppComposition"]);
+}
+
+/// A restored splitter fraction must reach the rendered panel.
+///
+/// This is the assertion whose absence kept P1.F2.T4 open: `splitter_fraction`
+/// was persisted and reloaded for a long time while no renderer read it, so a
+/// restart restored the record rather than the layout the user had arranged.
+/// Asserting on the projection or the stored layout would not have caught that
+/// — only the painted panel rect does.
+#[test]
+fn projection_rendering_applies_a_restored_left_splitter_fraction() {
+    use legion_ui::{DockLayout, DockSideLayout, PanelId};
+
+    let snapshot = populated_snapshot();
+    let mode = snapshot.product_mode;
+
+    let render_with_left_fraction = |fraction: f32| -> f32 {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut view = ProjectionView::new();
+        // A restored arrangement, which is the only kind allowed to override
+        // the shell's designed panel sizes.
+        let state = DesktopProjectionViewState {
+            dock_layouts_user_arranged: true,
+            dock_layouts: vec![DockLayout {
+                mode,
+                left: DockSideLayout::new(PanelId::ProjectExplorer, Vec::new(), fraction, false),
+                right: DockSideLayout::new(PanelId::Assistant, Vec::new(), 0.22, false),
+                bottom: DockSideLayout::new(PanelId::Terminal, Vec::new(), 0.25, false),
+            }],
+            ..DesktopProjectionViewState::default()
+        };
+        // Two frames: egui settles panel sizes from `default_size` on the
+        // first, and a single frame can report a pre-layout rect.
+        for _ in 0..2 {
+            let _ = render_projection_frame_with_state(&ctx, &mut view, &snapshot, &state);
+        }
+        view.last_shell_panel_rects()
+            .expect("the shell should have recorded its panel rects")
+            .left
+            .width()
+    };
+
+    let narrow = render_with_left_fraction(0.18);
+    let wide = render_with_left_fraction(0.42);
+
+    assert!(
+        wide > narrow,
+        "a wider restored fraction must produce a wider explorer panel, \
+         got {wide} for 0.42 and {narrow} for 0.18 — if these are equal the \
+         renderer is ignoring the persisted layout again"
+    );
+}
+
+/// A steady layout reports no drag, so rendering never rewrites stored sizes.
+///
+/// This is the regression that `product_mode_changes_preserve_projected_editor_and_panel_state`
+/// caught: an earlier version reported the rendered size every frame, which fed
+/// the geometry default straight back over every restored fraction.
+#[test]
+fn projection_rendering_reports_no_dock_drag_when_nothing_moves() {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    let snapshot = populated_snapshot();
+
+    // Several settled frames with no pointer input at a fixed window size.
+    let mut last = None;
+    for _ in 0..3 {
+        let (output, _) = render_projection_frame(&ctx, &mut view, &snapshot);
+        last = Some(output);
+    }
+    let observed = last.expect("rendered").observed_dock_fractions;
+
+    assert_eq!(
+        observed,
+        legion_desktop::view::dock_geometry::DockFractions::default(),
+        "an untouched layout must report nothing to persist, or every frame overwrites the user's arrangement with the current geometry default"
+    );
+}
+
+/// Every cursor in a multi-cursor set must be painted, not just the primary.
+///
+/// P1.F3.T2's remaining acceptance clause. The projection has carried the full
+/// cursor set all along and the painter loops it, but nothing asserted the
+/// loop — and a multi-cursor edit whose other carets are invisible looks like
+/// text changing on its own.
+///
+/// Counted as a delta rather than an absolute: the shell paints many vertical
+/// hairlines (separators, icon strokes), and the only thing that differs
+/// between the two renders here is how many cursors the viewport carries.
+#[test]
+fn projection_rendering_paints_every_cursor_in_a_multi_cursor_set() {
+    fn vertical_hairlines(output: &egui::FullOutput) -> usize {
+        fn count(shape: &egui::epaint::Shape) -> usize {
+            match shape {
+                egui::epaint::Shape::LineSegment { points, stroke } => usize::from(
+                    (points[0].x - points[1].x).abs() < 0.01
+                        && (points[0].y - points[1].y).abs() > 1.0
+                        && (stroke.width - 1.0).abs() < 0.01,
+                ),
+                egui::epaint::Shape::Vec(shapes) => shapes.iter().map(count).sum(),
+                _ => 0,
+            }
+        }
+        output
+            .shapes
+            .iter()
+            .map(|clipped| count(&clipped.shape))
+            .sum()
+    }
+
+    // `time` is pinned because the caret blinks: `paint_code_cursor` returns
+    // early on the off phase, so an unpinned clock makes this pass or fail by
+    // when it happened to run.
+    let render = |cursors: Vec<legion_protocol::TextCoordinate>| -> usize {
+        let ctx = egui::Context::default();
+        let mut view = ProjectionView::new();
+        // `degraded_snapshot` rather than `populated_snapshot`: only the
+        // former carries a `ViewportProjection`, and the cursor set lives on
+        // the viewport. Asserted rather than assumed — an `if let Some(...)`
+        // here would silently test nothing.
+        let mut snapshot = degraded_snapshot();
+        let viewport = snapshot
+            .active_buffer_projection
+            .viewport
+            .as_mut()
+            .expect("the fixture must carry a viewport for cursors to live on");
+        viewport.cursors = cursors;
+        // Two frames, keeping the second: egui settles panel layout and font
+        // metrics on the first pass, so frame one can report caret geometry
+        // that the next frame immediately revises.
+        let mut painted = 0;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                focused: true,
+                time: Some(0.0),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1_440.0, 900.0),
+                )),
+                ..egui::RawInput::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = view.render(ui, &snapshot);
+            });
+            painted = vertical_hairlines(&output);
+        }
+        painted
+    };
+
+    // Both on the single line this fixture renders. A caret only paints on the
+    // row matching its line, so putting the second one on line 1 would test the
+    // fixture's line count rather than the painter's loop.
+    let one = render(vec![coord(0, 0, 0)]);
+    let two = render(vec![coord(0, 0, 0), coord(0, 5, 5)]);
+
+    assert_eq!(
+        two,
+        one + 1,
+        "a second cursor must paint a second caret; got {one} hairline(s) with one \
+         cursor and {two} with two, so the extra cursor was not drawn"
+    );
 }

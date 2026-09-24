@@ -112,18 +112,17 @@ fn initialize_populates_capability_summaries() {
         "definitionProvider must be supported=true (mock advertises it)"
     );
 
-    // The mock does NOT advertise completionProvider, so it must be false.
-    let comp_cap = health
-        .capabilities
-        .iter()
-        .find(|c| c.capability == "completionProvider");
-    // completionProvider is tracked but supported=false (not in mock response).
-    if let Some(c) = comp_cap {
-        assert!(
-            !c.supported,
-            "completionProvider must be supported=false (mock does not advertise it)"
-        );
-    }
+    // The "an unadvertised capability is recorded as unsupported" property used
+    // to be asserted here against whichever capability the mock happened not to
+    // send. That made this test hostage to the mock's default capability set:
+    // it was written for `completionProvider`, moved to `codeLensProvider` when
+    // the mock learned to advertise everything the read side gates on, and would
+    // have moved again the next time the mock grew.
+    //
+    // It now lives in `tests/lsp_capability_gating.rs`, which withholds one
+    // capability on purpose via `LEGION_MOCK_WITHHOLD_CAPABILITY` rather than
+    // relying on an omission. This test keeps what is actually its own subject:
+    // that a successful initialize parses capabilities at all.
     // Whether completionProvider is absent or present-but-false, what matters is
     // that the capability list is non-empty (capabilities were parsed).
     assert!(
@@ -149,7 +148,7 @@ fn initialize_with_watcher_client_option_succeeds() {
             ..Default::default()
         },
         supervisor: lsp_mock::mock_supervisor_config(),
-        server_id: LanguageServerId(8),
+        server_id: LanguageServerId(7),
         language_id: LanguageId("rust".to_string()),
     };
 

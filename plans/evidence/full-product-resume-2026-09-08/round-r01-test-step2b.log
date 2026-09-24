@@ -1,0 +1,12 @@
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.09s
+     Running unittests src\lib.rs (target\debug\deps\legion_app-ddfc6decd25cc009.exe)
+
+running 3 tests
+test language::formatting_dispatch_tests::formatting_without_capability_records_failure_without_proposal ... ok
+test language::formatting_dispatch_tests::rename_dispatch_waits_for_real_response_without_fake_preview ... ok
+test language::formatting_dispatch_tests::live_formatting_dispatch_waits_for_real_response ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 436 filtered out; finished in 0.01s
+
+EXIT=0

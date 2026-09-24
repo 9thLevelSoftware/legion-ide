@@ -1,0 +1,23 @@
+CMD: powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter 'Name=\"cargo.exe\" OR Name=\"rustc.exe\" OR Name=\"cargo-clippy.exe\"' | Select-Object ProcessId,ParentProcessId,Name,CreationDate,CommandLine | Format-List; Write-Output ('cargo.lock-owner exists: ' + (Test-Path 'D:/legion-ide-completion/.superpowers/sdd/2026-09-04-full-product-completion/cargo.lock-owner'))"
+CWD: D:/legion-ide-completion
+BEGIN
+
+
+ProcessId       : 30860
+ParentProcessId : 64324
+Name            : cargo.exe
+CreationDate    : 9/8/2026 2:32:50 PM
+CommandLine     : C:\Users\dasbl\.cargo\bin\cargo.exe test --workspace --no-fail-fast
+
+ProcessId       : 30416
+ParentProcessId : 30860
+Name            : cargo.exe
+CreationDate    : 9/8/2026 2:32:50 PM
+CommandLine     : "C:\Users\dasbl\.rustup\toolchains\1.97.1-x86_64-pc-windows-msvc\bin\cargo.exe" test --workspace 
+                  --no-fail-fast
+
+
+
+cargo.lock-owner exists: False
+END
+EXIT=0

@@ -41,6 +41,9 @@ if (-not (Test-Path -LiteralPath $SourceExe -PathType Leaf)) {
 
 New-Item -ItemType Directory -Force -Path $PackageDir | Out-Null
 Copy-Item -LiteralPath $SourceExe -Destination $DestExe -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $PackageDir "LICENSE") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\PRIVACY.md") -Destination (Join-Path $PackageDir "PRIVACY.md") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $PackageDir "THIRD_PARTY_NOTICES.md") -Force
 
 $ManifestText = @(
     "package: legion-desktop",
@@ -50,7 +53,10 @@ $ManifestText = @(
     "cargo_command: cargo $($CargoArgs -join ' ')",
     "source_executable: $SourceExe",
     "package_directory: $PackageDir",
-    "package_executable: $DestExe"
+    "package_executable: $DestExe",
+    "legal_license: LICENSE",
+    "legal_privacy: PRIVACY.md",
+    "legal_third_party_notices: THIRD_PARTY_NOTICES.md"
 ) -join "`r`n"
 
 Set-Content -LiteralPath $Manifest -Value $ManifestText -Encoding UTF8

@@ -80,7 +80,13 @@ pub fn derive_delegated_task_budget_usage(
             DelegatedTaskLoopStepKind::BudgetExhausted => {
                 exhausted = true;
             }
-            DelegatedTaskLoopStepKind::ToolCallResult | DelegatedTaskLoopStepKind::Cancelled => {}
+            // Dispatch is not a separate charge: the `ToolCallRequest` that
+            // precedes it already counted against the tool-call budget, and
+            // counting again would make a budget shrink for a record added to
+            // describe containment rather than consumption.
+            DelegatedTaskLoopStepKind::ToolCallDispatched
+            | DelegatedTaskLoopStepKind::ToolCallResult
+            | DelegatedTaskLoopStepKind::Cancelled => {}
         }
     }
 

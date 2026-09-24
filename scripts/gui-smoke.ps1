@@ -103,4 +103,13 @@ if ($DryRun) {
     exit 0
 }
 
+# Propagate cargo's exit status.
+#
+# PowerShell does not turn a native executable's nonzero status into a
+# terminating error, and a script exits 0 unless told otherwise -- so without
+# this line the wrapper reported success for a failed smoke, which is exactly
+# the hole the renderer smoke's own exit code was just fixed to close. The sh
+# wrapper propagates by accident of `set -eu` plus cargo being the last
+# command; this one has to say so.
 cargo @ArgsList
+exit $LASTEXITCODE

@@ -7,6 +7,8 @@
 
 **Do not** make `.github/workflows/legion-smoke.yml` a merge blocker or fold GP-1–4 into `legion-gates.yml` in Tier 0.
 
+The same clock applies to `.github/workflows/legion-windowed-gui.yml` (GAP-01.2). Four consecutive green 3-OS runs and owner sign-off are recorded in [`gap-01-2-windowed-gui-clock-signoff.md`](gap-01-2-windowed-gui-clock-signoff.md). Completing the clock is not the same as adding a required check; windowed-gui remains independent. The GUI step on that workflow is hard-fail (`continue-on-error` forbidden).
+
 ## Promotion criteria (all required)
 
 1. Four consecutive green scheduled (or fully equivalent) 3-OS smoke runs.  

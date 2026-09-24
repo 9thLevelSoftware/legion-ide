@@ -320,6 +320,7 @@ fn commit_with_empty_message_is_blocked_by_app() {
     .expect("workspace open");
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("refresh");
+    app.drain_git_until_idle();
 
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
@@ -355,6 +356,7 @@ fn commit_with_missing_author_is_blocked_end_to_end() {
     .expect("workspace open");
     app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("refresh");
+    app.drain_git_until_idle();
 
     let outcome = app
         .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {

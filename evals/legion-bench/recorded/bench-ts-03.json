@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-ts-03",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:805d29ea6cc5295c",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n[\n  {\n    \"name\": \"outline\",\n    \"arguments\": {\n      \"path\": \"src/report.js\"\n    }\n  },\n  {\n    \"name\": \"outline\",\n    \"arguments\": {\n      \"path\": \"src/cli.js\"\n    }\n  },\n  {\n    \"name\": \"read\",\n    \"arguments\": {\n      \"path\": \"src/report.js\",\n      \"start_line\": 0,\n      \"end_line\": 1000\n    }\n  },\n  {\n    \"name\": \"read\",\n    \"arguments\": {\n      \"path\": \"src/cli.js\",\n      \"start_line\": 0,\n      \"end_line\": 1000\n    }\n  }\n]\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119343,
+        "id": "chatcmpl-115",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 153,
+          "prompt_tokens": 708,
+          "total_tokens": 861
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:6b9541f1e9a02742",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"src/money.js\",\n    \"replacement\": \"module.exports = {\\n  parseAmount,\\n  formatCents,\\n};\\n\\nfunction formatCents(cents) {\\n  const sign = cents < 0 ? '-' : '';\\n  const abs = Math.abs(cents);\\n  const dollars = Math.floor(abs / 100);\\n  const rest = String(abs % 100).padStart(2, '0');\\n  return sign + dollars + '.' + rest;\\n}\"\n  }\n}\n```\n\n```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"src/report.js\",\n    \"old_str\": \"const sign = cents < 0 ? '-' : '';\\nconst abs = Math.abs(cents);\\nconst dollars = Math.floor(abs / 100);\\nconst rest = String(abs % 100).padStart(2, '0');\",\n    \"new_str\": \"const { formatCents } = require('./money');\"\n  }\n}\n```\n\n```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"src/cli.js\",\n    \"old_str\": \"const sign = cents < 0 ? '-' : '';\\nconst abs = Math.abs(cents);\\nconst dollars = Math.floor(abs / 100);\\nconst rest = String(abs % 100).padStart(2, '0');\",\n    \"new_str\": \"const { formatCents } = require('./money');\"\n  }\n}\n```\n\nend_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119377,
+        "id": "chatcmpl-455",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 367,
+          "prompt_tokens": 2129,
+          "total_tokens": 2496
+        }
+      }
+    },
+    {
+      "request_fingerprint": "req-v1:e5187dc19235e9fd",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "end_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119378,
+        "id": "chatcmpl-803",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 3,
+          "prompt_tokens": 2325,
+          "total_tokens": 2328
+        }
+      }
+    }
+  ]
+}

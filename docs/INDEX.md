@@ -8,6 +8,8 @@ This index is the canonical entry point for the Legion IDE documentation set und
 | --- | --- |
 | New agent or contributor | `AGENTS.md` at the repo root, then this index |
 | End user or product reader | `USER_GUIDE.md` |
+| E2E / dogfood automator | `E2E_TESTING_CATALOG.md` |
+| Privacy / data-handling reader | `PRIVACY.md` |
 | Architect / reviewer | `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` |
 | Security reviewer / vulnerability reporter | `SECURITY.md` |
 | Operator running the gates | `OPERATOR_RUNBOOK.md` |
@@ -20,6 +22,8 @@ This index is the canonical entry point for the Legion IDE documentation set und
 ## Canonical documents
 
 - `USER_GUIDE.md` — end-user entry point for the current product paths, support surfaces, and where to go next.
+- `E2E_TESTING_CATALOG.md` — exhaustive current vs expected product behavior map for automated E2E scoring (not a GA claim).
+- `PRIVACY.md` — user-facing privacy policy: Manual zero-egress, opt-in AI, no phone-home, metadata-only support bundles.
 - `KEYBOARD_REFERENCE.md` — the projected shortcut labels that are currently surfaced by the product UI.
 - `TROUBLESHOOTING.md` — diagnostic bundle guidance for smoke failures, package failures, and release support.
 - `ARCHITECTURE_AUTHORITY_BOUNDARIES.md` — canonical ownership rules across the UI, app composition, workspace/project, AI/provider, and other layers. Read this before making any change that crosses a layer boundary.
@@ -30,13 +34,26 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `LEGION_RENAME.md` — history of the Devil → Legion rename, including the rationale for allowing old Devil-era markers to remain in archived evidence and the rules for current user-facing docs.
 - `legal/smallcode-attribution.md` — per-file provenance for behaviors and test vectors ported from SmallCode (MIT); pairs with `../THIRD_PARTY_NOTICES.md` and ADR-0049.
 
-## Supporting material outside `docs/`
+## Completion program design
 
+- `superpowers/specs/2026-09-04-product-completion-design.md` — owner-approved full-vision completion design: workflow-first stages, complete Rust/TypeScript-JavaScript/Python workflows, separate implementation and product acceptance, native-input qualification, and final release criteria.
+- `superpowers/plans/2026-09-04-full-product-completion.md` — master dependency-ordered implementation plan for the approved full-vision completion program.
+- `superpowers/plans/2026-09-04-completion-traceability.md` — complete mapping of all 163 kanban tasks and 42 feature families to semantic program stages; historical `done` status is not product acceptance.
+- `superpowers/plans/2026-09-04-manual-language-completion.md` — Manual IDE and Rust/TypeScript-JavaScript/Python language workflow package plan.
+- `superpowers/plans/2026-09-04-ai-team-completion.md` — Assist, Delegate, Legion Workflow, extensions, remote, collaboration, and enterprise integration package plan.
+- `superpowers/plans/2026-09-04-production-qualification.md` — cross-cutting XQ-01..08 platform, security, release, accessibility, performance, support, and final qualification plan; implementation runs across S0-S5 and S6 performs final qualification.
+
+## Supporting material outside `docs/` (planning and evidence)
+
+- `../LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
+- `../THIRD_PARTY_NOTICES.md` — third-party notices shipped with native packages.
 - `../AGENTS.md` — concise agent/developer invariants and required phase gates. Lives at the repo root so that agents see it first.
 - `../plans/` — phase plans, evidence packages, ADRs, and the product-readiness ledger.
 - `../plans/legion-e2e/00_CONSOLIDATED_E2E_IMPLEMENTATION_PLAN.md` — **historical / supporting.** Pre-rename consolidated E2E plan and the original `plans/legion-e2e/source-package/` planning set. Do not use as current planning input; see `../plans/legion-production-master-plan-v0.2.md` for the current product path.
 - Prior-cycle audit snapshots (`ENGINEERING_STATUS.md`, `ENGINEERING_AUDIT.yaml`, `ENGINEERING_PLAN.yaml`, `audit-reports/`) were **removed from the tree in the 2026-08-12 cleanup** (commit `293d80f` and follow-ups). Where the product-readiness ledger cites them, the citation is historical; see the "Current Status" section of `../README.md` and `../plans/product-readiness-ledger.md` for the current state.
 - `../plans/legion-production-master-plan-v0.2.md` — the current production master plan: current-state rebaseline, 2026 market/technology comparison, product-workflow gaps, workstreams, and milestones from accepted substrate evidence to production utility.
+- `../plans/p0-installed-product-sequence-v0.1.md` — sequenced close-out for the ten P0 blockers from the 2026-08-31 release-gap full pass. Does not promote ledger rows. Evidence: `../plans/evidence/production/WS-P0/2026-08-31-release-gap-full-pass.md`.
+- `../plans/qual-11-release-blocker-taxonomy.md` — QUAL.11 release-blocker queue (severity, required fields, P0 register). File blockers with `.github/ISSUE_TEMPLATE/release-blocker.yml`, not Bug report.
 - `../plans/evidence/production/WS-A-D/campaign-charter.md` — charter for the WS-A-D campaign (dogfood → real DAP → sandbox isolation → WS17 release; no VSIX). **Closed 2026-07-22**; see `../plans/evidence/production/WS-A-D/campaign-closeout-2026-07-22.md`.
 - `../plans/adrs/ADR-0044-dap-client-architecture.md` — **Proposed** real DAP client architecture (Phase 2 B0); fixture dual-path until accepted + dependency-policy activation.
 - `../plans/adrs/ADR-0046-surface-expansion-freeze.md` — no new crates or surface activation until Manual mode is daily-drivable (PR-UI-001 promotion).
@@ -44,6 +61,12 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `../plans/adrs/ADR-0049-smallcode-behavioral-cannibalization.md` — port SmallCode (MIT) behaviors into Legion crates: reuse semantics and tests, reimplement authority; port map, bench holdout, and attribution mechanics.
 - `../plans/legion-production-master-plan-v0.1.md` — historical production master plan retained for audit traceability; do not treat its current-state assessment as authoritative without checking v0.2 and the product-readiness ledger.
 - `../plans/control-first-adaptive-ide-technical-design-v0.1.md` and `../plans/control-first-adaptive-ide-granular-implementation-plan-v0.1.md` — the current control-first adaptive IDE design and implementation docs.
+
+## UI direction (reference, not current work)
+
+- `ui/four-mode-prototype-fidelity.md` — fidelity ledger for the four-mode workbench: which parts of the v1 prototype are historical visual direction and which are the native v2 baseline.
+- `ui/snapshot-testing.md` — visual regression snapshots of the rendered shell: what they catch, what they do not, why baselines are per platform, and how to regenerate one for a platform you do not have.
+- `ui/canvas-workspace-direction.md` — **arrangement surface built (P6.F5.T1); the rest is still direction.** An infinite pan/zoom canvas workspace where open files are draggable cards with connections you draw. Records the spec, the codebase constraints, and what remains unbuilt. ADR-0046 was retired rather than amended for it.
 
 ## Forward-looking / non-current release templates
 

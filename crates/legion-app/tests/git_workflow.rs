@@ -2,15 +2,16 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::{Arc, Barrier},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use legion_app::{AppCommandOutcome, AppComposition};
+use legion_app::{AppCommandOutcome, AppComposition, GitInspectionRunner};
 use legion_editor::{TextEdit, TextPosition};
 use legion_ui::{
     CommandDispatchIntent, GitConflictChoiceProjection, GitDiffStrategyProjection,
-    GitHunkStageProjection, SearchStatusKindProjection,
+    GitHunkStageProjection, GitRefreshState, SearchStatusKindProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -130,6 +131,189 @@ fn projected_path_matches(path: &str, expected: &Path) -> bool {
 }
 
 #[test]
+fn git_refresh_rejects_stale_generation_and_eventually_leaves_refreshing() {
+    let repo = TempGitRepo::new();
+    let first_started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(Barrier::new(2));
+    let runner: GitInspectionRunner = {
+        let first_started = Arc::clone(&first_started);
+        let release_first = Arc::clone(&release_first);
+        Arc::new(move |generation, _root, _active_file, _options| {
+            if generation == 1 {
+                first_started.store(true, Ordering::Release);
+                release_first.wait();
+            }
+            Err(legion_project::GitInspectionError::Parse(format!(
+                "synthetic generation {generation} failure"
+            )))
+        })
+    };
+    let mut app = AppComposition::new_with_git_runner_for_test(runner);
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-generation-test".to_string()),
+    )
+    .expect("workspace should open");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("first refresh should dispatch");
+    for _ in 0..100 {
+        if first_started.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        first_started.load(Ordering::Acquire),
+        "first refresh did not start"
+    );
+
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("second refresh should dispatch");
+    let pending = app
+        .shell_projection_snapshot("git-generation")
+        .expect("pending snapshot");
+    assert_eq!(
+        pending.git_projection.refresh_state,
+        GitRefreshState::Refreshing
+    );
+    assert!(
+        pending.git_projection.stale,
+        "pending refresh must mark rows stale"
+    );
+
+    release_first.wait();
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, GitRefreshState::Failed);
+    assert!(!settled.stale, "latest failure must settle stale state");
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("generation 2"))
+    );
+}
+
+#[test]
+fn git_refresh_burst_coalesces_to_first_and_latest_worker_jobs() {
+    let repo = TempGitRepo::new();
+    let first_started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(Barrier::new(2));
+    let spawn_count = Arc::new(AtomicUsize::new(0));
+    let runner: GitInspectionRunner = {
+        let first_started = Arc::clone(&first_started);
+        let release_first = Arc::clone(&release_first);
+        let spawn_count = Arc::clone(&spawn_count);
+        Arc::new(move |generation, _root, _active_file, _options| {
+            spawn_count.fetch_add(1, Ordering::SeqCst);
+            if generation == 1 {
+                first_started.store(true, Ordering::Release);
+                release_first.wait();
+            }
+            Err(legion_project::GitInspectionError::Parse(format!(
+                "synthetic burst generation {generation} failure"
+            )))
+        })
+    };
+    let mut app = AppComposition::new_with_git_runner_for_test(runner);
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-burst-test".to_string()),
+    )
+    .expect("workspace should open");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("first refresh should dispatch");
+    for _ in 0..100 {
+        if first_started.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        first_started.load(Ordering::Acquire),
+        "first refresh did not start"
+    );
+
+    for _ in 0..49 {
+        app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+            .expect("burst refresh should dispatch");
+    }
+
+    release_first.wait();
+    let settled = app.drain_git_until_idle();
+    let jobs = spawn_count.load(Ordering::SeqCst);
+    assert!(
+        jobs <= 2,
+        "50 refreshes should execute at most two jobs, got {jobs}"
+    );
+    assert_eq!(settled.refresh_state, GitRefreshState::Failed);
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.contains("generation 50"))
+    );
+}
+
+#[test]
+fn git_stage_runs_off_thread_and_publishes_one_fresh_snapshot() {
+    let repo = TempGitRepo::new();
+    let source = repo.write("src/lib.rs", "pub fn alpha() {\n    first();\n}\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    repo.write("src/lib.rs", "pub fn alpha() {\n    first_changed();\n}\n");
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-mutation-worker".to_string()),
+    )
+    .expect("workspace should open");
+    app.open_file(source.to_string_lossy())
+        .expect("source should open");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("refresh should dispatch");
+    let projection = app.drain_git_until_idle();
+    let hunk_id = projection
+        .hunks
+        .iter()
+        .find(|hunk| hunk.stage == GitHunkStageProjection::Unstaged)
+        .expect("unstaged hunk should exist")
+        .hunk_id
+        .clone();
+
+    let pending = match app
+        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
+        .expect("stage should dispatch")
+    {
+        AppCommandOutcome::GitUpdated(projection) => projection,
+        other => panic!("expected GitUpdated, got {other:?}"),
+    };
+    assert!(pending.stale, "stage must return stale rows before drain");
+    assert_eq!(
+        pending.refresh_state,
+        legion_ui::GitRefreshState::Refreshing
+    );
+
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, legion_ui::GitRefreshState::Idle);
+    assert!(!settled.stale);
+    assert!(
+        settled
+            .hunks
+            .iter()
+            .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
+    );
+    assert!(
+        run_git(repo.path(), ["diff", "--cached", "--", "src/lib.rs"]).contains("first_changed")
+    );
+}
+
+#[test]
 fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
     let repo = TempGitRepo::new();
     let source = repo.write(
@@ -153,13 +337,14 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert_eq!(projection.changed_files.len(), 1);
     assert_eq!(
@@ -204,7 +389,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         .expect("unstaged hunk should exist")
         .hunk_id
         .clone();
-    let staged = match app
+    let _staged = match app
         .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk {
             hunk_id: hunk_id.clone(),
         })
@@ -213,6 +398,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let staged = app.drain_git_until_idle();
     assert!(
         staged
             .hunks
@@ -230,7 +416,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         .expect("staged hunk should exist")
         .hunk_id
         .clone();
-    let unstaged = match app
+    let _unstaged = match app
         .dispatch_ui_intent(CommandDispatchIntent::UnstageGitHunk {
             hunk_id: staged_hunk_id,
         })
@@ -239,6 +425,7 @@ fn git_workflow_refreshes_projection_and_stages_hunks_through_app_authority() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let unstaged = app.drain_git_until_idle();
     assert!(
         unstaged
             .hunks
@@ -278,13 +465,14 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
     let hunk_id = projection
         .hunks
         .iter()
@@ -292,13 +480,14 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
         .expect("unstaged hunk should exist")
         .hunk_id
         .clone();
-    let staged = match app
+    let _staged = match app
         .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
         .expect("stage hunk should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let staged = app.drain_git_until_idle();
     assert!(
         staged
             .hunks
@@ -306,7 +495,7 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
             .any(|hunk| hunk.stage == GitHunkStageProjection::Staged)
     );
 
-    let committed = match app
+    let _committed = match app
         .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
             message: "feat: update alpha".to_string(),
         })
@@ -315,6 +504,7 @@ fn git_workflow_commits_staged_changes_through_app_authority() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let committed = app.drain_git_until_idle();
     assert!(
         committed
             .hunks
@@ -370,13 +560,14 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -396,7 +587,7 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
         "accept_incoming action should be present"
     );
 
-    let resolved = match app
+    let _resolved = match app
         .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
             path: "src/lib.rs".to_string(),
             choice: GitConflictChoiceProjection::AcceptCurrent,
@@ -406,6 +597,7 @@ fn git_workflow_resolves_conflicts_through_app_authority() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),
@@ -470,13 +662,14 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -493,7 +686,7 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
     );
 
     // Accept incoming side to verify the buffer is synchronized.
-    let resolved = match app
+    let _resolved = match app
         .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
             path: "src/lib.rs".to_string(),
             choice: GitConflictChoiceProjection::AcceptIncoming,
@@ -503,6 +696,7 @@ fn git_workflow_resolves_conflict_and_syncs_open_buffer() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),
@@ -616,13 +810,14 @@ fn git_workflow_rejects_conflict_resolution_when_buffer_is_dirty() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -727,13 +922,14 @@ fn git_workflow_rejects_conflict_resolution_from_subdirectory_when_buffer_dirty(
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -847,13 +1043,14 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
     app.open_file(source.to_string_lossy())
         .expect("source should open");
 
-    let projection = match app
+    let _projection = match app
         .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
         .expect("git refresh should dispatch")
     {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let projection = app.drain_git_until_idle();
 
     assert!(
         !projection.conflicts.is_empty(),
@@ -870,7 +1067,7 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
     );
 
     // Resolve with repo-relative path should succeed and sync the open buffer.
-    let resolved = match app
+    let _resolved = match app
         .dispatch_ui_intent(CommandDispatchIntent::ResolveGitConflict {
             path: "src/lib.rs".to_string(),
             choice: GitConflictChoiceProjection::AcceptCurrent,
@@ -880,6 +1077,7 @@ fn git_workflow_resolves_conflict_from_subdirectory_and_syncs_open_buffer() {
         AppCommandOutcome::GitUpdated(projection) => projection,
         other => panic!("expected git projection, got {other:?}"),
     };
+    let resolved = app.drain_git_until_idle();
 
     assert!(
         !resolved.conflicts.iter().any(|c| c.path == "src/lib.rs"),

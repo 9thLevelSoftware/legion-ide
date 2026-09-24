@@ -1,0 +1,16 @@
+CMD: cargo clippy -p legion-input-driver --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-input-driver v0.1.0 (D:\legion-ide-completion\crates\legion-input-driver)
+error: unused import: `windows_uia::*`
+   --> crates\legion-input-driver\tests\..\src\observe.rs:129:9
+    |
+129 | pub use windows_uia::*;
+    |         ^^^^^^^^^^^^^^
+    |
+    = note: `-D unused-imports` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_imports)]`
+
+error: could not compile `legion-input-driver` (test "driver_contract") due to 1 previous error
+END
+EXIT=101

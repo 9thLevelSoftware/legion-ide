@@ -11,6 +11,7 @@
 //!   cargo build -p legion-lsp --bin mock_lsp_server
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use legion_lsp::{LspServerProcessConfig, LspSupervisorConfig};
 use legion_protocol::{
@@ -38,6 +39,23 @@ pub fn mock_server_path() -> Option<PathBuf> {
     };
     let candidate = profile_dir.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+/// Poll until `pred` is true, or six seconds elapse.
+///
+/// Live mock tests share a cap-one worker queue with the handshake `didOpen`.
+/// `issue_request` uses `try_send` and returns false while that slot is full,
+/// so a single attempt right after Live is a race. Callers should drain the
+/// session inside `pred` and retry the issue.
+#[allow(dead_code)]
+pub fn wait_until(mut pred: impl FnMut() -> bool) -> bool {
+    for _ in 0..600 {
+        if pred() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
 }
 
 fn fingerprint(value: &str) -> FileFingerprint {
@@ -70,7 +88,7 @@ fn posture(trust: WorkspaceTrustState, privacy_scope_allowed: bool) -> LspWorksp
         workspace_trust_state: trust,
         privacy_scope: SemanticPrivacyScope::Workspace,
         privacy_scope_allowed,
-        required_capability: CapabilityId("process.spawn".to_string()),
+        required_capability: CapabilityId("lsp.launch".to_string()),
         decision_id: Some(CapabilityDecisionId(99)),
         diagnostics: Vec::new(),
         schema_version: 1,
@@ -119,6 +137,28 @@ pub fn mock_supervisor_config() -> LspSupervisorConfig {
         max_backoff_ms: 400,
         max_restart_attempts: 3,
     }
+}
+
+/// A mock that omits one capability from its initialize response.
+///
+/// The withheld name travels in the CHILD's environment, not the test
+/// process's. `std::env::set_var` mutates the whole process, and cargo runs
+/// tests in a binary concurrently — so a test that set it while another test
+/// spawned its own mock would hand that mock the same instruction. The other
+/// test would then see a capability missing that it asserts is present and fail
+/// on whatever the scheduler happened to do. `LspServerProcessConfig::env`
+/// reaches exactly one child and cannot leak.
+///
+/// `dead_code` is allowed because this module is included by several test
+/// binaries and each uses only the helpers it needs.
+#[allow(dead_code)]
+pub fn mock_supervisor_config_withholding(capability: &str) -> LspSupervisorConfig {
+    let mut config = mock_supervisor_config();
+    config.process.env.push((
+        "LEGION_MOCK_WITHHOLD_CAPABILITY".to_string(),
+        capability.to_string(),
+    ));
+    config
 }
 
 /// Same as [`mock_supervisor_config`] but with `MOCK_LSP_EMIT_DIAGNOSTICS=1`

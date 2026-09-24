@@ -1,0 +1,611 @@
+[
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-1001:11",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-1001",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-1001"
+      },
+      "consent_disposition": "Granted",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:1001",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-1001"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:1001",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-1001"
+      },
+      "proposal_id": 1001,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 1001,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 11,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 1001,
+      "lifecycle_state": "Approved",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 1001,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-1002:12",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-1002",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-1002"
+      },
+      "consent_disposition": "Granted",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:1002",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-1002"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:1002",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-1002"
+      },
+      "proposal_id": 1002,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 1002,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 12,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 1002,
+      "lifecycle_state": "Rejected",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 1002,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-1003:13",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-1003",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-1003"
+      },
+      "consent_disposition": "NotRequired",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:1003",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-1003"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:1003",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-1003"
+      },
+      "proposal_id": 1003,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 1003,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 13,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 1003,
+      "lifecycle_state": "Approved",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 1003,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-1004:14",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-1004",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-1004"
+      },
+      "consent_disposition": "Granted",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:1004",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-1004"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:1004",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-1004"
+      },
+      "proposal_id": 1004,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 1004,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 14,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 1004,
+      "lifecycle_state": "Previewed",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 1004,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-9001:91",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-9001",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-9001"
+      },
+      "consent_disposition": "Denied",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:9001",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-9001"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:9001",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-9001"
+      },
+      "proposal_id": 9001,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 9001,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 91,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 9001,
+      "lifecycle_state": "Approved",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 9001,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-9002:92",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-9002",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-9002"
+      },
+      "consent_disposition": "Missing",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:9002",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-9002"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:9002",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-9002"
+      },
+      "proposal_id": 9002,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 9002,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 92,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 9002,
+      "lifecycle_state": "Rejected",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 9002,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  },
+  {
+    "audit": {
+      "audit_id": "assist:audit:req-9003:93",
+      "provider_capability_id": "provider:local-redacted",
+      "provider_capability_hash": {
+        "algorithm": "hash",
+        "value": "provider-hash"
+      },
+      "route_decision_id": "assist:route:req-9003",
+      "route_decision_hash": {
+        "algorithm": "hash",
+        "value": "route-hash-9003"
+      },
+      "consent_disposition": "RenewalRequired",
+      "budget_dispositions": [
+        "Allowed"
+      ],
+      "privacy_disposition": "Allowed",
+      "request_contract_id": "assist:req:9003",
+      "request_contract_hash": {
+        "algorithm": "hash",
+        "value": "request-hash-9003"
+      },
+      "projection_id": "assisted-ai:p6-3",
+      "projection_hash": {
+        "algorithm": "hash",
+        "value": "projection-hash"
+      },
+      "preview_id": "assist:preview:9003",
+      "preview_hash": {
+        "algorithm": "hash",
+        "value": "preview-hash-9003"
+      },
+      "proposal_id": 9003,
+      "outcome_category": "ProposalPreviewReady",
+      "refusal_error_category": null,
+      "correlation_id": 9003,
+      "causality_id": "11111111-1111-1111-1111-111111111111",
+      "event_sequence": 93,
+      "risk_labels": [
+        "Medium"
+      ],
+      "privacy_labels": [
+        "WorkspaceMetadata"
+      ],
+      "redaction_state": "MetadataOnly",
+      "runtime_invocation_state": "NotEncoded",
+      "runtime_activation_labels": [
+        "provider.invocation.not_encoded",
+        "network.not_encoded",
+        "tool.disabled",
+        "agent.disabled",
+        "terminal.disabled"
+      ],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    },
+    "proposal": {
+      "proposal_id": 9003,
+      "lifecycle_state": "Approved",
+      "timestamp": 1717171717,
+      "principal": "principal-1",
+      "capability": "cap:proposal",
+      "correlation_id": 9003,
+      "causality_id": "22222222-2222-2222-2222-222222222222",
+      "payload_summary": {
+        "kind": "TextEdit",
+        "affected_files": [
+          11,
+          12
+        ],
+        "title": "Fix acceptance edge case in ledger reconciliation",
+        "byte_count": 144
+      },
+      "checkpoint_rollback_projection": null,
+      "risk_rule_ids": [
+        "risk.rule.accepted"
+      ],
+      "diagnostics": [],
+      "redaction_hints": [
+        "MetadataOnly"
+      ],
+      "schema_version": 1
+    }
+  }
+]

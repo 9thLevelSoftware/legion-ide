@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-02",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:f42a8ed1e4c5df4d",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"function\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"tests/test_wrap.py\",\n    \"replacement\": \"import unittest\\nfrom textkit.wrap import wrap_text\\n\\nclass TestWrapText(unittest.TestCase):\\n\\n    def test_normal_wrapping(self):\\n        self.assertEqual(wrap_text('Hello world', width=5), ['Hello', 'world'])\\n\\n    def test_long_word(self):\\n        self.assertEqual(wrap_text('Supercalifragilisticexpialidocious', width=5), ['Supercalifragilisticexpialidocious'])\\n\\n    def test_empty_input(self):\\n        self.assertEqual(wrap_text('   ', width=5), [])\\n        self.assertEqual(wrap_text('', width=5), [])\\n\\n    def test_negative_width(self):\\n        with self.assertRaises(ValueError):\\n            wrap_text('Hello', width=-1)\\n\\n    def test_zero_width(self):\\n        with self.assertRaises(ValueError):\\n            wrap_text('Hello', width=0)\\n\\nif __name__ == '__main__':\\n    unittest.main()\\n\",\n    \"proposal_title\": \"Add test coverage for wrap_text\",\n    \"proposal_reason\": \"Add tests for wrap_text covering various scenarios including normal wrapping, long words, empty input, and invalid widths.\"\n  }\n}\n```\n\nend_turn",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787118827,
+        "id": "chatcmpl-412",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 294,
+          "prompt_tokens": 708,
+          "total_tokens": 1002
+        }
+      }
+    }
+  ]
+}

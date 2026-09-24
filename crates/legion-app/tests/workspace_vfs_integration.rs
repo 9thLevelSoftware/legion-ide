@@ -46,14 +46,14 @@ use uuid::Uuid;
 
 fn create_root() -> std::path::PathBuf {
     let root = std::env::temp_dir().join(format!(
-        "legion-app-integration-{}-{}",
+        "legion-app-integration-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+            .map_or(0, |value| value.as_millis() as u64),
+        TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&root).expect("create temp root");
+    std::fs::create_dir(&root).expect("create temp root");
     root
 }
 
@@ -2389,10 +2389,13 @@ fn workspace_vfs_integration_conflicted_registered_save_preserves_dirty_buffer_a
         .handle_proposal_request(ProposalRequest::Apply(proposal))
         .expect("apply conflicted generic save proposal");
 
-    assert!(matches!(
-        response,
-        ProposalResponse::Conflict { .. } | ProposalResponse::Stale { .. }
-    ));
+    assert!(
+        matches!(
+            response,
+            ProposalResponse::Conflict { .. } | ProposalResponse::Stale { .. }
+        ),
+        "an external overwrite between preview and apply must be refused, got {response:?}"
+    );
     assert_eq!(
         std::fs::read_to_string(&target).expect("disk content preserved"),
         "external"
@@ -2572,6 +2575,7 @@ fn workspace_vfs_integration_single_file_workspace_edit_create_applies_closed_fi
                 redaction_hints: Vec::new(),
             },
             file_edits: Vec::new(),
+            change_annotations: Vec::new(),
             file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
                 path: target_path,
                 initial_content_hash: None,
@@ -2672,6 +2676,7 @@ fn workspace_vfs_integration_workspace_edit_multi_file_text_edits_apply_atomical
                 },
                 preconditions: edit_preconditions,
             }],
+            change_annotations: Vec::new(),
             file_operations: vec![legion_protocol::WorkspaceFileOperation::Create {
                 path: create_path,
                 initial_content_hash: None,
@@ -4661,6 +4666,22 @@ impl AppEditorCommandPort for MockEditorPort {
     ) -> Result<TextTransactionDescriptor, legion_app::AppCompositionError> {
         self.applied.push((buffer_id, edit));
         Ok(mock_descriptor(buffer_id, FileId(7)))
+    }
+
+    fn replace_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        _text: String,
+    ) -> Result<TextTransactionDescriptor, legion_app::AppCompositionError> {
+        Ok(mock_descriptor(buffer_id, FileId(7)))
+    }
+
+    fn delete_directed_carets(
+        &mut self,
+        buffer_id: BufferId,
+        _backward: bool,
+    ) -> Result<Option<TextTransactionDescriptor>, legion_app::AppCompositionError> {
+        Ok(Some(mock_descriptor(buffer_id, FileId(7))))
     }
 
     fn undo(

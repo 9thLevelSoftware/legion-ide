@@ -1,0 +1,10 @@
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Checking legion-security v0.1.0 (D:\legion-ide-completion\crates\legion-security)
+    Checking legion-index v0.1.0 (D:\legion-ide-completion\crates\legion-index)
+    Checking legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Checking legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+    Checking legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+    Checking xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.36s
+EXIT=0

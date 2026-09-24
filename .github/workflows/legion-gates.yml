@@ -10,9 +10,10 @@ name: Legion Gates
 #   scripts still run it)
 # - golden-path smokes (land with the GP-1 xtask command in a separate
 #   legion-smoke workflow)
-# - perf-harness budgets run in report-only mode on shared runners (timing on
-#   hosted VMs is too noisy for a strict wall-clock gate; the report artifact
-#   is uploaded and the strict gate stays local)
+# - perf-harness SKELETON microbenchmark budgets run report-only on shared
+#   runners (a 2ms wall-clock microbenchmark on a hosted VM is noise). The real
+#   PRODUCT workload budgets and workload COVERAGE are enforced on all three
+#   OSes, so a per-OS failure cannot become a quietly shorter report.
 
 on:
   push:
@@ -28,7 +29,11 @@ jobs:
   gates:
     name: Standing gates (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 120
+    # 180, not 120: the perf harness now runs real product workloads, and the
+    # 100K-file and 100MB fixtures are disk-bound enough on a shared runner to
+    # add tens of minutes. A job that times out is a job whose perf coverage
+    # did not run.
+    timeout-minutes: 180
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
       CARGO_TERM_COLOR: always
@@ -45,14 +50,40 @@ jobs:
           # skip on every run and never say anything.
           fetch-depth: 0
 
+      # Hosted Windows Defender is the 13x spread on the 100K-file search
+      # (74s warm vs ~950s cold; see xtask/src/perf_workloads.rs). That
+      # fixture is written under the process temp dir, not GITHUB_WORKSPACE,
+      # so excluding only the repo does not cover it. The VM is thrown away
+      # after the job; a failed preference change must not fail the gate.
+      - name: Exclude runner paths from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Continue
+          $paths = @(
+            $env:GITHUB_WORKSPACE,
+            $env:RUNNER_TEMP,
+            $env:TEMP,
+            $env:TMP,
+            (Join-Path $env:USERPROFILE '.cargo'),
+            (Join-Path $env:USERPROFILE '.rustup')
+          ) | Where-Object { $_ }
+          foreach ($path in $paths) {
+            Add-MpPreference -ExclusionPath $path -ErrorAction Continue
+          }
+
+      # Runs before the install it covers, so a broken installer is reported as
+      # a failing test rather than as a mystery in the middle of an apt log.
+      - name: Shared installer unit test
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/apt-install.test.sh
+
+      # Bounded and retried; see the script for why, and for the budgets. The
+      # step cap is the backstop if the script's own timeouts are ever removed.
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev \
-            libxcursor-dev libx11-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libgl1-mesa-dev libgtk-3-dev
+        timeout-minutes: 45
+        run: .github/scripts/apt-install.sh --gui mesa-vulkan-drivers
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -76,6 +107,14 @@ jobs:
 
       - name: xtask extract-before-modify
         run: cargo run -p xtask -- extract-before-modify
+
+      # A capability nobody can reach is not shipped. Four were found complete,
+      # tested and unreachable on 2026-08-17, one at a time, by running the app.
+      - name: xtask intent-reachability
+        run: cargo run -p xtask -- intent-reachability
+
+      - name: xtask deferred-surfaces
+        run: cargo run -p xtask -- deferred-surfaces
 
       - name: xtask verify-kanban-backlog
         run: cargo run -p xtask -- verify-kanban-backlog
@@ -112,28 +151,83 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-targets --no-fail-fast
 
+      # Snapshot baselines are per platform, so a failure here is the only way
+      # to obtain the baseline for a platform nobody has locally. `.new.png` is
+      # what this run rendered and `.diff.png` shows what moved; both are needed
+      # to decide whether a diff is a regression or an intended change.
+      - name: Upload snapshot diffs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shell-snapshots-${{ matrix.os }}
+          if-no-files-found: ignore
+          retention-days: 14
+          path: |
+            crates/legion-desktop/tests/snapshots/*.new.png
+            crates/legion-desktop/tests/snapshots/*.diff.png
+
+      # Measurement-configuration guard: LEGION_AI_GOVERNORS=off is the arm
+      # legion-bench's *raw baseline* runs under, and the Phase 2 exit gate is a
+      # governed-versus-raw comparison. Until 2026-08-17 nothing ran the suite
+      # that way and 13 tests failed in it — they asserted governed behavior
+      # unconditionally while the code branches on the seam. The numbers were
+      # never wrong, but the configuration they were measured in had never been
+      # verified.
+      #
+      # Only the crates that read the seam are re-run; they are already built by
+      # the step above, so this costs seconds. If that set ever grows, this list
+      # must grow with it:
+      #   grep -rl 'small_model_governors_enabled\|LEGION_AI_GOVERNORS' crates/
+      - name: cargo test (raw measurement arm)
+        env:
+          LEGION_AI_GOVERNORS: "off"
+        run: cargo test -p legion-ai -p legion-ai-providers -p legion-agent --all-targets --no-fail-fast
+
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Skeleton microbenchmarks only (workload_kind=skeleton). Hosted budgets are
-      # report-only: LEGION_PERF_FAIL_ON_BUDGET_MS=0 disables fail-on-budget so
-      # noisy VMs cannot red PRs. Strict budgets remain a local gate.
-      - name: xtask perf-harness (report-only skeleton on hosted runners)
+      # Real product workloads (workload_kind=product+skeleton): startup,
+      # input-to-paint, scroll, memory ceiling, the Legion repo, a 100K-file
+      # workspace, and a 100MB file, measured by product-crate subprocesses.
+      # Nothing here is behind an opt-in flag — a budget nobody runs is not a
+      # budget (P8.F4.T1).
+      #
+      # LEGION_PERF_FAIL_ON_BUDGET_MS=0 makes the *synthetic skeleton*
+      # microbenchmarks (m0/m1) report-only, because a 2ms wall-clock
+      # microbenchmark on a shared VM is noise. It does NOT apply to product
+      # workloads or to renderer-backed paint rows (manual.renderer_input_to_paint
+      # and m9.large_file_100mb, GAP-09.2): those stay fail-closed. An override
+      # that makes every budget on every OS unfailable is P8.F4.T2's stop
+      # condition.
+      #
+      # Workload COVERAGE is enforced everywhere too. The verify step fails if
+      # any required workload did not produce a measurement on this OS, which is
+      # what stops a per-OS failure from turning into a quietly shorter report.
+      # `continue-on-error` must never be added to either step for that reason.
+      - name: xtask perf-harness (product budgets armed, skeletons report-only)
         env:
           LEGION_PERF_FAIL_ON_BUDGET_MS: "0"
         run: cargo run -p xtask -- perf-harness
 
-      - name: xtask verify-perf-harness (report-only skeleton on hosted runners)
+      - name: xtask verify-perf-harness (coverage and product budgets enforced)
         env:
           LEGION_PERF_FAIL_ON_BUDGET_MS: "0"
         run: cargo run -p xtask -- verify-perf-harness
 
-      - name: Upload perf-harness report
+      # Uploaded even on failure: when a workload does not run, the report and
+      # the trend entry are the only record of why.
+      - name: Upload perf-harness report and trend entry
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: perf-harness-report-${{ matrix.os }}
-          path: target/perf-harness/perf_report.toml
+          path: |
+            target/perf-harness/perf_report.toml
+            target/perf-harness/product-perf.toml
+            target/perf-harness/large-file-perf.toml
+            target/perf-harness/manual_renderer_perf.toml
+            target/perf-harness/large_file_manual_renderer_perf.toml
+            plans/evidence/perf-harness-trend/entries/
           if-no-files-found: warn
 
       - name: Provision rust-analyzer
@@ -141,8 +235,30 @@ jobs:
         continue-on-error: true
         run: rustup component add rust-analyzer
 
+      # A ceiling on the one step that spawns something it does not control.
+      #
+      # Everything else in this job is cargo, which fails or finishes. This
+      # launches a real rust-analyzer and talks to it, and a language server
+      # that never answers leaves the step running until the job's own
+      # `timeout-minutes: 180` fires -- three hours during which the PR cannot
+      # merge and the queue behind it waits. There is precedent for the hang:
+      # `plans/evidence/production/WS-P0/2026-08-15-hosted-smoke-first-run.md`
+      # records rust-analyzer 1.97.1 timing out on a hosted runner.
+      #
+      # Fifteen minutes against a measured worst case of 5m54s.
+      #
+      # That number is from the slowest platform on a cold cache: run
+      # 32600972258, windows-latest, step 22:56:09 -> 23:02:03. The job around
+      # it took 70m38s, and the two are easy to confuse -- most of that hour is
+      # the build and the gates, not this step.
+      #
+      # This is a hang detector, not a performance budget. A hang is unbounded,
+      # so any ceiling comfortably above the measured cost and far below the
+      # job's 180 does the job; 2.5x leaves room for a slower runner without
+      # ever making a healthy run a merge blocker.
       - name: xtask rust-analyzer-smoke (real server)
         if: steps.provision_ra.outcome == 'success'
+        timeout-minutes: 15
         run: cargo run -p xtask -- rust-analyzer-smoke
 
       - name: Record skipped rust-analyzer smoke

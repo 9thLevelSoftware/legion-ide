@@ -13,7 +13,8 @@ use legion_desktop::{
 };
 use legion_protocol::{ProtocolTextRange, TextCoordinate, TimestampMillis};
 use legion_ui::{
-    SearchProjection, SearchScopeProjection, SearchStatusKindProjection, SearchStatusProjection,
+    SearchProjection, SearchResultProjection, SearchScopeProjection, SearchStatusKindProjection,
+    SearchStatusProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -299,6 +300,35 @@ fn search_view_model_uses_useful_idle_and_no_match_states() {
         validation_error.status_rows,
         vec!["Check the search term and try again. unclosed character class at position 6"]
     );
+}
+
+#[test]
+fn search_view_model_marks_superseded_rows_as_outdated() {
+    let mut projection = SearchProjection::idle();
+    projection.query_id = Some("search:latest".to_string());
+    projection.scope = SearchScopeProjection::Workspace;
+    projection.query_label = "latest".to_string();
+    projection.status = SearchStatusProjection {
+        kind: SearchStatusKindProjection::Running,
+        message: "Search running".to_string(),
+    };
+    projection.results = vec![SearchResultProjection {
+        query_id: "search:previous".to_string(),
+        scope: SearchScopeProjection::Workspace,
+        workspace_id: None,
+        buffer_id: None,
+        file_id: None,
+        file_path: None,
+        line_number: 0,
+        range: range(0, 6),
+        snippet: "needle".to_string(),
+        snippet_truncated: false,
+        stale: true,
+    }];
+
+    let model = DesktopSearchViewModel::from_projection(&projection);
+    assert!(model.result_rows[0].contains("[outdated]"));
+    assert_eq!(model.status_rows, vec!["Searching…"]);
 }
 
 #[test]

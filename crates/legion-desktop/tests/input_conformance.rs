@@ -12,12 +12,15 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use legion_app::LspDebounceKind;
 use legion_desktop::bridge::DesktopAction;
 use legion_desktop::workflow::{
-    DesktopLaunchConfig, DesktopRuntime, test_editor_keyboard_control_actions,
+    DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime, test_editor_keyboard_control_actions,
     test_editor_keyboard_control_actions_with_completion, test_editor_text_input_actions,
+    test_editor_text_input_actions_with_vim,
 };
 use legion_protocol::{ProtocolTextRange, TextCoordinate};
+use legion_ui::{PaletteMode, SearchScopeProjection};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -101,6 +104,946 @@ fn snapshot_viewport_cursor(runtime: &DesktopRuntime) -> TextCoordinate {
         .cursor
 }
 
+fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: Some(key),
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+fn frame(events: Vec<egui::Event>, modifiers: egui::Modifiers) -> egui::RawInput {
+    egui::RawInput {
+        events,
+        modifiers,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn native_frame_home_then_text_uses_refreshed_authoritative_cursor() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+            egui::Event::Text("X".into()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("Xabcd")
+    );
+}
+
+#[test]
+fn native_frame_text_then_home_uses_text_updated_cursor() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            egui::Event::Text("X".into()),
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor,
+        coord(0, 0, 0)
+    );
+}
+
+#[test]
+fn native_frame_shift_home_then_text_replaces_the_authoritative_selection() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 4, 4),
+    })
+    .expect("cursor action");
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, shift),
+            egui::Event::Text("X".into()),
+        ],
+        shift,
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("X")
+    );
+}
+
+#[test]
+fn native_frame_backspace_home_and_home_backspace_preserve_event_order() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Backspace, egui::Modifiers::default()),
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("acd")
+    );
+
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+            key_event(egui::Key::Backspace, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("abcd")
+    );
+}
+
+#[test]
+fn native_frame_preedit_owns_home_but_commit_releases_home_after_replacement() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("ime-frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            egui::Event::Ime(egui::ImeEvent::Preedit("draft".into())),
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor
+            .character,
+        2
+    );
+
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("ime-commit.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetDirectedSelection {
+        buffer_id: Some(buffer_id),
+        anchor: coord(0, 1, 1),
+        head: coord(0, 3, 3),
+    })
+    .expect("selection action");
+    app.run_headless_input(frame(
+        vec![
+            egui::Event::Ime(egui::ImeEvent::Commit("X".into())),
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("aXd")
+    );
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor
+            .character,
+        0
+    );
+}
+
+#[test]
+fn native_frame_completion_popup_owns_home() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("completion-frame.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    let mut app = DesktopEframeApp::new(runtime);
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.set_completion_popup_open_for_test(true);
+    app.run_headless_input(frame(
+        vec![key_event(egui::Key::Home, egui::Modifiers::default())],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor
+            .character,
+        2
+    );
+}
+
+#[test]
+fn native_frame_home_then_backspace_does_not_run_tier1_twice() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("order.txt", "ab\ncd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(1, 1, 4),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+            key_event(egui::Key::Backspace, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("abcd")
+    );
+}
+
+#[test]
+fn native_frame_enter_and_repeated_boundaries_preserve_event_order_and_modifiers() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("order.txt", "abcd\nefgh");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+            key_event(egui::Key::Enter, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .small_buffer_text(),
+        Some("\nabcd\nefgh")
+    );
+
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("repeat.txt", "abcd\nefgh");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    app.run_headless_input(frame(
+        vec![
+            key_event(egui::Key::Home, shift),
+            key_event(egui::Key::End, shift),
+        ],
+        shift,
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .selections
+            .first()
+            .expect("selection")
+            .start
+            .character,
+        2
+    );
+
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("mods.txt", "abcd\nefgh");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(1, 2, 7),
+    })
+    .expect("cursor action");
+    let command = egui::Modifiers {
+        command: true,
+        ..Default::default()
+    };
+    app.run_headless_input(frame(
+        vec![key_event(egui::Key::Home, Default::default())],
+        command,
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor
+            .line,
+        1
+    );
+}
+
+#[test]
+fn native_directed_unicode_drag_route_reaches_editor_then_shift_home() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("unicode.txt", "aé🙂z\nnext");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetDirectedSelection {
+        buffer_id: Some(buffer_id),
+        anchor: coord(0, 7, 7),
+        head: coord(0, 3, 3),
+    })
+    .expect("directed selection action");
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    app.run_headless_input(frame(vec![key_event(egui::Key::Home, shift)], shift));
+    let viewport = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .viewport
+        .expect("viewport");
+    assert_eq!(viewport.cursor.character, 0);
+    assert_eq!(
+        viewport
+            .selections
+            .first()
+            .expect("selection")
+            .start
+            .character,
+        0
+    );
+    assert_eq!(
+        viewport
+            .selections
+            .first()
+            .expect("selection")
+            .end
+            .character,
+        7
+    );
+}
+
+#[test]
+fn replacement_completion_uses_post_action_cursor_and_buffer() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("completion-replace.txt", "abcd");
+    let mut runtime = open_runtime(workspace.path(), &file);
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    runtime
+        .handle_action(DesktopAction::SetDirectedSelection {
+            buffer_id: Some(buffer_id),
+            anchor: coord(0, 1, 1),
+            head: coord(0, 3, 3),
+        })
+        .expect("selection action");
+    runtime
+        .handle_action(DesktopAction::ReplaceDirectedCarets {
+            text: "X".to_string(),
+        })
+        .expect("replacement action");
+    let events = runtime.lsp_debounce_events_for_test(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    let completion = events
+        .iter()
+        .find(|event| event.kind == LspDebounceKind::Completion)
+        .expect("replacement should arm completion");
+    assert_eq!(completion.buffer_id, buffer_id);
+    assert_eq!(completion.position, coord(0, 2, 2));
+}
+
+#[test]
+fn directional_delete_completion_uses_post_action_cursor_and_noop_stays_disarmed() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("completion-delete.txt", "abcd");
+    let mut runtime = open_runtime(workspace.path(), &file);
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    runtime
+        .handle_action(DesktopAction::SetCursor {
+            buffer_id: Some(buffer_id),
+            cursor: coord(0, 1, 1),
+        })
+        .expect("cursor action");
+    runtime
+        .handle_action(DesktopAction::DeleteDirectedCarets {
+            buffer_id: Some(buffer_id),
+            backward: true,
+        })
+        .expect("backspace action");
+    let events = runtime.lsp_debounce_events_for_test(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    let completion = events
+        .iter()
+        .find(|event| event.kind == LspDebounceKind::Completion)
+        .expect("directional deletion should arm completion");
+    assert_eq!(completion.buffer_id, buffer_id);
+    assert_eq!(completion.position, coord(0, 0, 0));
+
+    runtime
+        .handle_action(DesktopAction::SetCursor {
+            buffer_id: Some(buffer_id),
+            cursor: coord(0, 0, 0),
+        })
+        .expect("reset cursor");
+    runtime
+        .handle_action(DesktopAction::DeleteDirectedCarets {
+            buffer_id: Some(buffer_id),
+            backward: true,
+        })
+        .expect("noop backspace action");
+    let noop_events = runtime.lsp_debounce_events_for_test(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    assert!(
+        noop_events
+            .iter()
+            .all(|event| event.kind != LspDebounceKind::Completion),
+        "noop deletion must not arm completion"
+    );
+}
+
+#[test]
+fn boundary_hover_uses_post_action_cursor() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("hover-boundary.txt", "abcd");
+    let mut runtime = open_runtime(workspace.path(), &file);
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    runtime
+        .handle_action(DesktopAction::SetCursor {
+            buffer_id: Some(buffer_id),
+            cursor: coord(0, 3, 3),
+        })
+        .expect("cursor action");
+    runtime
+        .handle_action(DesktopAction::MoveToBoundary {
+            buffer_id: Some(buffer_id),
+            boundary: legion_ui::EditorBoundaryKind::LineStart,
+            extend: false,
+        })
+        .expect("boundary action");
+    let events = runtime.lsp_debounce_events_for_test(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    let hover = events
+        .iter()
+        .find(|event| event.kind == LspDebounceKind::Hover)
+        .expect("boundary should arm hover");
+    assert_eq!(hover.buffer_id, buffer_id);
+    assert_eq!(hover.position, coord(0, 0, 0));
+}
+
+#[test]
+fn palette_blocks_directed_replacement_without_arming_completion() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("palette-block.txt", "abcd");
+    let mut runtime = open_runtime(workspace.path(), &file);
+    let buffer_id = runtime
+        .projection_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    runtime
+        .handle_action(DesktopAction::OpenPalette {
+            mode: PaletteMode::Command,
+            query: ">".to_string(),
+            scope: SearchScopeProjection::Workspace,
+        })
+        .expect("palette action");
+    runtime
+        .handle_action(DesktopAction::ReplaceDirectedCarets {
+            text: "X".to_string(),
+        })
+        .expect("blocked action should be handled");
+    assert_eq!(snapshot_text(&runtime), Some("abcd".to_string()));
+    let events = runtime.lsp_debounce_events_for_test(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+    );
+    assert!(
+        events
+            .iter()
+            .all(|event| event.kind != LspDebounceKind::Completion)
+    );
+    assert_eq!(
+        runtime
+            .projection_snapshot()
+            .active_buffer_projection
+            .buffer_id,
+        Some(buffer_id)
+    );
+}
+
+#[test]
+fn boundary_frame_is_blocked_for_focused_text_control_and_vim_owns_text() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("ownership.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let snapshot = runtime.projection_snapshot();
+    let mut input = egui::InputState::default();
+    input.events = vec![key_event(egui::Key::Home, egui::Modifiers::default())];
+    assert!(test_editor_keyboard_control_actions(&input, &snapshot, false, true).is_empty());
+
+    egui::__run_test_ui(|ui| {
+        let actions = test_editor_text_input_actions_with_vim(
+            ui,
+            &[egui::Event::Text("j".to_string())],
+            &snapshot,
+            true,
+        );
+        assert_eq!(
+            actions,
+            vec![DesktopAction::VimKey {
+                key: 'j',
+                ctrl: false
+            }]
+        );
+    });
+}
+
+#[test]
+fn live_palette_owns_left_right_until_closed() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("palette-horizontal.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.handle_action(DesktopAction::OpenPalette {
+        mode: PaletteMode::Command,
+        query: "ab".to_string(),
+        scope: SearchScopeProjection::Workspace,
+    })
+    .expect("palette action");
+
+    let before = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .viewport
+        .as_ref()
+        .expect("viewport")
+        .cursor;
+    let _ = app.run_headless_full_frame(frame(
+        vec![
+            key_event(egui::Key::ArrowLeft, egui::Modifiers::default()),
+            key_event(
+                egui::Key::ArrowRight,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(snapshot_text_from_app(&app), Some("abcd".to_string()));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor,
+        before,
+        "palette arrows must not move or select in the editor"
+    );
+
+    let _ = app.run_headless_full_frame(frame(
+        vec![key_event(egui::Key::Escape, egui::Modifiers::default())],
+        egui::Modifiers::default(),
+    ));
+    let _ = app.run_headless_full_frame(frame(
+        vec![key_event(egui::Key::ArrowLeft, egui::Modifiers::default())],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor,
+        coord(0, 1, 1),
+        "editor regains horizontal ownership after palette closes"
+    );
+}
+
+#[test]
+fn live_ime_preedit_owns_left_right_until_commit() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("ime-horizontal.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    let _ = app.run_headless_full_frame(frame(
+        vec![
+            egui::Event::Ime(egui::ImeEvent::Enabled),
+            egui::Event::Ime(egui::ImeEvent::Preedit("かな".to_string())),
+            key_event(egui::Key::ArrowLeft, egui::Modifiers::default()),
+            key_event(
+                egui::Key::ArrowRight,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            ),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(snapshot_text_from_app(&app), Some("abcd".to_string()));
+    assert_eq!(
+        app.runtime_snapshot()
+            .active_buffer_projection
+            .viewport
+            .as_ref()
+            .expect("viewport")
+            .cursor,
+        coord(0, 2, 2),
+        "active IME preedit must retain editor cursor and selection"
+    );
+    let _ = app.run_headless_full_frame(frame(
+        vec![egui::Event::Ime(egui::ImeEvent::Commit("漢".to_string()))],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(snapshot_text_from_app(&app), Some("ab漢cd".to_string()));
+}
+
+#[test]
+fn real_terminal_textedit_focus_owns_boundary_frame() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("terminal-focus.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.handle_action(DesktopAction::TerminalLaunch {
+        command_label: "focused input fixture".to_string(),
+    })
+    .expect("terminal launch");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let terminal_input = egui::Id::new("legion-terminal-input");
+        let _ = app.run_headless_full_frame(egui::RawInput::default());
+        app.headless_egui_context()
+            .memory_mut(|memory| memory.request_focus(terminal_input));
+        let _ = app.run_headless_full_frame(egui::RawInput::default());
+        assert_eq!(
+            app.headless_egui_context()
+                .memory(|memory| memory.focused()),
+            Some(terminal_input),
+            "terminal fixture must establish real focus before arrow frame"
+        );
+        assert!(
+            app.headless_egui_context().text_edit_focused(),
+            "terminal fixture must register a focused TextEdit before arrow frame"
+        );
+        let _ = app.run_headless_full_frame(frame(
+            vec![
+                key_event(egui::Key::Home, egui::Modifiers::default()),
+                egui::Event::Text("X".to_string()),
+                key_event(egui::Key::End, egui::Modifiers::default()),
+                key_event(egui::Key::ArrowLeft, egui::Modifiers::default()),
+                key_event(
+                    egui::Key::ArrowRight,
+                    egui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+            egui::Modifiers::default(),
+        ));
+
+        assert_eq!(snapshot_text_from_app(&app), Some("abcd".to_string()));
+        assert_eq!(
+            app.headless_egui_context()
+                .memory(|memory| memory.focused()),
+            Some(terminal_input),
+            "the terminal TextEdit must retain real egui focus after the boundary frame"
+        );
+    }));
+    let _ = app
+        .runtime_mut_for_test()
+        .handle_action(DesktopAction::TerminalKill);
+    let _ = app
+        .runtime_mut_for_test()
+        .handle_action(DesktopAction::TerminalClose);
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn live_vim_state_owns_boundary_frame_text_and_preserves_buffer() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("vim-focus.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.handle_action(DesktopAction::InvokeToastAction {
+        intent: legion_ui::CommandDispatchIntent::SetVimModeEnabled(true),
+    })
+    .expect("enable Vim");
+    assert!(
+        app.runtime_mut_for_test().vim_consumes_text_input(),
+        "the fixture must use live app Vim state"
+    );
+    app.handle_action(DesktopAction::InvokeToastAction {
+        intent: legion_ui::CommandDispatchIntent::VimChangeMode(legion_ui::EditorInputMode::Normal),
+    })
+    .expect("enter Vim normal mode");
+    assert!(
+        app.runtime_mut_for_test().vim_consumes_text_input(),
+        "Vim normal mode must own text input through the live app session"
+    );
+    let _ = app.run_headless_full_frame(frame(
+        vec![
+            key_event(egui::Key::Home, egui::Modifiers::default()),
+            key_event(egui::Key::ArrowLeft, egui::Modifiers::default()),
+            egui::Event::Text("j".to_string()),
+            key_event(egui::Key::ArrowRight, egui::Modifiers::default()),
+            key_event(egui::Key::End, egui::Modifiers::default()),
+        ],
+        egui::Modifiers::default(),
+    ));
+    assert_eq!(snapshot_text_from_app(&app), Some("abcd".to_string()));
+}
+
+#[test]
+fn live_vim_arrow_event_is_owned_by_vim_route() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("vim-arrow.txt", "abcd");
+    let runtime = open_runtime(workspace.path(), &file);
+    let mut app = DesktopEframeApp::new(runtime);
+    let buffer_id = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .buffer_id
+        .expect("active buffer");
+    app.handle_action(DesktopAction::SetCursor {
+        buffer_id: Some(buffer_id),
+        cursor: coord(0, 2, 2),
+    })
+    .expect("cursor action");
+    app.handle_action(DesktopAction::InvokeToastAction {
+        intent: legion_ui::CommandDispatchIntent::SetVimModeEnabled(true),
+    })
+    .expect("enable Vim");
+    app.handle_action(DesktopAction::InvokeToastAction {
+        intent: legion_ui::CommandDispatchIntent::VimChangeMode(legion_ui::EditorInputMode::Normal),
+    })
+    .expect("enter Vim normal mode");
+    let _ = app.run_headless_full_frame(frame(
+        vec![key_event(egui::Key::ArrowLeft, egui::Modifiers::default())],
+        egui::Modifiers::default(),
+    ));
+    let after = app
+        .runtime_snapshot()
+        .active_buffer_projection
+        .viewport
+        .expect("viewport")
+        .cursor;
+    assert_eq!(snapshot_text_from_app(&app), Some("abcd".to_string()));
+    assert_eq!(after, coord(0, 1, 1), "Vim owns and moves the arrow caret");
+}
+
+fn snapshot_text_from_app(app: &DesktopEframeApp) -> Option<String> {
+    app.runtime_snapshot()
+        .active_buffer_projection
+        .small_buffer_text()
+        .map(str::to_owned)
+}
+
 #[test]
 fn keyboard_input_moves_the_cursor_through_the_real_egui_context() {
     let workspace = TempWorkspace::new();
@@ -123,19 +1066,15 @@ fn keyboard_input_moves_the_cursor_through_the_real_egui_context() {
             ui.input(|input| test_editor_keyboard_control_actions(input, &snapshot, true, false));
         assert_eq!(
             actions,
-            vec![DesktopAction::SetCursor {
+            vec![DesktopAction::MoveHorizontally {
                 buffer_id: Some(
                     snapshot
                         .active_buffer_projection
                         .buffer_id
                         .expect("active buffer")
                 ),
-                cursor: TextCoordinate {
-                    line: 0,
-                    character: 1,
-                    byte_offset: None,
-                    utf16_offset: Some(1),
-                },
+                left: false,
+                extend: false,
             }]
         );
     });
@@ -169,25 +1108,81 @@ fn keyboard_selection_input_updates_the_projected_selection_range() {
             ui.input(|input| test_editor_keyboard_control_actions(input, &snapshot, true, false));
         assert_eq!(
             actions,
-            vec![DesktopAction::SetSelection {
+            vec![DesktopAction::MoveHorizontally {
                 buffer_id: Some(
                     snapshot
                         .active_buffer_projection
                         .buffer_id
                         .expect("active buffer")
                 ),
-                range: ProtocolTextRange {
-                    start: coord(0, 0, 0),
-                    end: TextCoordinate {
-                        line: 0,
-                        character: 1,
-                        byte_offset: None,
-                        utf16_offset: Some(1),
-                    },
-                },
+                left: false,
+                extend: true,
             }]
         );
     });
+}
+
+#[test]
+fn keyboard_home_emits_semantic_boundary_action_before_command_shortcut_filter() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("home.txt", "alpha\nbeta");
+    let runtime = open_runtime(workspace.path(), &file);
+    let snapshot = runtime.projection_snapshot();
+
+    let mut input = egui::InputState::default();
+    input.events = vec![egui::Event::Key {
+        key: egui::Key::Home,
+        physical_key: Some(egui::Key::Home),
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers {
+            command: true,
+            shift: true,
+            ..egui::Modifiers::default()
+        },
+    }];
+    input.modifiers = egui::Modifiers {
+        command: true,
+        shift: true,
+        ..egui::Modifiers::default()
+    };
+    let actions = test_editor_keyboard_control_actions(&input, &snapshot, true, false);
+    assert_eq!(
+        actions,
+        vec![DesktopAction::MoveToBoundary {
+            buffer_id: Some(
+                snapshot
+                    .active_buffer_projection
+                    .buffer_id
+                    .expect("active buffer"),
+            ),
+            boundary: legion_ui::EditorBoundaryKind::DocumentStart,
+            extend: true,
+        }]
+    );
+}
+
+#[test]
+fn raw_ctrl_home_does_not_become_platform_document_home() {
+    let workspace = TempWorkspace::new();
+    let file = workspace.write("home.txt", "alpha\nbeta");
+    let runtime = open_runtime(workspace.path(), &file);
+    let snapshot = runtime.projection_snapshot();
+    let mut input = egui::InputState::default();
+    let modifiers = egui::Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    input.events = vec![key_event(egui::Key::Home, modifiers)];
+    input.modifiers = modifiers;
+    assert_eq!(
+        test_editor_keyboard_control_actions(&input, &snapshot, true, false),
+        vec![DesktopAction::MoveToBoundary {
+            buffer_id: snapshot.active_buffer_projection.buffer_id,
+            boundary: legion_ui::EditorBoundaryKind::LineStart,
+            extend: false,
+        }]
+    );
 }
 
 #[test]

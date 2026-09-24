@@ -1,0 +1,26 @@
+[package]
+name = "legion-input-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# ADR-0056 acceptance instrument. Zero internal `legion-*` dependencies: this
+# crate is a leaf with no product authority, it is never linked by the product
+# or by `xtask`, and nothing in the workspace may depend on it.
+
+[[bin]]
+name = "legion-input-driver"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_StationsAndDesktops",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

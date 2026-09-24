@@ -10,3 +10,11 @@
 
 # PowerShell is Windows-side; keep CRLF so signed/edited scripts stay stable.
 *.ps1 text eol=crlf
+
+# Legion-Bench cassettes and their baselines are hashed into a committed
+# expectation. `cassette_set_hash` normalizes line endings so a CRLF checkout
+# cannot move the hash on its own, but pinning LF means the bytes on disk are
+# identical on every platform too — one fewer way for a "frozen" baseline to
+# differ from the one that was frozen.
+evals/legion-bench/recorded/** text eol=lf
+evals/legion-bench/recorded-raw/** text eol=lf

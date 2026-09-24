@@ -72,6 +72,7 @@ fn syntax_highlights_map_to_correct_token_kinds() {
             selections: Vec::new(),
             cursor: coord(0, 0, 0),
             cursors: vec![coord(0, 0, 0)],
+            cursor_affinities: vec![],
             scroll: ViewportScroll {
                 top_line: 0,
                 left_column: 0,

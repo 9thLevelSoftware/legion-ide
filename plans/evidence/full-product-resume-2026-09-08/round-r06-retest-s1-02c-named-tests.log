@@ -1,0 +1,41 @@
+CMD: cargo test -p legion-input-driver -p xtask --test driver_contract --test native_product_acceptance -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling windows v0.62.2
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+   Compiling legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+   Compiling legion-input-driver v0.1.0 (D:\legion-ide-completion\crates\legion-input-driver)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.61s
+     Running tests\driver_contract.rs (target\debug\deps\driver_contract-dc49accc31bc1fdb.exe)
+
+running 8 tests
+test sha256_matches_published_known_answer_vectors ... ok
+test an_unobserved_input_class_is_never_rendered_as_conforms ... ok
+test probe_session_exits_nonzero_when_it_cannot_attach_to_the_input_desktop ... ok
+test probe_session_never_writes_interactive_session_true_without_attaching ... ok
+test unsupported_host_build_reports_blocked_and_exits_nonzero ... ok
+test driver_report_markers_match_the_harness_wire_protocol_verbatim ... ok
+test probe_session_writes_a_report_even_when_no_interactive_desktop_is_available ... ok
+test conformance_run_without_a_product_executable_exits_nonzero_and_records_no_class ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\native_product_acceptance.rs (target\debug\deps\native_product_acceptance-6515f4ebb182fad0.exe)
+
+running 10 tests
+test blocked_exit_code_is_distinct_from_the_conformance_failure_exit_code ... ok
+test command_is_not_referenced_by_any_pr_gate_workflow ... ok
+test driver_discovery_prefers_the_built_in_repo_driver_over_the_staged_path ... ok
+test blocked_result_carries_an_exact_actionable_prerequisite_string ... ok
+test no_subprocess_is_spawned_when_the_driver_is_unavailable ... ok
+test unavailable_driver_returns_blocked_with_a_nonzero_exit ... ok
+test driver_missing_prerequisite_names_the_in_repo_build_command ... ok
+test report_is_written_and_readable_even_when_the_run_is_blocked ... ok
+test missing_packaged_binary_is_reported_blocked_rather_than_failed ... ok
+test blocked_report_records_neither_passed_nor_skipped ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+END
+EXIT=0

@@ -44,6 +44,26 @@ pub enum AgentError {
     /// Legion workflow dependency graph contains a cycle.
     #[error("legion workflow dependency cycle detected")]
     LegionWorkflowDependencyCycle,
+    /// An external agent run was refused before any work started.
+    #[error("external agent launch refused: {reason}")]
+    ExternalAgentLaunchRefused {
+        /// Why the run was refused.
+        reason: String,
+    },
+    /// An external agent's filesystem request was denied by its assigned scope.
+    #[error("external agent access denied for {requested_path}: {reason}")]
+    ExternalAgentAccessDenied {
+        /// Path the external agent asked for, as it spelled it.
+        requested_path: String,
+        /// Why the request was denied.
+        reason: String,
+    },
+    /// An external edit batch could not be converted into proposals as a whole.
+    #[error("external edit batch rejected: {reason}")]
+    ExternalEditBatchRejected {
+        /// Why the batch was rejected.
+        reason: String,
+    },
     /// Delegated task tool call was denied by scope policy.
     #[error("delegated task scope denied: {tool:?} ({reason})")]
     DelegatedTaskScopeDenied {

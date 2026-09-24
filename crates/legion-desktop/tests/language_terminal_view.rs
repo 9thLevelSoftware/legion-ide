@@ -1,6 +1,9 @@
+mod common;
+use common::{enabled_clickable_center, rendered_text};
+
 use legion_desktop::{
     bridge::{DesktopAction, DesktopBridgeOutput, DesktopCommandBridge},
-    view::DesktopProjectionViewModel,
+    view::{DesktopProjectionViewModel, ProjectionView},
 };
 use legion_protocol::{
     BufferId, CanonicalPath, CorrelationId, EventSequence, FileId, LanguageBreadcrumbProjection,
@@ -313,5 +316,65 @@ fn desktop_terminal_panel_renders_and_dispatches() {
             session_id: TerminalSessionId(12),
             payload: "echo ready".to_string(),
         })
+    );
+}
+
+fn render_projection(snapshot: &legion_ui::ShellProjectionSnapshot) -> egui::FullOutput {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut view = ProjectionView::new();
+    ctx.run_ui(
+        egui::RawInput {
+            focused: true,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1_440.0, 900.0),
+            )),
+            ..egui::RawInput::default()
+        },
+        |ui| {
+            let _ = view.render(ui, snapshot);
+        },
+    )
+}
+
+#[test]
+fn desktop_terminal_panel_render_preserves_failure_reason_and_retry_control() {
+    let mut snapshot = Shell::empty("terminal-failure").projection_snapshot();
+    snapshot.terminal_panel_projection = TerminalPanelProjection {
+        status: TerminalPanelStatus {
+            kind: TerminalPanelStatusKind::Denied,
+            message: "terminal denied: workspace is untrusted".to_string(),
+        },
+        last_denial: Some("terminal denied: workspace is untrusted".to_string()),
+        last_error: Some("shell unavailable: pwsh not found".to_string()),
+        ..TerminalPanelProjection::empty()
+    };
+
+    let denied = render_projection(&snapshot);
+    assert!(
+        rendered_text(&denied)
+            .iter()
+            .any(|text| text.contains("terminal denied: workspace is untrusted")),
+        "renderer must preserve the denial reason"
+    );
+    assert!(
+        rendered_text(&denied)
+            .iter()
+            .any(|text| text.contains("shell unavailable: pwsh not found")),
+        "renderer must preserve the underlying error"
+    );
+    assert!(
+        enabled_clickable_center(&denied, "Open terminal").is_some(),
+        "a no-session denial/error state must expose enabled retry"
+    );
+
+    snapshot.terminal_panel_projection.active_session_id = Some(TerminalSessionId(7));
+    snapshot.terminal_panel_projection.runtime_state = Some(TerminalRuntimeState::Running);
+    snapshot.terminal_panel_projection.status.kind = TerminalPanelStatusKind::Running;
+    let active = render_projection(&snapshot);
+    assert!(
+        enabled_clickable_center(&active, "Open terminal").is_none(),
+        "an active session must hide the duplicate launch control"
     );
 }

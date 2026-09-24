@@ -101,6 +101,69 @@ pub enum PatchResolution {
 
 /// Apply one exact-match edit to `file_content`.
 pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchResolution {
+    match resolve_edit_span(file_content, old_str, new_str) {
+        PatchSpan::Resolved {
+            start,
+            end,
+            replacement,
+            outcome,
+        } => PatchResolution::Applied {
+            content: {
+                let mut content = String::with_capacity(file_content.len() + replacement.len());
+                content.push_str(&file_content[..start]);
+                content.push_str(&replacement);
+                content.push_str(&file_content[end..]);
+                content
+            },
+            outcome,
+        },
+        PatchSpan::NoMatch(diagnostic) => PatchResolution::NoMatch(diagnostic),
+        PatchSpan::Ambiguous { occurrences } => PatchResolution::Ambiguous { occurrences },
+        PatchSpan::ValidationError { reason } => PatchResolution::ValidationError { reason },
+    }
+}
+
+/// Where an edit lands, as a byte span in the file it was resolved against.
+///
+/// The same decision as [`PatchResolution`], reported as a span instead of a
+/// rewritten file. A caller that has to produce a reviewable edit needs the
+/// span: a `TextEdit` covering the whole file says "everything changed", which
+/// is both false and unreadable in a diff, and it makes a one-line change
+/// impossible to approve on sight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatchSpan {
+    /// The edit resolved to `file_content[start..end]`.
+    Resolved {
+        /// Byte offset the replacement starts at.
+        start: usize,
+        /// Byte offset the replacement ends at.
+        end: usize,
+        /// Text to put in that span, with the trailing-newline rule applied.
+        replacement: String,
+        /// How the match was obtained.
+        outcome: EditResolutionOutcome,
+    },
+    /// `old_str` was not present.
+    NoMatch(ResolutionDiagnostic),
+    /// `old_str` matched more than once, so the target is ambiguous.
+    Ambiguous {
+        /// Number of occurrences found.
+        occurrences: usize,
+    },
+    /// The edit itself was malformed.
+    ValidationError {
+        /// What was wrong.
+        reason: String,
+    },
+}
+
+/// Resolve one edit to the span it occupies in `file_content`.
+///
+/// This is the search; [`apply_edit`] is this plus a splice. Written in that
+/// order rather than the reverse because two copies of "exact, then
+/// whitespace-tolerant, then refuse" is one copy that eventually disagrees
+/// with the other about what counts as a match.
+pub fn resolve_edit_span(file_content: &str, old_str: &str, new_str: &str) -> PatchSpan {
     if old_str.is_empty() {
         // An empty anchor is only meaningful for a file that does not exist
         // yet. Against existing content it would mean "replace everything" —
@@ -108,23 +171,34 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
         // would silently destroy the file. Whole-file rewrites must say so by
         // using `replacement`.
         if !file_content.is_empty() {
-            return PatchResolution::ValidationError {
+            return PatchSpan::ValidationError {
                 reason: "`old_str` is empty, which would replace the file's entire contents. \
                          Quote the exact text to replace, or pass `replacement` to rewrite the \
                          whole file deliberately."
                     .to_string(),
             };
         }
-        return PatchResolution::Applied {
-            content: new_str.to_string(),
+        return PatchSpan::Resolved {
+            start: 0,
+            end: 0,
+            replacement: new_str.to_string(),
             outcome: EditResolutionOutcome::WholeFileFallback,
         };
     }
     match count_overlapping(file_content, old_str) {
-        1 => PatchResolution::Applied {
-            content: file_content.replacen(old_str, new_str, 1),
-            outcome: EditResolutionOutcome::Exact,
-        },
+        1 => {
+            let start = file_content
+                .find(old_str)
+                .expect("a single counted occurrence must be findable");
+            let end =
+                deletion_through_line_ending(file_content, start, start + old_str.len(), new_str);
+            PatchSpan::Resolved {
+                start,
+                end,
+                replacement: newline_adjusted(file_content, start, end, new_str),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        }
         0 => {
             // Exact matching failed. Before refusing, try again ignoring
             // indentation and inter-token spacing: the anchor is written from
@@ -133,15 +207,97 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
             // file's, so the edit remains exact — only the search was
             // tolerant.
             match find_whitespace_insensitive(file_content, old_str) {
-                Some((start, end)) => PatchResolution::Applied {
-                    content: splice_replacement(file_content, start, end, new_str),
-                    outcome: EditResolutionOutcome::Fuzzy,
-                },
-                None => PatchResolution::NoMatch(no_match_diagnostic(file_content, old_str)),
+                Some((start, end)) => {
+                    // Already line-terminated in practice -- the tolerant
+                    // search measures lines with `split_inclusive`, so its span
+                    // carries the newline and this returns `end` unchanged.
+                    // Applied to both paths anyway, because the alternative is
+                    // one path knowing the deletion rule and the other relying
+                    // on a coincidence of how it counts bytes.
+                    let end = deletion_through_line_ending(file_content, start, end, new_str);
+                    PatchSpan::Resolved {
+                        start,
+                        end,
+                        replacement: newline_adjusted(file_content, start, end, new_str),
+                        outcome: EditResolutionOutcome::Fuzzy,
+                    }
+                }
+                None => PatchSpan::NoMatch(no_match_diagnostic(file_content, old_str)),
             }
         }
-        many => PatchResolution::Ambiguous { occurrences: many },
+        many => PatchSpan::Ambiguous { occurrences: many },
     }
+}
+
+/// Resolve an edit to a span from a tool call's raw arguments.
+///
+/// The span-returning twin of [`apply_edit_from_arguments`], sharing its
+/// argument-spelling tolerance.
+pub fn resolve_edit_span_from_arguments(file_content: &str, arguments: &Value) -> PatchSpan {
+    match edit_arguments(arguments) {
+        Ok((old_str, new_str)) => resolve_edit_span(file_content, &old_str, &new_str),
+        Err(reason) => PatchSpan::ValidationError { reason },
+    }
+}
+
+/// A whole-line deletion takes its line ending with it.
+///
+/// `parse_edit_blocks` joins the SEARCH lines with newlines and keeps no
+/// trailing one, so an exact match for `foo` covers three bytes of a line that
+/// occupies four. Deleting it removed the text and left the \n behind as a
+/// blank line, which is not what "delete this line" means to anyone reading the
+/// diff.
+///
+/// The whitespace-tolerant path never had this problem: it measures lines with
+/// `split_inclusive`, so its span already covers the terminator. Two resolution
+/// paths disagreeing about what a deletion removes *is* the defect, and the
+/// rule documented on [`newline_adjusted`] only holds if both spans mean the
+/// same thing.
+///
+/// Only whole lines qualify. Deleting `foo` out of `bar foo` must leave the
+/// line ending alone, so the span has to begin a line and the byte after it has
+/// to begin a terminator.
+fn deletion_through_line_ending(
+    file_content: &str,
+    start: usize,
+    end: usize,
+    new_str: &str,
+) -> usize {
+    if !new_str.is_empty() {
+        return end;
+    }
+    if start != 0 && !file_content[..start].ends_with('\n') {
+        return end;
+    }
+    let rest = &file_content[end..];
+    if rest.starts_with("\r\n") {
+        end + 2
+    } else if rest.starts_with('\n') {
+        end + 1
+    } else {
+        end
+    }
+}
+
+/// The trailing-newline rule, applied to the replacement rather than at splice
+/// time so a caller holding only the span still gets faithful text.
+///
+/// Replacing a span that ended a line with text that does not would silently
+/// join it to the following line.
+///
+/// An empty replacement is exempt, and that exemption is the whole subtlety.
+/// Empty means "delete this span", and a deletion that ended a line takes the
+/// line ending with it -- re-adding one leaves a blank line where the text was.
+/// The rule used to live only in `splice_replacement`, which the exact-match
+/// path never called, so exact deletions came out clean and whitespace-tolerant
+/// ones silently left the blank line behind. One rule now, and it knows the
+/// difference between replacing and deleting.
+fn newline_adjusted(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
+    let mut replacement = new_str.to_string();
+    if !new_str.is_empty() && !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
+        replacement.push('\n');
+    }
+    replacement
 }
 
 /// Replace `file_content[start..end]` with `new_str`.
@@ -151,30 +307,48 @@ pub fn apply_edit(file_content: &str, old_str: &str, new_str: &str) -> PatchReso
 /// following line. Two copies of that rule is one copy that eventually
 /// forgets it.
 pub fn splice_replacement(file_content: &str, start: usize, end: usize, new_str: &str) -> String {
-    let mut content = String::with_capacity(file_content.len() + new_str.len());
+    let replacement = newline_adjusted(file_content, start, end, new_str);
+    let mut content = String::with_capacity(file_content.len() + replacement.len());
     content.push_str(&file_content[..start]);
-    content.push_str(new_str);
-    if !new_str.ends_with('\n') && file_content[start..end].ends_with('\n') {
-        content.push('\n');
-    }
+    content.push_str(&replacement);
     content.push_str(&file_content[end..]);
     content
 }
 
 /// Count every position the anchor could start at, including overlapping ones.
 ///
+/// Public because uniqueness sometimes has to be checked against a different
+/// text than the one an edit is resolved against -- a caller that showed a
+/// model an excerpt still owes the whole file an ambiguity check.
+///
 /// `str::matches` counts non-overlapping occurrences, which under-reports a
 /// self-overlapping anchor: `"aa"` in `"aaa"` starts at two positions but
 /// counts as one, and the edit would then be applied at the first site under
 /// a uniqueness guarantee that does not hold.
-fn count_overlapping(haystack: &str, needle: &str) -> usize {
-    if needle.is_empty() {
+pub fn count_overlapping(haystack: &str, needle: &str) -> usize {
+    count_overlapping_up_to(haystack, needle, usize::MAX)
+}
+
+/// [`count_overlapping`], stopping once `cap` occurrences have been seen.
+///
+/// The resolver wants the true count: it decides between "found once", "found
+/// nowhere" and "ambiguous", and reports the number in the diagnostic. The
+/// whole-file uniqueness check wants only "is there a second one", and it runs
+/// on the app thread against a buffer that can be 100 MB. Counting every match
+/// in a file with millions of them stalls the UI to compute a number nobody
+/// reads -- the same defect the whitespace scan was capped for, one line above
+/// it and still uncapped.
+pub fn count_overlapping_up_to(haystack: &str, needle: &str, cap: usize) -> usize {
+    if needle.is_empty() || cap == 0 {
         return 0;
     }
     let mut count = 0usize;
     let mut from = 0usize;
     while let Some(offset) = haystack[from..].find(needle) {
         count += 1;
+        if count >= cap {
+            return count;
+        }
         let start = from + offset;
         // Advance one character, not one match, so overlaps are seen.
         from = start
@@ -196,10 +370,16 @@ fn count_overlapping(haystack: &str, needle: &str) -> usize {
 /// number where a string belongs, and that is a different failure from "the
 /// text was not found" — the model needs to be told which.
 pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> PatchResolution {
+    match edit_arguments(arguments) {
+        Ok((old_str, new_str)) => apply_edit(file_content, &old_str, &new_str),
+        Err(reason) => PatchResolution::ValidationError { reason },
+    }
+}
+
+/// Read `old_str`/`new_str` out of a tool call's arguments.
+fn edit_arguments(arguments: &Value) -> Result<(String, String), String> {
     let Value::Object(object) = arguments else {
-        return PatchResolution::ValidationError {
-            reason: "edit arguments must be an object".to_string(),
-        };
+        return Err("edit arguments must be an object".to_string());
     };
     // Accept the spellings models actually use: `old_str`/`new_str`,
     // `old_string`/`new_string`, and Aider-style `search`/`replace`.
@@ -209,16 +389,8 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
         .or_else(|| object.get("search"))
     {
         Some(Value::String(text)) => text.clone(),
-        Some(_) => {
-            return PatchResolution::ValidationError {
-                reason: "`old_str` must be a string".to_string(),
-            };
-        }
-        None => {
-            return PatchResolution::ValidationError {
-                reason: "`old_str` is required".to_string(),
-            };
-        }
+        Some(_) => return Err("`old_str` must be a string".to_string()),
+        None => return Err("`old_str` is required".to_string()),
     };
     let new_str = match object
         .get("new_str")
@@ -226,18 +398,10 @@ pub fn apply_edit_from_arguments(file_content: &str, arguments: &Value) -> Patch
         .or_else(|| object.get("replace"))
     {
         Some(Value::String(text)) => text.clone(),
-        Some(_) => {
-            return PatchResolution::ValidationError {
-                reason: "`new_str` must be a string".to_string(),
-            };
-        }
-        None => {
-            return PatchResolution::ValidationError {
-                reason: "`new_str` is required".to_string(),
-            };
-        }
+        Some(_) => return Err("`new_str` must be a string".to_string()),
+        None => return Err("`new_str` is required".to_string()),
     };
-    apply_edit(file_content, &old_str, &new_str)
+    Ok((old_str, new_str))
 }
 
 /// Build the refusal diagnostic for a fragment that was not found.
@@ -358,6 +522,31 @@ const REPLACE_MARKER: &str = ">>>>>>> REPLACE";
 pub fn parse_edit_blocks(text: &str) -> Vec<EditBlock> {
     let mut blocks = parse_search_replace_blocks(text);
     blocks.extend(parse_diff_fences(text));
+    // A block whose path could not be inferred is dropped here, because a
+    // caller working across a whole workspace has nowhere to apply it.
+    blocks.retain(|block| !block.path.is_empty());
+    blocks
+}
+
+/// Parse edit blocks for a file the caller already knows.
+///
+/// [`parse_edit_blocks`] infers each block's path from the nearest non-empty
+/// line above it and discards any block where that fails. That is right when
+/// the model is choosing which file to edit. It is wrong when the file is
+/// already decided -- a single-file surface would be forcing the model to
+/// restate a path nobody needs, and the inference misfires anyway: in two
+/// consecutive blocks the second one's "path" is the first one's
+/// `>>>>>>> REPLACE` line, so a reply containing two edits parses as one and
+/// the extra edit vanishes silently.
+///
+/// Here the caller's path wins outright and nothing is dropped, so "how many
+/// edits did the model propose" has an honest answer.
+pub fn parse_edit_blocks_for_file(text: &str, path: &str) -> Vec<EditBlock> {
+    let mut blocks = parse_search_replace_blocks(text);
+    blocks.extend(parse_diff_fences(text));
+    for block in &mut blocks {
+        block.path = path.to_string();
+    }
     blocks
 }
 
@@ -416,13 +605,11 @@ fn parse_search_replace_blocks(text: &str) -> Vec<EditBlock> {
             continue;
         }
 
-        if !path.is_empty() {
-            blocks.push(EditBlock {
-                path,
-                old_str: old_lines.join("\n"),
-                new_str: new_lines.join("\n"),
-            });
-        }
+        blocks.push(EditBlock {
+            path,
+            old_str: old_lines.join("\n"),
+            new_str: new_lines.join("\n"),
+        });
         index = cursor + 1;
     }
     blocks
@@ -620,6 +807,70 @@ line 2
         assert!(matches!(mistyped, PatchResolution::ValidationError { .. }));
     }
 
+    /// Deleting a line removes the line, not the text off the line.
+    ///
+    /// A SEARCH block quoting `beta();` carries no trailing newline, so the
+    /// exact span covered seven bytes of an eight-byte line and approval left
+    /// an empty line where the statement had been. The tolerant path never did
+    /// this, which is how the two came to disagree about what a deletion is.
+    #[test]
+    fn an_exact_deletion_takes_its_line_ending() {
+        let out = apply_edit("alpha();\nbeta();\ngamma();\n", "beta();", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\ngamma();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// The same, for a file written with CRLF.
+    #[test]
+    fn a_crlf_deletion_takes_both_bytes_of_its_line_ending() {
+        let out = apply_edit("alpha();\r\nbeta();\r\ngamma();\r\n", "beta();", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\r\ngamma();\r\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// Deleting part of a line leaves the line ending where it was.
+    ///
+    /// The rule is "a whole line takes its terminator", and a fragment is not a
+    /// whole line. Swallowing the newline here would join two statements.
+    #[test]
+    fn deleting_inside_a_line_keeps_the_line_ending() {
+        let out = apply_edit("let total = one + two;\nnext();\n", " + two", "");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "let total = one;\nnext();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
+    /// A replacement is not a deletion, and keeps the line it lands on.
+    #[test]
+    fn a_replacement_does_not_consume_the_line_ending() {
+        let out = apply_edit("alpha();\nbeta();\n", "beta();", "delta();");
+
+        assert_eq!(
+            out,
+            PatchResolution::Applied {
+                content: "alpha();\ndelta();\n".to_string(),
+                outcome: EditResolutionOutcome::Exact,
+            }
+        );
+    }
+
     #[test]
     fn empty_search_creates_a_file_but_never_overwrites_one() {
         // Creating a file: nothing to anchor to, so the content stands alone.
@@ -641,6 +892,23 @@ line 2
             ),
             other => panic!("expected ValidationError, got {other:?}"),
         }
+    }
+
+    /// The capped count stops, and agrees with the uncapped one below the cap.
+    ///
+    /// A cap that changed the answer for a file with two matches would make the
+    /// uniqueness check wrong rather than fast.
+    #[test]
+    fn a_capped_count_stops_without_changing_the_answer() {
+        let many = "call();\n".repeat(500);
+
+        assert_eq!(count_overlapping_up_to(&many, "call();", 2), 2);
+        assert_eq!(count_overlapping_up_to(&many, "call();", 1), 1);
+        assert_eq!(count_overlapping(&many, "call();"), 500);
+
+        let once = "alpha();\ncall();\nbeta();\n";
+        assert_eq!(count_overlapping_up_to(once, "call();", 2), 1);
+        assert_eq!(count_overlapping_up_to(once, "absent", 2), 0);
     }
 
     #[test]
@@ -1036,6 +1304,73 @@ pub fn find_whitespace_insensitive(file_content: &str, old_str: &str) -> Option<
     found
 }
 
+/// How many whitespace-insensitive matches `old_str` has, up to `cap`.
+///
+/// The counting twin of [`find_whitespace_insensitive`], and it exists because
+/// of where the two get used. The finder resolves an edit against a 4 KB
+/// excerpt, so materialising the whole thing costs nothing. The uniqueness
+/// check runs against the **whole buffer** on the app thread, and the finder
+/// allocates three vectors and a normalized `String` per line to answer it --
+/// on a 100 MB file that is hundreds of megabytes of transient allocation to
+/// validate an anchor from four kilobytes, with the UI waiting.
+///
+/// So this streams. One line is normalized at a time, and the only state kept
+/// is how far each in-flight candidate has matched -- bounded by the needle,
+/// not by the file. Stops as soon as `cap` matches are found, because the
+/// caller only ever asks "more than one?".
+///
+/// The matching rules are the finder`s, deliberately and exactly: blank lines
+/// are tolerated inside a started match and not before it, a candidate may
+/// begin at any line, and matches may overlap. Two functions answering the same
+/// question differently would be worse than the allocation.
+pub fn count_whitespace_insensitive(file_content: &str, old_str: &str, cap: usize) -> usize {
+    let mut needle_normalizer = LineNormalizer::default();
+    let needle: Vec<String> = old_str
+        .lines()
+        .map(|line| needle_normalizer.normalize(line))
+        .filter(|line| !line.is_empty())
+        .collect();
+    if needle.is_empty() || cap == 0 {
+        return 0;
+    }
+
+    let mut file_normalizer = LineNormalizer::default();
+    // How many needle lines each in-flight candidate has matched. A candidate
+    // that has matched nothing is not kept: it is created and resolved within
+    // the line that would have started it.
+    let mut active: Vec<usize> = Vec::new();
+    let mut next: Vec<usize> = Vec::new();
+    let mut found = 0_usize;
+
+    for line in file_content.split_inclusive('\n') {
+        let normalized = file_normalizer.normalize(line);
+        if normalized.is_empty() {
+            // Formatting inside a match, and the end of nothing: every started
+            // candidate survives, and none can start here.
+            continue;
+        }
+        // A match may begin at any line, so this line is also a candidate start.
+        active.push(0);
+        next.clear();
+        for matched in active.drain(..) {
+            if needle[matched] != normalized {
+                continue;
+            }
+            let matched = matched + 1;
+            if matched == needle.len() {
+                found += 1;
+                if found >= cap {
+                    return found;
+                }
+            } else {
+                next.push(matched);
+            }
+        }
+        std::mem::swap(&mut active, &mut next);
+    }
+    found
+}
+
 /// Line normalizer whose literal state survives between lines.
 ///
 /// A Python triple-quoted string or a JavaScript template literal is still a
@@ -1129,6 +1464,62 @@ mod whitespace_tests {
         "    );\n",
         "}\n",
     );
+
+    /// The counting scan and the finder agree about what a match is.
+    ///
+    /// Two functions answering the same question differently would be worse
+    /// than the allocation the counting one exists to avoid, so the cases that
+    /// define the rules are asserted against both.
+    #[test]
+    fn counting_and_finding_agree_on_every_rule() {
+        let cases: &[(&str, &str, usize)] = &[
+            // Indentation drift matches, once.
+            ("fn a() {\n        call();\n}\n", "    call();", 1),
+            // Two sites differing only in spacing are two sites.
+            (
+                "    call(a, b);\nother();\n        call(a,   b);\n",
+                "call(a, b);",
+                2,
+            ),
+            // A real difference is not a match.
+            ("let total = 1;\n", "let total = 2;", 0),
+            // A blank line inside the region is formatting, not a break.
+            ("one();\n\ntwo();\n", "one();\ntwo();", 1),
+            // A blank line before the anchor is not absorbed into it.
+            ("\n\ntwo();\n", "one();\ntwo();", 0),
+        ];
+
+        for (file, needle, expected) in cases {
+            assert_eq!(
+                count_whitespace_insensitive(file, needle, 8),
+                *expected,
+                "count disagreed on {needle:?} in {file:?}"
+            );
+            assert_eq!(
+                find_whitespace_insensitive(file, needle).is_some(),
+                *expected == 1,
+                "the finder must resolve exactly the unique case; {needle:?} in {file:?}"
+            );
+        }
+    }
+
+    /// The scan stops as soon as the caller has its answer.
+    ///
+    /// The point of the cap: the uniqueness check only asks "more than one?",
+    /// and a 100 MB buffer should not be walked past the second match to say so.
+    #[test]
+    fn counting_stops_at_the_cap() {
+        let file = "call();\n".repeat(500);
+
+        assert_eq!(count_whitespace_insensitive(&file, "call();", 2), 2);
+        assert_eq!(count_whitespace_insensitive(&file, "call();", 1), 1);
+    }
+
+    /// An empty anchor counts nothing, as it finds nothing.
+    #[test]
+    fn counting_an_empty_anchor_finds_nothing() {
+        assert_eq!(count_whitespace_insensitive("anything\n", "", 4), 0);
+    }
 
     #[test]
     fn indentation_drift_still_matches() {

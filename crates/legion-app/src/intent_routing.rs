@@ -9,6 +9,9 @@
 //! file needs to know the module exists.
 
 use crate::*;
+use std::path::PathBuf;
+
+use crate::extension_management::ExtensionCatalogRequest;
 
 /// Service that maps UI intents into application command requests without invoking concrete adapters.
 #[derive(Debug)]
@@ -64,6 +67,70 @@ impl CommandDispatcher {
                 TextEdit::insert(Self::editor_position(at), text),
                 correlation_id,
             ),
+            CommandDispatchIntent::ReplaceDirectedCarets { buffer_id, text } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ReplaceDirectedCarets { buffer_id, text })
+            }
+            CommandDispatchIntent::DeleteDirectedCarets {
+                buffer_id,
+                backward,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::DeleteDirectedCarets {
+                    buffer_id,
+                    backward,
+                })
+            }
+            CommandDispatchIntent::SetDirectedSelection {
+                buffer_id,
+                anchor,
+                head,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::SetDirectedSelection {
+                    buffer_id,
+                    anchor,
+                    head,
+                })
+            }
+            CommandDispatchIntent::SetVisualCursor {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                cursor,
+                affinity,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::SetVisualCursor {
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    cursor,
+                    affinity,
+                })
+            }
+            CommandDispatchIntent::SetVisualDirectedSelection {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                anchor,
+                head,
+                head_affinity,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::SetVisualDirectedSelection {
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    anchor,
+                    head,
+                    head_affinity,
+                })
+            }
+            CommandDispatchIntent::MoveVertically { buffer_id, request } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::MoveVertically { buffer_id, request })
+            }
             CommandDispatchIntent::Delete { buffer_id, range } => Self::edit_request(
                 active,
                 buffer_id,
@@ -116,6 +183,24 @@ impl CommandDispatcher {
             CommandDispatchIntent::SetSelection { buffer_id, range } => {
                 Ok(AppCommandRequest::SetSelection { buffer_id, range })
             }
+            CommandDispatchIntent::MoveToBoundary {
+                buffer_id,
+                boundary,
+                extend,
+            } => Ok(AppCommandRequest::MoveToBoundary {
+                buffer_id,
+                boundary,
+                extend,
+            }),
+            CommandDispatchIntent::MoveHorizontally {
+                buffer_id,
+                left,
+                extend,
+            } => Ok(AppCommandRequest::MoveHorizontally {
+                buffer_id,
+                left,
+                extend,
+            }),
             CommandDispatchIntent::SetViewportScroll { buffer_id, scroll } => {
                 Ok(AppCommandRequest::SetViewportScroll { buffer_id, scroll })
             }
@@ -148,6 +233,13 @@ impl CommandDispatcher {
                 Ok(AppCommandRequest::CancelPaletteConfirmation { token })
             }
             CommandDispatchIntent::OpenSettings => Ok(AppCommandRequest::OpenSettings),
+            CommandDispatchIntent::OpenAbout => Ok(AppCommandRequest::OpenAbout),
+            CommandDispatchIntent::ExportSupportBundle => {
+                Ok(AppCommandRequest::ExportSupportBundle)
+            }
+            CommandDispatchIntent::AttachAcpHost { program, args } => {
+                Ok(AppCommandRequest::AttachAcpHost { program, args })
+            }
             CommandDispatchIntent::SetThemePreference { preference } => {
                 Ok(AppCommandRequest::SetThemePreference { preference })
             }
@@ -239,8 +331,17 @@ impl CommandDispatcher {
             CommandDispatchIntent::StageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::StageGitHunk { hunk_id })
             }
+            CommandDispatchIntent::StageFocusedGitHunk => {
+                Ok(AppCommandRequest::StageFocusedGitHunk)
+            }
             CommandDispatchIntent::UnstageGitHunk { hunk_id } => {
                 Ok(AppCommandRequest::UnstageGitHunk { hunk_id })
+            }
+            CommandDispatchIntent::StageGitPath { path } => {
+                Ok(AppCommandRequest::StageGitPath { path })
+            }
+            CommandDispatchIntent::UnstageGitPath { path } => {
+                Ok(AppCommandRequest::UnstageGitPath { path })
             }
             CommandDispatchIntent::ResolveGitConflict { path, choice } => {
                 Ok(AppCommandRequest::ResolveGitConflict {
@@ -503,6 +604,17 @@ impl CommandDispatcher {
                     action_id,
                 })
             }
+            CommandDispatchIntent::RequestCodeActions { buffer_id, range } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::RequestCodeActions { buffer_id, range })
+            }
+            CommandDispatchIntent::SelectCodeAction {
+                response_id,
+                action_id,
+            } => Ok(AppCommandRequest::SelectCodeAction {
+                response_id,
+                action_id,
+            }),
             CommandDispatchIntent::ActivateLanguageCodeLens { buffer_id, lens_id } => {
                 Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
                 Ok(AppCommandRequest::ActivateLanguageCodeLens { buffer_id, lens_id })
@@ -627,6 +739,43 @@ impl CommandDispatcher {
                 command_id,
                 metadata_label,
             }),
+            // P7.F2: extension lifecycle. One capability per permission intent —
+            // the routing layer never widens a decision to the whole extension.
+            CommandDispatchIntent::SetExtensionPermission {
+                manifest_id,
+                capability,
+                granted,
+            } => Ok(AppCommandRequest::ExtensionCatalog(
+                ExtensionCatalogRequest::SetPermission {
+                    manifest_id,
+                    capability,
+                    granted,
+                },
+            )),
+            CommandDispatchIntent::CancelCloudLaneTask {
+                task_id,
+                reason_label,
+            } => Ok(AppCommandRequest::CloudLane(
+                crate::cloud_lane_egress::CloudLaneRequest::CancelTask {
+                    task_id: legion_protocol::LegionCloudLaneTaskId(task_id),
+                    reason_label,
+                },
+            )),
+            CommandDispatchIntent::InstallExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Install { manifest_id },
+                ))
+            }
+            CommandDispatchIntent::UpdateExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Update { manifest_id },
+                ))
+            }
+            CommandDispatchIntent::RemoveExtension { manifest_id } => {
+                Ok(AppCommandRequest::ExtensionCatalog(
+                    ExtensionCatalogRequest::Remove { manifest_id },
+                ))
+            }
             CommandDispatchIntent::JoinCollaborationSession { session_id } => {
                 Ok(AppCommandRequest::JoinCollaborationSession { session_id })
             }
@@ -642,6 +791,18 @@ impl CommandDispatcher {
             }),
             CommandDispatchIntent::LspStartSession => Ok(AppCommandRequest::LspStartSession),
             CommandDispatchIntent::LspRestartSession => Ok(AppCommandRequest::LspRestartSession),
+            CommandDispatchIntent::ConfigureTypeScriptToolchain {
+                server_archive,
+                compiler_archive,
+                node_executable,
+            } => Ok(AppCommandRequest::ConfigureTypeScriptToolchain {
+                server_archive: PathBuf::from(server_archive),
+                compiler_archive: PathBuf::from(compiler_archive),
+                node_executable: PathBuf::from(node_executable),
+            }),
+            CommandDispatchIntent::ClearTypeScriptToolchain => {
+                Ok(AppCommandRequest::ClearTypeScriptToolchain)
+            }
             CommandDispatchIntent::PreviewProposal { .. }
             | CommandDispatchIntent::ApproveProposal { .. }
             | CommandDispatchIntent::RejectProposal { .. }
@@ -665,9 +826,9 @@ impl CommandDispatcher {
             CommandDispatchIntent::AddCursorAbove { .. }
             | CommandDispatchIntent::AddCursorBelow { .. }
             | CommandDispatchIntent::ClearExtraCursors { .. } => Ok(AppCommandRequest::Noop),
-            // Vim modal editing intents: VimState parser exists in legion-ui
-            // but is not yet wired to the desktop keyboard handler. These arms
-            // satisfy exhaustiveness until integration lands.
+            // Vim intents need buffer text and cursor, which this router does
+            // not have. `AppComposition::dispatch_ui_intent` handles them via
+            // `dispatch_vim_intent` first; these arms satisfy exhaustiveness.
             CommandDispatchIntent::SetVimModeEnabled { .. }
             | CommandDispatchIntent::VimMotion { .. }
             | CommandDispatchIntent::VimOperatorMotion { .. }
@@ -680,11 +841,36 @@ impl CommandDispatcher {
             | CommandDispatchIntent::VimPut
             | CommandDispatchIntent::VimSearchForward
             | CommandDispatchIntent::VimDeleteChar => Ok(AppCommandRequest::Noop),
-            // Call hierarchy intents are dispatched by the language subsystem;
-            // satisfy exhaustiveness until app-layer wiring lands.
-            CommandDispatchIntent::PrepareCallHierarchy { .. }
-            | CommandDispatchIntent::ShowIncomingCalls { .. }
-            | CommandDispatchIntent::ShowOutgoingCalls { .. } => Ok(AppCommandRequest::Noop),
+            CommandDispatchIntent::PrepareCallHierarchy {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::PrepareCallHierarchy {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::ShowIncomingCalls {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ShowIncomingCalls {
+                    buffer_id,
+                    position,
+                })
+            }
+            CommandDispatchIntent::ShowOutgoingCalls {
+                buffer_id,
+                position,
+            } => {
+                Self::ensure_active_buffer(active.buffer_id, buffer_id)?;
+                Ok(AppCommandRequest::ShowOutgoingCalls {
+                    buffer_id,
+                    position,
+                })
+            }
             // Find/replace intents are handled by AppComposition::dispatch_ui_intent
             // before reaching this router; these arms satisfy exhaustiveness.
             CommandDispatchIntent::ToggleFindBar

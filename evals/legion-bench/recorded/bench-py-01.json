@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-01",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:859c17abeca4e0de",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"textkit/stats.py\",\n    \"start_line\": <start_line_number>,\n    \"end_line\": <end_line_number>,\n    \"new_str\": \"<new_sliced_code>\",\n    \"old_str\": \"<old_sliced_code>\",\n    \"proposal_title\": \"Fix top_words to return the correct number of tokens\",\n    \"proposal_reason\": \"The current implementation of top_words returns one entry too few, which causes two tests to fail.\"\n  }\n}\n```\n\nPlease provide the `<start_line_number>`, `<end_line_number>`, `<new_sliced_code>`, and `<old_sliced_code>` to complete the proposal.",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787118798,
+        "id": "chatcmpl-4",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 153,
+          "prompt_tokens": 644,
+          "total_tokens": 797
+        }
+      }
+    }
+  ]
+}

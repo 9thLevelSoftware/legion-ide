@@ -3,6 +3,14 @@
 #![warn(missing_docs)]
 
 pub mod capabilities;
+/// Local, capability-gated MCP server over newline-delimited stdio.
+pub mod mcp_server;
+/// Native Ollama `/api/chat` tool calling.
+///
+/// Lives in its own module rather than here: Ollama's wire format diverges
+/// from OpenAI's in four separate places, and this file is already the
+/// crate's chokepoint.
+mod ollama_tools;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::fmt;
@@ -495,10 +503,20 @@ pub struct OllamaProvider<T = ReqwestProviderHttpTransport> {
 
 impl Default for OllamaProvider<ReqwestProviderHttpTransport> {
     fn default() -> Self {
+        // A present-but-blank value is not a configured endpoint.
+        //
+        // The app filters blanks when it resolves the route and probes the
+        // host, so `OLLAMA_BASE_URL=""` with a server listening made `Auto`
+        // select Ollama -- and then this built a provider whose base URL was the
+        // empty string, sending every completion to a relative `/api/chat` that
+        // resolves nowhere. Two readings of one variable disagreeing is the
+        // shape of defect this whole area keeps producing.
         Self::new(
             OLLAMA_PROVIDER_ID,
             std::env::var("OLLAMA_BASE_URL")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "http://localhost:11434".to_string()),
         )
     }
 }
@@ -532,7 +550,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 }
 
@@ -550,7 +568,8 @@ where
             embedding: true,
             batch: false,
             inline_prediction: false,
-            tool_use: false,
+            // Native `/api/chat` tools — see `ollama_tools`.
+            tool_use: true,
         }
     }
 
@@ -671,7 +690,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<&str, ProviderError> {
@@ -960,7 +979,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<Option<&str>, ProviderError> {
@@ -1091,6 +1110,37 @@ fn schema_constrained_tools_enabled() -> bool {
     std::env::var("LEGION_AI_TOOL_TRANSPORT").is_ok_and(|v| v.eq_ignore_ascii_case("schema"))
 }
 
+/// Build the action grammar for a tool set, or `None` when there is nothing to
+/// constrain.
+///
+/// Shared by every provider that can carry a grammar, so the alternatives an
+/// edit is allowed to take are stated once. Duplicating them per provider is
+/// how one runtime quietly ends up permitting an edit the executor rejects.
+fn schema_constrained_tool_schema(tools: &[ToolDefinition]) -> Option<Value> {
+    legion_ai::schema_tools::build_action_schema(
+        &tools
+            .iter()
+            .map(|t| legion_ai::schema_tools::SchemaTool {
+                name: t.name.clone(),
+                parameters: t.input_schema.clone(),
+                // An edit is either a whole-file `replacement` or an
+                // `old_str`/`new_str` fragment. Legion's schema cannot say
+                // that — it requires only `path` and checks the rest where a
+                // failure can be explained — but a grammar has to, or it
+                // permits an edit with no content at all.
+                required_groups: if t.name == "edit-as-proposal" {
+                    vec![
+                        vec!["replacement".to_string()],
+                        vec!["old_str".to_string(), "new_str".to_string()],
+                    ]
+                } else {
+                    Vec::new()
+                },
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
 /// Turn a grammar-constrained reply into loop blocks.
 ///
 /// A response that does not parse is reported as text rather than as a
@@ -1197,29 +1247,7 @@ where
         // rather than repairable. Opt-in: a model with working native tool use
         // must not be downgraded to this.
         let schema_tools: Option<Value> = if schema_constrained_tools_enabled() {
-            legion_ai::schema_tools::build_action_schema(
-                &request
-                    .tools
-                    .iter()
-                    .map(|t| legion_ai::schema_tools::SchemaTool {
-                        name: t.name.clone(),
-                        parameters: t.input_schema.clone(),
-                        // An edit is either a whole-file `replacement` or an
-                        // `old_str`/`new_str` fragment. Legion's schema cannot
-                        // say that — it requires only `path` and checks the
-                        // rest where a failure can be explained — but a grammar
-                        // has to, or it permits an edit with no content at all.
-                        required_groups: if t.name == "edit-as-proposal" {
-                            vec![
-                                vec!["replacement".to_string()],
-                                vec!["old_str".to_string(), "new_str".to_string()],
-                            ]
-                        } else {
-                            Vec::new()
-                        },
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            schema_constrained_tool_schema(&request.tools)
         } else {
             None
         };
@@ -1512,6 +1540,29 @@ where
             request.provider,
             "llama.cpp inline prediction provider is not configured",
         ))
+    }
+}
+
+/// llama.cpp's `llama-server` serves the OpenAI chat-completions dialect,
+/// tool calls included, so this delegates rather than reimplementing it.
+///
+/// The delegation is total on purpose. Every reliability behavior the
+/// OpenAI-compatible path carries — tolerant recovery of calls written as
+/// prose, non-dispatchable malformed blocks, the `LEGION_AI_GOVERNORS`
+/// measurement seam, schema-constrained transport — is exactly what a small
+/// model behind `llama-server` needs, and a parallel implementation would
+/// drift from it the first time one side is fixed. `capabilities()` already
+/// delegated and therefore already advertised `tool_use`; before this impl
+/// existed that advertisement was not backed by anything.
+impl<T> ToolCallingProvider for LlamaCppProvider<T>
+where
+    T: ProviderHttpTransport,
+{
+    fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, ProviderError> {
+        self.inner.complete_with_tools(request)
     }
 }
 
@@ -1930,13 +1981,25 @@ impl Default for AnthropicMessagesClient<ReqwestProviderHttpTransport> {
 impl AnthropicMessagesClient<ReqwestProviderHttpTransport> {
     /// Creates an Anthropic adapter from environment configuration.
     pub fn from_env(id: impl Into<ProviderId>) -> Self {
-        let (api_key, credential_kind) = Self::credential_from_env();
         let base_url = first_configured_value([
             std::env::var(format!("{PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var(format!("{LEGACY_PRODUCT_ENV_PREFIX}_ANTHROPIC_BASE_URL")).ok(),
             std::env::var("ANTHROPIC_BASE_URL").ok(),
         ])
         .unwrap_or_else(|| "https://api.anthropic.com".to_string());
+        Self::from_env_with_base_url(id, base_url)
+    }
+
+    /// Credentials from the environment, endpoint from the caller.
+    ///
+    /// A caller that has already decided which endpoint is acceptable -- for
+    /// example after refusing plaintext for a non-loopback host -- must be able
+    /// to build the client against *that* URL. `from_env` reads the environment
+    /// for both, so a caller correcting only its own copy leaves this client
+    /// posting to the original address: the credential travels the route nobody
+    /// authorized.
+    pub fn from_env_with_base_url(id: impl Into<ProviderId>, base_url: impl Into<String>) -> Self {
+        let (api_key, credential_kind) = Self::credential_from_env();
         Self::with_transport_kind(
             id,
             base_url,
@@ -2028,7 +2091,7 @@ where
     }
 
     fn endpoint(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url, path.trim_start_matches('/'))
+        endpoint_with_path(&self.base_url, path)
     }
 
     fn bearer_token(&self) -> Result<&str, ProviderError> {
@@ -2630,6 +2693,27 @@ where
             blocks,
             stop_reason,
         })
+    }
+}
+
+/// A base URL with an API path appended *before* any query or fragment.
+///
+/// A configured base can carry a query -- `https://proxy.internal?token=...` is
+/// how several gateways pass credentials -- and appending the API path to the
+/// end of that string buries the path inside the query value. The request then
+/// goes to `/` with a longer token, which is a wrong endpoint that looks like a
+/// provider returning nonsense rather than like a misbuilt URL.
+fn endpoint_with_path(base_url: &str, path: &str) -> String {
+    let path = path.trim_start_matches('/');
+    let split = base_url
+        .find(['?', '#'])
+        .filter(|index| *index >= base_url.find("://").map_or(0, |scheme| scheme + 3));
+    match split {
+        Some(index) => {
+            let (authority, tail) = base_url.split_at(index);
+            format!("{}/{}{}", authority.trim_end_matches('/'), path, tail)
+        }
+        None => format!("{}/{}", base_url.trim_end_matches('/'), path),
     }
 }
 
@@ -5745,16 +5829,32 @@ mod tests {
 
     // --- Malformed arguments → typed, non-dispatchable block ---
 
-    /// Unparseable arguments must never reach tool dispatch.
+    /// Whether the tolerant governors are on — the default arm.
     ///
-    /// This previously failed the whole completion. That upheld the safety
-    /// invariant but ended the turn, giving the model no way to correct
-    /// itself — costly with small local models, which get JSON wrong often.
-    /// The invariant is now carried by the type: `MalformedToolCall` has no
-    /// `input` field, so it cannot be dispatched, and the agent loop feeds the
-    /// diagnostic back as text (ADR-0049).
+    /// Tests that behave differently on either side of this seam assert the
+    /// contract for the arm they are actually in, and carry `governor_arm` in
+    /// their name so the set is greppable. `LEGION_AI_GOVERNORS=off` is the
+    /// arm `legion-bench`'s **raw baseline** runs under; a test that silently
+    /// assumed the default left that configuration unverified, which is what
+    /// it was until 2026-08-17.
+    fn governed() -> bool {
+        legion_ai::governance::small_model_governors_enabled()
+    }
+
+    /// Unparseable arguments must never reach tool dispatch — in either arm.
+    ///
+    /// Governed: the invariant is carried by the type. `MalformedToolCall` has
+    /// no `input` field, so it cannot be dispatched, and the agent loop feeds
+    /// the diagnostic back as text (ADR-0049). This replaced failing the whole
+    /// completion, which upheld the invariant but ended the turn and gave the
+    /// model no way to correct itself — costly with small local models.
+    ///
+    /// Raw (`LEGION_AI_GOVERNORS=off`): the pre-port behavior is reproduced —
+    /// the completion fails hard, carrying the raw text in the message. The
+    /// safety property is identical either way, which is why it is asserted
+    /// before the arms diverge.
     #[test]
-    fn openai_malformed_arguments_yield_non_dispatchable_block() {
+    fn openai_malformed_arguments_never_reach_dispatch() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5769,10 +5869,24 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        let resp = openai_tool_provider(response)
-            .complete_with_tools(simple_openai_request("gpt-4o-mini"))
-            .expect("malformed arguments are recoverable, not a transport failure");
+        let outcome = openai_tool_provider(response)
+            .complete_with_tools(simple_openai_request("gpt-4o-mini"));
 
+        if !governed() {
+            let error = outcome.expect_err("the raw arm fails hard on unparseable arguments");
+            let message = format!("{error}");
+            assert!(
+                matches!(error, ProviderError::RequestFailed { .. }),
+                "expected RequestFailed, got {error:?}"
+            );
+            assert!(
+                message.contains("not valid json"),
+                "the raw text must survive into the error: {message}"
+            );
+            return;
+        }
+
+        let resp = outcome.expect("malformed arguments are recoverable, not a transport failure");
         assert!(
             !resp
                 .blocks
@@ -5816,11 +5930,19 @@ mod tests {
         );
     }
 
-    /// A prose call under a near-miss name must reach the offered tool.
-    /// Registry names are canonical, so filtering on the raw name alone would
-    /// silently drop exactly the calls small models get wrong most often.
+    /// A prose call under a near-miss name, in both arms.
+    ///
+    /// Governed: it must reach the offered tool. Registry names are canonical,
+    /// so filtering on the raw name alone would silently drop exactly the calls
+    /// small models get wrong most often.
+    ///
+    /// Raw: it must **not** be recovered. That is not an incidental
+    /// consequence — it is the baseline `legion-bench` measures the governed
+    /// arm against, so "prose stays prose" is the assertion that keeps the
+    /// comparison honest. A leak here would inflate the raw arm and shrink the
+    /// improvement the Phase 2 exit gate rests on.
     #[test]
-    fn openai_recovers_prose_call_under_a_near_miss_name() {
+    fn openai_near_miss_prose_call_follows_the_governor_arm() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5848,7 +5970,24 @@ mod tests {
         };
         let resp = openai_tool_provider(response)
             .complete_with_tools(request)
-            .expect("near-miss call is recovered");
+            .expect("a prose reply is never a transport failure in either arm");
+
+        if !governed() {
+            assert!(
+                !resp
+                    .blocks
+                    .iter()
+                    .any(ToolTurnBlock::is_dispatchable_tool_use),
+                "the raw baseline must not recover a call written as prose: {:?}",
+                resp.blocks
+            );
+            assert_eq!(
+                resp.stop_reason,
+                ToolCompletionStopReason::EndTurn,
+                "with nothing recovered, the model's own `stop` stands"
+            );
+            return;
+        }
 
         let use_block = resp
             .blocks
@@ -5864,8 +6003,14 @@ mod tests {
         }
     }
 
-    /// A recovered call whose arguments never parsed must not reach dispatch
-    /// with a null input — it is as undispatchable as a structured one.
+    /// A prose call whose arguments never parsed must not reach dispatch with a
+    /// null input — it is as undispatchable as a structured one.
+    ///
+    /// The invariant holds in both arms, by different routes: governed, it is
+    /// surfaced as a malformed block carrying the raw text; raw, the call is
+    /// never recovered at all, so there is nothing to dispatch. Asserting the
+    /// invariant first and the arm second is deliberate — the safety property
+    /// is the point, and the mechanism is the detail.
     #[test]
     fn openai_recovered_call_with_unparseable_arguments_is_not_dispatchable() {
         let response = json!({
@@ -5888,6 +6033,18 @@ mod tests {
                 .any(ToolTurnBlock::is_dispatchable_tool_use),
             "a recovered call with unparseable arguments must not be dispatchable"
         );
+
+        if !governed() {
+            assert!(
+                !resp
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, ToolTurnBlock::MalformedToolCall { .. })),
+                "the raw baseline recovers nothing, so there is no call to call malformed"
+            );
+            return;
+        }
+
         assert!(
             resp.blocks.iter().any(|block| matches!(
                 block,
@@ -5897,11 +6054,17 @@ mod tests {
         );
     }
 
-    /// A recovered call must arrive as a tool-use turn even though the model
-    /// reported `stop` — the agent loop returns immediately on `EndTurn`, so
-    /// reporting it would strand the recovered call undispatched.
+    /// What a model's `stop` means depends on the arm.
+    ///
+    /// Governed: a recovered call must arrive as a tool-use turn even though
+    /// the model reported `stop` — the agent loop returns immediately on
+    /// `EndTurn`, so reporting it would strand the recovered call undispatched.
+    ///
+    /// Raw: nothing is recovered, so `stop` is reported as `EndTurn` for all
+    /// three shapes. That is the pre-port behavior, and the reason the raw
+    /// baseline scores worse: the run ends with the call unmade.
     #[test]
-    fn recovered_calls_report_tool_use_even_when_the_model_said_stop() {
+    fn stop_reason_for_a_prose_call_follows_the_governor_arm() {
         let valid = json!({
             "choices": [{
                 "message": {
@@ -5911,12 +6074,19 @@ mod tests {
                 "finish_reason": "stop"
             }]
         });
+        // With nothing recovered, every shape below is plain text and reports
+        // the model's own `stop`.
+        let expected_for_a_prose_call = if governed() {
+            ToolCompletionStopReason::ToolUse
+        } else {
+            ToolCompletionStopReason::EndTurn
+        };
+
         let resp = openai_tool_provider(valid)
             .complete_with_tools(simple_openai_request("gpt-4o-mini"))
             .expect("recovered call");
         assert_eq!(
-            resp.stop_reason,
-            ToolCompletionStopReason::ToolUse,
+            resp.stop_reason, expected_for_a_prose_call,
             "a recovered call must not be reported as the end of the turn"
         );
 
@@ -5933,8 +6103,7 @@ mod tests {
             .complete_with_tools(simple_openai_request("gpt-4o-mini"))
             .expect("recovered malformed call");
         assert_eq!(
-            resp.stop_reason,
-            ToolCompletionStopReason::ToolUse,
+            resp.stop_reason, expected_for_a_prose_call,
             "the diagnostic must reach the loop rather than ending the run"
         );
 
@@ -5951,10 +6120,19 @@ mod tests {
         assert_eq!(resp.stop_reason, ToolCompletionStopReason::EndTurn);
     }
 
-    /// Recovery of prose-embedded calls happens only when the provider
-    /// returned none of its own, so a call is never counted twice.
+    /// A tagged call surrounded by prose, in both arms.
+    ///
+    /// Governed: recovered exactly once — recovery runs only when the provider
+    /// returned no structured calls of its own, so a call is never
+    /// double-counted — and the surrounding prose survives with the consumed
+    /// span removed.
+    ///
+    /// Raw: the whole message stays a single text block, tag and all. Asserting
+    /// the tag is still *there* matters more than it looks: it is the direct
+    /// evidence that the raw arm sends the model's output through untouched,
+    /// which is the premise of the governed-versus-raw comparison.
     #[test]
-    fn openai_recovers_tagged_call_written_as_prose() {
+    fn tagged_prose_call_recovery_follows_the_governor_arm() {
         let response = json!({
             "choices": [{
                 "message": {
@@ -5973,6 +6151,21 @@ mod tests {
             .iter()
             .filter(|block| block.is_dispatchable_tool_use())
             .collect();
+
+        if !governed() {
+            assert!(uses.is_empty(), "the raw baseline recovers nothing");
+            assert!(
+                resp.blocks.iter().any(|block| matches!(
+                    block,
+                    ToolTurnBlock::Text(text)
+                        if text.starts_with("Listing files.") && text.contains("<tool_call>")
+                )),
+                "the raw arm must pass the model's output through untouched: {:?}",
+                resp.blocks
+            );
+            return;
+        }
+
         assert_eq!(uses.len(), 1, "the embedded call is recovered exactly once");
         assert!(
             matches!(uses[0], ToolTurnBlock::ToolUse { name, .. } if name == "read"),
@@ -6175,5 +6368,47 @@ mod tests {
             final_response.blocks.len(),
             final_response.stop_reason
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_path_tests {
+    /// The API path goes before the query, not after it.
+    ///
+    /// A configured base URL can carry a query -- `?token=...` is how several
+    /// gateways pass credentials -- and appending `/v1/messages` to the end of
+    /// that string buries the path inside the token value. Every request then
+    /// goes to `/`, which looks like a provider returning nonsense rather than
+    /// like a URL this code built wrong.
+    #[test]
+    fn an_api_path_is_inserted_before_a_query_or_fragment() {
+        for (base, expected) in [
+            (
+                "https://proxy.internal?token=secret",
+                "https://proxy.internal/v1/messages?token=secret",
+            ),
+            (
+                "https://proxy.internal/anthropic?token=secret",
+                "https://proxy.internal/anthropic/v1/messages?token=secret",
+            ),
+            (
+                "https://proxy.internal#frag",
+                "https://proxy.internal/v1/messages#frag",
+            ),
+            (
+                "https://api.anthropic.com",
+                "https://api.anthropic.com/v1/messages",
+            ),
+            (
+                "https://api.anthropic.com/",
+                "https://api.anthropic.com/v1/messages",
+            ),
+        ] {
+            assert_eq!(
+                super::endpoint_with_path(base, "/v1/messages"),
+                expected,
+                "{base} produced an endpoint the request would not reach"
+            );
+        }
     }
 }

@@ -1,0 +1,498 @@
+schema_version = 2
+package_name = "legion-desktop"
+measured_at_utc = "2026-08-19T07:10:00Z"
+git_sha = "6c27c8c27153241677e21d13d376ede54c16faa8"
+mode = "recorded_offline"
+provider_profile = "recorded:gpt-5.5"
+scoring_mode = "synthetic_budget_arithmetic"
+suite_name = "legion-bench-v0"
+suite_fingerprint = "bench-suite-v1:bd2aa3a7d84d9485"
+
+[summary]
+total = 20
+passed = 20
+failed = 0
+regressed = 0
+skipped = 0
+average_score = 61
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-01"
+fixture_repo = "fixtures/workspace-save"
+kind = "bug_fix"
+objective = "Fix the regression at fixtures/workspace-save while preserving the current test suite (case 01)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 7
+cost_cents = 23
+score = 56
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/workspace-save kind=bug_fix tests_passed=true diff_files=3 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-02"
+fixture_repo = "fixtures/diff-review"
+kind = "bug_fix"
+objective = "Fix the regression at fixtures/diff-review while preserving the current test suite (case 02)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 6
+cost_cents = 22
+score = 63
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/diff-review kind=bug_fix tests_passed=true diff_files=2 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-03"
+fixture_repo = "fixtures/symbol-refactor"
+kind = "bug_fix"
+objective = "Fix the regression at fixtures/symbol-refactor while preserving the current test suite (case 03)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 7
+cost_cents = 23
+score = 64
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/symbol-refactor kind=bug_fix tests_passed=true diff_files=1 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-04"
+fixture_repo = "fixtures/multi-file-feature"
+kind = "bug_fix"
+objective = "Fix the regression at fixtures/multi-file-feature while preserving the current test suite (case 04)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 6
+cost_cents = 22
+score = 59
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/multi-file-feature kind=bug_fix tests_passed=true diff_files=3 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-05"
+fixture_repo = "fixtures/workspace-save"
+kind = "bug_fix"
+objective = "Fix the regression at fixtures/workspace-save while preserving the current test suite (case 05)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 7
+cost_cents = 23
+score = 60
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/workspace-save kind=bug_fix tests_passed=true diff_files=2 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-06"
+fixture_repo = "fixtures/diff-review"
+kind = "test_add"
+objective = "Add the missing regression test coverage for fixtures/diff-review (case 06)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 6
+cost_cents = 22
+score = 67
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/diff-review kind=test_add tests_passed=true diff_files=1 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-07"
+fixture_repo = "fixtures/symbol-refactor"
+kind = "test_add"
+objective = "Add the missing regression test coverage for fixtures/symbol-refactor (case 07)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 7
+cost_cents = 23
+score = 56
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/symbol-refactor kind=test_add tests_passed=true diff_files=3 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-08"
+fixture_repo = "fixtures/multi-file-feature"
+kind = "test_add"
+objective = "Add the missing regression test coverage for fixtures/multi-file-feature (case 08)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 6
+cost_cents = 22
+score = 63
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/multi-file-feature kind=test_add tests_passed=true diff_files=2 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-09"
+fixture_repo = "fixtures/workspace-save"
+kind = "test_add"
+objective = "Add the missing regression test coverage for fixtures/workspace-save (case 09)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 7
+cost_cents = 23
+score = 64
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/workspace-save kind=test_add tests_passed=true diff_files=1 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-10"
+fixture_repo = "fixtures/diff-review"
+kind = "test_add"
+objective = "Add the missing regression test coverage for fixtures/diff-review (case 10)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 6
+cost_cents = 22
+score = 59
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/diff-review kind=test_add tests_passed=true diff_files=3 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-11"
+fixture_repo = "fixtures/symbol-refactor"
+kind = "refactor"
+objective = "Refactor the implementation in fixtures/symbol-refactor without changing the public surface (case 11)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 7
+cost_cents = 23
+score = 60
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/symbol-refactor kind=refactor tests_passed=true diff_files=2 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-12"
+fixture_repo = "fixtures/multi-file-feature"
+kind = "refactor"
+objective = "Refactor the implementation in fixtures/multi-file-feature without changing the public surface (case 12)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 6
+cost_cents = 22
+score = 67
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/multi-file-feature kind=refactor tests_passed=true diff_files=1 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-13"
+fixture_repo = "fixtures/workspace-save"
+kind = "refactor"
+objective = "Refactor the implementation in fixtures/workspace-save without changing the public surface (case 13)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 7
+cost_cents = 23
+score = 56
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/workspace-save kind=refactor tests_passed=true diff_files=3 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-14"
+fixture_repo = "fixtures/diff-review"
+kind = "refactor"
+objective = "Refactor the implementation in fixtures/diff-review without changing the public surface (case 14)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 6
+cost_cents = 22
+score = 63
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/diff-review kind=refactor tests_passed=true diff_files=2 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-15"
+fixture_repo = "fixtures/symbol-refactor"
+kind = "refactor"
+objective = "Refactor the implementation in fixtures/symbol-refactor without changing the public surface (case 15)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 7
+cost_cents = 23
+score = 64
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/symbol-refactor kind=refactor tests_passed=true diff_files=1 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-16"
+fixture_repo = "fixtures/multi-file-feature"
+kind = "multi_file_feature"
+objective = "Implement the scoped multi-file feature in fixtures/multi-file-feature with minimal diff scope (case 16)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 6
+cost_cents = 22
+score = 59
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/multi-file-feature kind=multi_file_feature tests_passed=true diff_files=3 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-17"
+fixture_repo = "fixtures/workspace-save"
+kind = "multi_file_feature"
+objective = "Implement the scoped multi-file feature in fixtures/workspace-save with minimal diff scope (case 17)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 7
+cost_cents = 23
+score = 60
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/workspace-save kind=multi_file_feature tests_passed=true diff_files=2 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-18"
+fixture_repo = "fixtures/diff-review"
+kind = "multi_file_feature"
+objective = "Implement the scoped multi-file feature in fixtures/diff-review with minimal diff scope (case 18)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 1
+turns = 6
+cost_cents = 22
+score = 67
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/diff-review kind=multi_file_feature tests_passed=true diff_files=1 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-19"
+fixture_repo = "fixtures/symbol-refactor"
+kind = "multi_file_feature"
+objective = "Implement the scoped multi-file feature in fixtures/symbol-refactor with minimal diff scope (case 19)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 3
+turns = 7
+cost_cents = 23
+score = 56
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/symbol-refactor kind=multi_file_feature tests_passed=true diff_files=3 turns=7 cost_cents=23 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+
+[[tasks]]
+
+[tasks.task]
+id = "bench-20"
+fixture_repo = "fixtures/multi-file-feature"
+kind = "multi_file_feature"
+objective = "Implement the scoped multi-file feature in fixtures/multi-file-feature with minimal diff scope (case 20)"
+provider_profile = "recorded:gpt-5.5"
+
+[tasks.task.gate_budget]
+require_tests_pass = true
+max_diff_files = 4
+max_turns = 8
+max_cost_cents = 25
+
+[tasks.score]
+tests_passed = true
+diff_files = 2
+turns = 6
+cost_cents = 22
+score = 63
+status = "passed"
+notes = "synthetic=true scoring_mode=synthetic_budget_arithmetic mode=recorded_offline provider=recorded:gpt-5.5 fixture=fixtures/multi-file-feature kind=multi_file_feature tests_passed=true diff_files=2 turns=6 cost_cents=22 (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)"
+

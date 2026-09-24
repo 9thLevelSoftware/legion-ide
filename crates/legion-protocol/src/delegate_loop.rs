@@ -39,6 +39,17 @@ pub enum DelegatedTaskLoopStepKind {
     ModelResponse,
     /// Tool call request (before execution).
     ToolCallRequest,
+    /// Every gate passed and the tool was handed to the host.
+    ///
+    /// Distinct from [`ToolCallRequest`](Self::ToolCallRequest), which records
+    /// that the model asked, and from [`ToolCallResult`](Self::ToolCallResult),
+    /// which records that it finished. The gap between them is where a
+    /// containment question actually lives: a command that ran and then failed
+    /// and a command refused before it ran are both recorded as
+    /// [`ToolCallRejected`](Self::ToolCallRejected), so without this the audit
+    /// cannot answer "did anything execute" -- which is the only question a
+    /// security review is really asking.
+    ToolCallDispatched,
     /// Tool call result (after execution).
     ToolCallResult,
     /// Tool call rejected (scope/policy/validation).

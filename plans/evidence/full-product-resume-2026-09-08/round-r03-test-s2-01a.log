@@ -1,0 +1,65 @@
+CMD: bash -c cargo test -p legion-protocol -j 1 --no-fail-fast --test toolchain_settings; rc1=$?; cargo test -p legion-app -j 1 --no-fail-fast --lib toolchain; rc2=$?; if [ $rc1 -gt $rc2 ]; then exit $rc1; else exit $rc2; fi
+CWD: /d/legion-ide-completion
+BEGIN
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.75s
+     Running tests\toolchain_settings.rs (target\debug\deps\toolchain_settings-6e225c8623a3b21b.exe)
+
+running 3 tests
+test language_toolchain_settings_round_trip_metadata_only ... ok
+test python_toolchain_settings_round_trip_metadata_only ... ok
+test legacy_session_without_toolchain_settings_defaults_to_schema_one_none ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+   Compiling legion-security v0.1.0 (D:\legion-ide-completion\crates\legion-security)
+   Compiling legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+   Compiling legion-storage v0.1.0 (D:\legion-ide-completion\crates\legion-storage)
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+   Compiling legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+   Compiling legion-ai v0.1.0 (D:\legion-ide-completion\crates\legion-ai)
+   Compiling legion-index v0.1.0 (D:\legion-ide-completion\crates\legion-index)
+   Compiling legion-tracker v0.1.0 (D:\legion-ide-completion\crates\legion-tracker)
+   Compiling legion-remote-transport v0.1.0 (D:\legion-ide-completion\crates\legion-remote-transport)
+   Compiling legion-debug v0.1.0 (D:\legion-ide-completion\crates\legion-debug)
+   Compiling legion-agent v0.1.0 (D:\legion-ide-completion\crates\legion-agent)
+   Compiling legion-remote v0.1.0 (D:\legion-ide-completion\crates\legion-remote)
+   Compiling legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+   Compiling legion-plugin v0.1.0 (D:\legion-ide-completion\crates\legion-plugin)
+   Compiling legion-ai-providers v0.1.0 (D:\legion-ide-completion\crates\legion-ai-providers)
+   Compiling legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+   Compiling legion-terminal v0.1.0 (D:\legion-ide-completion\crates\legion-terminal)
+   Compiling legion-memory v0.1.0 (D:\legion-ide-completion\crates\legion-memory)
+   Compiling legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+   Compiling legion-ui v0.1.0 (D:\legion-ide-completion\crates\legion-ui)
+   Compiling legion-collaboration v0.1.0 (D:\legion-ide-completion\crates\legion-collaboration)
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+warning: function `pyright_initialization_options` is never used
+   --> crates\legion-app\src\language\toolchain_settings.rs:534:8
+    |
+534 | pub fn pyright_initialization_options(python: &PythonToolchainSettings) -> serde_json::Value {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `legion-app` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running unittests src\lib.rs (target\debug\deps\legion_app-ddfc6decd25cc009.exe)
+
+running 10 tests
+test language::toolchain_settings::tests::pyright_initialization_options_carry_the_canonical_interpreter_path ... ok
+test language::toolchain_settings::toolchain_approval_tests::configure_python_toolchain_records_canonical_interpreter_and_formatter ... ok
+test language::toolchain_settings::toolchain_approval_tests::python_toolchain_rejects_missing_or_non_regular_executables ... ok
+test language::toolchain_settings::toolchain_approval_tests::invalid_python_formatter_leaves_previous_configuration_intact ... ok
+test language::toolchain_settings::toolchain_approval_tests::unrelated_configured_server_keeps_a_shared_node_grant ... ok
+test language::toolchain_settings::toolchain_approval_tests::python_toolchain_rejects_path_resolved_executable_names ... ok
+test language::toolchain_settings::toolchain_approval_tests::python_toolchain_requires_trusted_workspace ... ok
+test language::toolchain_settings::toolchain_approval_tests::clear_python_toolchain_revokes_only_unshared_exact_binaries ... ok
+test language::toolchain_settings::toolchain_approval_tests::manual_bundle_replacement_and_clear_revoke_exact_node_grants ... ok
+test language::toolchain_settings::toolchain_approval_tests::normal_configuration_is_atomic_and_populates_all_typescript_family_maps ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 436 filtered out; finished in 0.02s
+
+END
+EXIT=0

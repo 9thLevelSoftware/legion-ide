@@ -171,14 +171,14 @@ struct TempWorkspace {
 impl TempWorkspace {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!(
-            "legion-project-path-boundary-{}-{}",
+            "legion-project-path-boundary-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |value| value.as_millis() as u64)
-                + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+                .map_or(0, |value| value.as_millis() as u64),
+            TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&root).expect("create temp workspace");
+        std::fs::create_dir(&root).expect("create temp workspace");
         let root = std::fs::canonicalize(root).expect("canonicalize temp workspace");
         Self {
             root,

@@ -10,20 +10,22 @@ use serde::{Deserialize, Serialize};
 pub const BENCH_REPORT_FILE: &str = "legion_bench_report.toml";
 pub const HOSTILE_EVAL_REPORT_FILE: &str = "hostile_eval_report.toml";
 pub const DEFAULT_BENCH_OUTPUT_PATH: &str = "target/legion-bench";
-/// Schema v2 adds `scoring_mode` so reports self-identify synthetic budget arithmetic
-/// (recorded mode does not open fixture repos or run agents until M13 live mode).
-pub const BENCH_SCHEMA_VERSION: u32 = 2;
-/// Recorded/offline scoring fabricates pass/diff/turns/cost from gate budgets.
-pub const SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC: &str = "synthetic_budget_arithmetic";
+/// Schema v3 removes synthetic budget arithmetic: every bench report now
+/// carries measurements taken from a real fixture checkout. `scoring_mode`
+/// says whether the model's side of the conversation came from a live
+/// endpoint or from a recorded cassette.
+pub const BENCH_SCHEMA_VERSION: u32 = 3;
 /// Hostile eval report scoring is scripted (integration tests own security assertions).
 pub const SCORING_MODE_SCRIPTED_HOSTILE: &str = "scripted_hostile";
 /// Live-local scoring: the delegated agent loop actually ran against a fixture
 /// checkout via a local OpenAI-compatible endpoint; proposals were applied and
 /// the task's verification command executed. Metrics are measured, not derived.
 pub const SCORING_MODE_LIVE_LOCAL: &str = "live_local_execution";
-const DEFAULT_RECORDING_PROFILE: &str = "recorded:gpt-5.5";
-const DEFAULT_LIVE_PROFILE: &str = "live:weekly";
-const DEFAULT_SUITE_NAME: &str = "legion-bench-v0";
+/// Recorded scoring: the same real execution as live-local — fixture checkout,
+/// agent loop, tool dispatch, proposal apply, verification command — with the
+/// model's responses served from a committed cassette instead of a network
+/// endpoint. Offline and repeatable; every metric is still measured.
+pub const SCORING_MODE_RECORDED_REPLAY: &str = "recorded_replay_execution";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,8 +116,9 @@ impl LegionBenchTaskStatus {
     }
 }
 
-/// Measured live-execution metrics. Present only in live-local reports; recorded
-/// and hostile reports omit the field entirely so their TOML shape is unchanged.
+/// Measured execution metrics. Present on every task a model actually ran
+/// (live or replayed); the scripted hostile report omits the field entirely so
+/// its TOML shape is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LegionBenchLiveMetrics {
     /// Loop completed, proposals applied, verification passed, expected files present.
@@ -134,6 +137,12 @@ pub struct LegionBenchLiveMetrics {
     pub generation_tokens: Option<u64>,
     /// Wall-clock milliseconds for the full task (loop + apply + verification).
     pub wall_ms: u64,
+    /// Recorded model exchanges consumed (replay) or captured (record/live).
+    #[serde(default)]
+    pub cassette_exchanges: u32,
+    /// Replayed exchanges whose request no longer matches the recorded one.
+    #[serde(default)]
+    pub cassette_drift: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,8 +188,9 @@ pub struct LegionBenchReport {
     pub git_sha: String,
     pub mode: LegionBenchRunMode,
     pub provider_profile: String,
-    /// How task scores were produced. Recorded mode uses synthetic budget arithmetic
-    /// until live agent execution is implemented (M13). Not a product-behavior proof.
+    /// How task scores were produced: replayed cassette, live endpoint, or the
+    /// scripted hostile suite. Every non-hostile value means the fixture task
+    /// really ran and the numbers are measurements.
     pub scoring_mode: String,
     pub suite_name: String,
     pub suite_fingerprint: String,
@@ -201,87 +211,6 @@ impl std::fmt::Display for LegionBenchError {
 
 impl std::error::Error for LegionBenchError {}
 
-pub fn plan_default_legion_bench_suite() -> LegionBenchSuite {
-    let fixture_repos = [
-        "fixtures/workspace-save",
-        "fixtures/diff-review",
-        "fixtures/symbol-refactor",
-        "fixtures/multi-file-feature",
-    ];
-    let kinds = [
-        LegionBenchTaskKind::BugFix,
-        LegionBenchTaskKind::TestAdd,
-        LegionBenchTaskKind::Refactor,
-        LegionBenchTaskKind::MultiFileFeature,
-    ];
-    let mut tasks = Vec::with_capacity(20);
-
-    for (kind_index, kind) in kinds.into_iter().enumerate() {
-        for slot in 0..5_u32 {
-            let ordinal = kind_index * 5 + slot as usize + 1;
-            let fixture_repo = fixture_repos[(kind_index + slot as usize) % fixture_repos.len()];
-            tasks.push(LegionBenchTask {
-                id: format!("bench-{ordinal:02}"),
-                fixture_repo: fixture_repo.to_string(),
-                kind,
-                objective: objective_for(kind, ordinal, fixture_repo),
-                provider_profile: DEFAULT_RECORDING_PROFILE.to_string(),
-                gate_budget: LegionBenchGateBudget {
-                    require_tests_pass: true,
-                    max_diff_files: 4,
-                    max_turns: 8,
-                    max_cost_cents: 25,
-                },
-            });
-        }
-    }
-
-    let suite_fingerprint = fingerprint_suite(&tasks);
-    LegionBenchSuite {
-        suite_name: DEFAULT_SUITE_NAME.to_string(),
-        suite_fingerprint,
-        recorded_provider_profile: DEFAULT_RECORDING_PROFILE.to_string(),
-        live_provider_profile: DEFAULT_LIVE_PROFILE.to_string(),
-        tasks,
-    }
-}
-
-pub fn plan_legion_bench_report(
-    package_name: &str,
-    git_sha: &str,
-    mode: LegionBenchRunMode,
-    suite: &LegionBenchSuite,
-) -> LegionBenchReport {
-    let provider_profile = match mode {
-        LegionBenchRunMode::RecordedOffline => suite.recorded_provider_profile.clone(),
-        LegionBenchRunMode::LiveWeekly | LegionBenchRunMode::LiveLocal => {
-            suite.live_provider_profile.clone()
-        }
-    };
-    let results = suite
-        .tasks
-        .iter()
-        .enumerate()
-        .map(|(ordinal, task)| score_task(task, ordinal, mode, &provider_profile))
-        .collect::<Vec<_>>();
-
-    let summary = recompute_summary(&results);
-
-    LegionBenchReport {
-        schema_version: BENCH_SCHEMA_VERSION,
-        package_name: package_name.to_string(),
-        measured_at_utc: current_utc_rfc3339(),
-        git_sha: git_sha.to_string(),
-        mode,
-        provider_profile,
-        scoring_mode: SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC.to_string(),
-        suite_name: suite.suite_name.clone(),
-        suite_fingerprint: suite.suite_fingerprint.clone(),
-        summary,
-        tasks: results,
-    }
-}
-
 pub fn verify_legion_bench_report(
     report: &LegionBenchReport,
     suite: &LegionBenchSuite,
@@ -292,12 +221,12 @@ pub fn verify_legion_bench_report(
             report.schema_version
         ));
     }
-    if report.scoring_mode != SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC
-        && report.scoring_mode != SCORING_MODE_SCRIPTED_HOSTILE
+    if report.scoring_mode != SCORING_MODE_SCRIPTED_HOSTILE
         && report.scoring_mode != SCORING_MODE_LIVE_LOCAL
+        && report.scoring_mode != SCORING_MODE_RECORDED_REPLAY
     {
         return Err(format!(
-            "unsupported bench scoring_mode: {} (expected synthetic, scripted hostile, or live local)",
+            "unsupported bench scoring_mode: {} (expected scripted hostile, live local, or recorded replay)",
             report.scoring_mode
         ));
     }
@@ -321,11 +250,12 @@ pub fn verify_legion_bench_report(
             suite.tasks.len()
         ));
     }
-    // Recorded/hostile reports are frozen green baselines: any failure means
-    // the report generator and the gate disagree and the baseline is invalid.
-    // Live-local reports measure a real model, so failures are legitimate data;
-    // the caller's strict flag decides whether they fail the invocation.
-    if report.scoring_mode != SCORING_MODE_LIVE_LOCAL
+    // The hostile report is a frozen green baseline: any failure means the
+    // report generator and the gate disagree and the baseline is invalid.
+    // Reports that measure a model — live or replayed — record legitimate
+    // failures, and the recorded baseline comparison (not this rule) is what
+    // turns those into a gate.
+    if report.scoring_mode == SCORING_MODE_SCRIPTED_HOSTILE
         && (report.summary.failed != 0 || report.summary.regressed != 0)
     {
         return Err(format!(
@@ -435,107 +365,6 @@ pub fn read_report(path: &Path) -> Result<LegionBenchReport, String> {
             path.display()
         )
     })
-}
-
-fn score_task(
-    task: &LegionBenchTask,
-    ordinal: usize,
-    mode: LegionBenchRunMode,
-    provider_profile: &str,
-) -> LegionBenchTaskResult {
-    let budget = &task.gate_budget;
-    let slack = (ordinal as u32 % 3) + 1;
-    let diff_files = budget.max_diff_files.saturating_sub(slack).max(1);
-    let turns = budget
-        .max_turns
-        .saturating_sub(1 + (ordinal as u32 % 2))
-        .max(1);
-    let cost_cents = budget
-        .max_cost_cents
-        .saturating_sub(2 + (ordinal as u32 % 2))
-        .max(1);
-    // The recorded baseline run passes its tests; `require_tests_pass` only
-    // controls whether passing tests are a *gate*. A task that does not
-    // require passing tests must not be forced to fail (the previous code
-    // set `tests_passed = require_tests_pass`, so `require_tests_pass = false`
-    // could never pass).
-    let tests_passed = true;
-    let tests_gate = !budget.require_tests_pass || tests_passed;
-    let passed = tests_gate
-        && diff_files <= budget.max_diff_files
-        && turns <= budget.max_turns
-        && cost_cents <= budget.max_cost_cents;
-    let score = compute_score(budget, diff_files, turns, cost_cents, passed);
-    let status = if passed {
-        LegionBenchTaskStatus::Passed
-    } else {
-        LegionBenchTaskStatus::Failed
-    };
-    let notes = format!(
-        "synthetic=true scoring_mode={} mode={} provider={} fixture={} kind={} tests_passed={} diff_files={} turns={} cost_cents={} \
-         (recorded mode does not open fixture repos or run agents; scores are budget-derived placeholders until M13 live mode)",
-        SCORING_MODE_SYNTHETIC_BUDGET_ARITHMETIC,
-        mode.as_str(),
-        provider_profile,
-        task.fixture_repo,
-        task.kind.as_str(),
-        tests_passed,
-        diff_files,
-        turns,
-        cost_cents,
-    );
-
-    LegionBenchTaskResult {
-        task: task.clone(),
-        score: LegionBenchTaskScore {
-            tests_passed,
-            diff_files,
-            turns,
-            cost_cents,
-            score,
-            status,
-            notes,
-            live: None,
-        },
-    }
-}
-
-pub(crate) fn compute_score(
-    budget: &LegionBenchGateBudget,
-    diff_files: u32,
-    turns: u32,
-    cost_cents: u32,
-    passed: bool,
-) -> u8 {
-    let mut score = 100_u32;
-    score = score.saturating_sub(diff_files.min(budget.max_diff_files) * 4);
-    score = score.saturating_sub(turns.min(budget.max_turns) * 3);
-    score = score.saturating_sub(cost_cents.min(budget.max_cost_cents) / 2);
-    if !passed {
-        score = score.saturating_sub(40);
-    }
-    score.min(100) as u8
-}
-
-fn objective_for(kind: LegionBenchTaskKind, ordinal: usize, fixture_repo: &str) -> String {
-    match kind {
-        LegionBenchTaskKind::BugFix => format!(
-            "Fix the regression at {fixture_repo} while preserving the current test suite (case {ordinal:02})"
-        ),
-        LegionBenchTaskKind::TestAdd => format!(
-            "Add the missing regression test coverage for {fixture_repo} (case {ordinal:02})"
-        ),
-        LegionBenchTaskKind::Refactor => format!(
-            "Refactor the implementation in {fixture_repo} without changing the public surface (case {ordinal:02})"
-        ),
-        LegionBenchTaskKind::MultiFileFeature => format!(
-            "Implement the scoped multi-file feature in {fixture_repo} with minimal diff scope (case {ordinal:02})"
-        ),
-        // Hostile eval tasks set objectives directly in plan_hostile_eval_suite(); this arm is unreachable.
-        LegionBenchTaskKind::HostileEval => format!(
-            "Validate adversarial scenario at {fixture_repo} against the native loop (case {ordinal:02})"
-        ),
-    }
 }
 
 pub fn fingerprint_suite(tasks: &[LegionBenchTask]) -> String {

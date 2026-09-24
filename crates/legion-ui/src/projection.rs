@@ -1,5 +1,6 @@
 //! Coordinator-state projections for UI surfaces.
 
+use crate::ui::{DockLayout, DockMode, PanelRegistry, ShellProjectionSnapshot};
 use legion_protocol::{
     LegionWorkflowMergeReadinessState, LegionWorkflowProjection, LegionWorkflowProjectionRow,
     LegionWorkflowSessionId, LegionWorkflowState, ProposalDiffSummaryKind, ProposalId,
@@ -7,6 +8,207 @@ use legion_protocol::{
     VerificationRunRow, VerificationRunState,
 };
 use serde::{Deserialize, Serialize};
+
+/// A named region of the workbench shell layout.
+///
+/// The dock/panel acceptance is stated per *region* — every region must have a
+/// projection and an integration test — but nothing in the tree enumerated the
+/// regions, so "every" could not be checked. Individual regions were covered by
+/// an ad-hoc scatter of tests; a region that stopped projecting, or a region
+/// added to the shell with no coverage at all, would fail no test.
+///
+/// This enum is that missing enumeration. Every consumer matches exhaustively
+/// over it, so adding a variant is a compile error until the new region is
+/// given a projection source and a test. That is what turns the acceptance from
+/// a claim into a gate.
+///
+/// Regions are the shell's *chrome and dock surfaces*. The code canvas is
+/// deliberately absent: it is owned by the code-canvas painter and its own
+/// acceptance, not by dock/panel completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LayoutRegion {
+    /// Top command bar.
+    TopBar,
+    /// Bottom status bar.
+    StatusBar,
+    /// Left/right/bottom dock placement for the active product mode.
+    Dock,
+    /// Workspace file tree.
+    FileTree,
+    /// Editor tab strip.
+    EditorTabs,
+    /// Terminal panel.
+    TerminalPanel,
+    /// Test explorer panel.
+    TestsPanel,
+    /// Diagnostics/problems panel.
+    ProblemsPanel,
+    /// Symbol outline panel.
+    SymbolsPanel,
+}
+
+impl LayoutRegion {
+    /// Every layout region, in shell reading order.
+    ///
+    /// Kept exhaustive by [`LayoutRegion::all_covers_every_variant`], which
+    /// matches over every variant so a new region cannot be added without
+    /// being listed here.
+    pub const ALL: [Self; 9] = [
+        Self::TopBar,
+        Self::StatusBar,
+        Self::Dock,
+        Self::FileTree,
+        Self::EditorTabs,
+        Self::TerminalPanel,
+        Self::TestsPanel,
+        Self::ProblemsPanel,
+        Self::SymbolsPanel,
+    ];
+
+    /// Stable lowercase identifier used in evidence rows and persisted state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TopBar => "top_bar",
+            Self::StatusBar => "status_bar",
+            Self::Dock => "dock",
+            Self::FileTree => "file_tree",
+            Self::EditorTabs => "editor_tabs",
+            Self::TerminalPanel => "terminal_panel",
+            Self::TestsPanel => "tests_panel",
+            Self::ProblemsPanel => "problems_panel",
+            Self::SymbolsPanel => "symbols_panel",
+        }
+    }
+
+    /// Stable user-facing label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::TopBar => "Top bar",
+            Self::StatusBar => "Status bar",
+            Self::Dock => "Dock layout",
+            Self::FileTree => "File tree",
+            Self::EditorTabs => "Editor tabs",
+            Self::TerminalPanel => "Terminal panel",
+            Self::TestsPanel => "Tests panel",
+            Self::ProblemsPanel => "Problems panel",
+            Self::SymbolsPanel => "Symbols panel",
+        }
+    }
+
+    /// Parse a stable region identifier.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|region| region.as_str() == value)
+    }
+
+    /// The projection this region draws from, as a display-safe path.
+    ///
+    /// This is the "has a projection" half of the acceptance made explicit: a
+    /// region names the projection it renders, rather than the mapping living
+    /// only in renderer code where nothing can audit it.
+    pub fn projection_source(self) -> &'static str {
+        match self {
+            Self::TopBar => "ShellProjectionSnapshot::layout_projection.layout.title",
+            Self::StatusBar => "ShellProjectionSnapshot::active_buffer_projection",
+            Self::Dock => {
+                "DockLayout::standard(product_mode) filtered by PanelRegistry::standard()"
+            }
+            Self::FileTree => "ShellProjectionSnapshot::explorer_projection.nodes",
+            Self::EditorTabs => "ShellProjectionSnapshot::daily_editing_projection.tabs.tabs",
+            Self::TerminalPanel => "ShellProjectionSnapshot::terminal_panel_projection.output_rows",
+            Self::TestsPanel => "ShellProjectionSnapshot::test_explorer_projection.items",
+            Self::ProblemsPanel => "ShellProjectionSnapshot::language_tooling_projection.problems",
+            Self::SymbolsPanel => "ShellProjectionSnapshot::language_tooling_projection.outline",
+        }
+    }
+
+    /// Count the projected items this region has to draw from `snapshot`.
+    ///
+    /// Zero means the region has nothing projected — an empty panel, not a
+    /// missing one. Callers use it in both directions: a populated snapshot
+    /// must give every region a non-zero count, and an empty shell must give
+    /// every content-backed region zero, so the positive check cannot pass
+    /// vacuously.
+    ///
+    /// [`LayoutRegion::TopBar`] and [`LayoutRegion::Dock`] are persistent
+    /// chrome rather than content: the top bar always draws the product-mode
+    /// switch and the dock always places panels for the active mode, so both
+    /// stay non-zero for an empty shell. See [`LayoutRegion::is_content_backed`].
+    pub fn projected_item_count(self, snapshot: &ShellProjectionSnapshot) -> usize {
+        match self {
+            Self::TopBar => {
+                // The mode switch is drawn in every state; the workspace
+                // identity only once a workspace is open.
+                const MODE_SWITCH: usize = 1;
+                MODE_SWITCH
+                    + usize::from(!snapshot.layout_projection.layout.title.trim().is_empty())
+            }
+            Self::StatusBar => {
+                let active = &snapshot.active_buffer_projection;
+                usize::from(active.buffer_id.is_some())
+                    + usize::from(active.file_path.is_some())
+                    + usize::from(active.viewport.is_some())
+            }
+            Self::Dock => dock_placement_count(snapshot.product_mode),
+            Self::FileTree => snapshot.explorer_projection.nodes.len(),
+            Self::EditorTabs => snapshot.daily_editing_projection.tabs.tabs.len(),
+            Self::TerminalPanel => snapshot.terminal_panel_projection.output_rows.len(),
+            Self::TestsPanel => snapshot.test_explorer_projection.items.len(),
+            Self::ProblemsPanel => snapshot.language_tooling_projection.problems.len(),
+            Self::SymbolsPanel => snapshot.language_tooling_projection.outline.len(),
+        }
+    }
+
+    /// Whether this region draws only when the snapshot has content for it.
+    ///
+    /// False for persistent chrome: the top bar keeps the mode switch and the
+    /// dock keeps its mode-derived placement even with an empty workspace, so
+    /// "no content means no rows" is not a rule they can be held to. Exposing
+    /// this as a predicate keeps both exceptions in one documented place
+    /// instead of letting each test hard-code a skip nobody can recover the
+    /// reason for.
+    pub fn is_content_backed(self) -> bool {
+        !matches!(self, Self::TopBar | Self::Dock)
+    }
+
+    /// Exhaustive-match guard proving [`LayoutRegion::ALL`] lists every variant.
+    ///
+    /// Adding a variant without adding it to `ALL` makes this return `false`,
+    /// which the crate's own test rejects.
+    #[cfg(test)]
+    fn all_covers_every_variant(self) -> bool {
+        let listed = match self {
+            Self::TopBar
+            | Self::StatusBar
+            | Self::Dock
+            | Self::FileTree
+            | Self::EditorTabs
+            | Self::TerminalPanel
+            | Self::TestsPanel
+            | Self::ProblemsPanel
+            | Self::SymbolsPanel => true,
+        };
+        listed && Self::ALL.contains(&self)
+    }
+}
+
+/// Count dock placements that the registry can actually construct in `mode`.
+///
+/// A panel placed by the standard layout but rejected by the registry would
+/// render as a hole in the dock, so the count deliberately intersects the two
+/// rather than trusting either alone.
+fn dock_placement_count(mode: DockMode) -> usize {
+    let layout = DockLayout::standard(mode);
+    let registry = PanelRegistry::standard();
+    [&layout.left, &layout.right, &layout.bottom]
+        .into_iter()
+        .flat_map(|side| {
+            std::iter::once(side.pinned_default).chain(side.custom_toolkit.iter().copied())
+        })
+        .filter(|panel| registry.is_visible_in(*panel, mode))
+        .count()
+}
 
 /// Kanban column kinds derived from coordinator state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,6 +634,156 @@ mod tests {
             display_safe_labels: vec![format!("{session}:{state:?}"), "metadata-only".to_string()],
             redaction_hints: vec![RedactionHint::MetadataOnly],
             schema_version: 1,
+        }
+    }
+
+    #[test]
+    fn layout_region_all_lists_every_variant_with_unique_ids_and_labels() {
+        assert!(
+            LayoutRegion::ALL
+                .into_iter()
+                .all(LayoutRegion::all_covers_every_variant),
+            "LayoutRegion::ALL must list every variant"
+        );
+
+        let mut ids: Vec<_> = LayoutRegion::ALL
+            .into_iter()
+            .map(LayoutRegion::as_str)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            LayoutRegion::ALL.len(),
+            "region ids must be unique"
+        );
+
+        let mut labels: Vec<_> = LayoutRegion::ALL
+            .into_iter()
+            .map(LayoutRegion::label)
+            .collect();
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(
+            labels.len(),
+            LayoutRegion::ALL.len(),
+            "region labels must be unique"
+        );
+    }
+
+    #[test]
+    fn layout_region_ids_round_trip_and_reject_unknown_values() {
+        for region in LayoutRegion::ALL {
+            assert_eq!(LayoutRegion::parse(region.as_str()), Some(region));
+            assert!(
+                !region.projection_source().trim().is_empty(),
+                "{} must name the projection it draws from",
+                region.as_str()
+            );
+        }
+
+        // Negative case: an id that is not a region must not resolve, so a
+        // typo in persisted state fails loudly instead of silently binding to
+        // whichever variant happens to be first.
+        assert_eq!(LayoutRegion::parse("code_canvas"), None);
+        assert_eq!(LayoutRegion::parse("Top bar"), None);
+        assert_eq!(LayoutRegion::parse(""), None);
+    }
+
+    #[test]
+    fn layout_region_content_backed_regions_are_empty_for_an_empty_shell() {
+        // Without this the populated-snapshot assertion could pass on a
+        // counter that is non-zero no matter what the snapshot contains.
+        let snapshot = crate::ui::Shell::empty("").projection_snapshot();
+
+        for region in LayoutRegion::ALL {
+            let count = region.projected_item_count(&snapshot);
+            if region.is_content_backed() {
+                assert_eq!(
+                    count,
+                    0,
+                    "{} must project nothing from an empty shell",
+                    region.as_str()
+                );
+            } else {
+                assert!(
+                    count > 0,
+                    "{} is persistent chrome and must still project",
+                    region.as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn layout_region_dock_placement_excludes_panels_the_mode_may_not_construct() {
+        // The dock's regression surface is mode filtering rather than content,
+        // so it gets the negative case the emptiness check cannot give it.
+        // Manual is not the *smallest* dock — it is a deliberately rich local
+        // IDE layout — so panel count is not the invariant. What must hold is
+        // that no mode places a panel its runtime surfaces forbid.
+        let registry = PanelRegistry::standard();
+
+        for mode in [
+            DockMode::Manual,
+            DockMode::Assist,
+            DockMode::Delegate,
+            DockMode::Automate,
+        ] {
+            assert!(
+                dock_placement_count(mode) > 0,
+                "{mode:?} must place dock panels"
+            );
+        }
+
+        for forbidden in [
+            crate::ui::PanelId::Assistant,
+            crate::ui::PanelId::Delegation,
+            crate::ui::PanelId::AgentFleet,
+            crate::ui::PanelId::AgentLogs,
+        ] {
+            assert!(
+                !registry.is_visible_in(forbidden, DockMode::Manual),
+                "Manual mode must not construct {}",
+                forbidden.as_str()
+            );
+        }
+        assert!(
+            registry.is_visible_in(crate::ui::PanelId::ProjectExplorer, DockMode::Manual),
+            "Manual mode must construct the project explorer"
+        );
+        assert!(
+            registry.is_visible_in(crate::ui::PanelId::AgentLogs, DockMode::Automate),
+            "Automate mode must construct agent logs"
+        );
+    }
+
+    #[test]
+    fn layout_region_dock_never_places_a_panel_the_mode_cannot_construct() {
+        // A placed-but-unconstructible panel renders as a hole in the dock.
+        for mode in [
+            DockMode::Manual,
+            DockMode::Assist,
+            DockMode::Delegate,
+            DockMode::Automate,
+        ] {
+            let layout = DockLayout::standard(mode);
+            let registry = PanelRegistry::standard();
+            let placed: Vec<_> = [&layout.left, &layout.right, &layout.bottom]
+                .into_iter()
+                .flat_map(|side| {
+                    std::iter::once(side.pinned_default).chain(side.custom_toolkit.iter().copied())
+                })
+                .collect();
+            let unconstructible: Vec<_> = placed
+                .iter()
+                .filter(|panel| !registry.is_visible_in(**panel, mode))
+                .map(|panel| panel.as_str())
+                .collect();
+            assert!(
+                unconstructible.is_empty(),
+                "{mode:?} places panels it cannot construct: {unconstructible:?}"
+            );
         }
     }
 

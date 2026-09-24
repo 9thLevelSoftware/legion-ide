@@ -280,3 +280,87 @@ fn ledger_rows_parse() {
     assert_eq!(rows[0].gate_id, "PR-AI-001");
     assert_eq!(rows[0].status, "Product workflow validated");
 }
+
+fn write_minimal_public_docs(root: &Path) {
+    fs::create_dir_all(root.join("docs")).expect("create public docs fixture");
+    fs::write(
+        root.join("README.md"),
+        "Legion is not yet a general-availability desktop product.\n",
+    )
+    .expect("write README");
+    fs::write(
+        root.join("plans").join("product-readiness-ledger.md"),
+        "| Track | Gate | Acceptance Criteria | Current Status | Current Evidence |\n\
+         | --- | --- | --- | --- | --- |\n\
+         | Core | PR-CORE-001 | criteria | Substrate validated | tests |\n",
+    )
+    .expect("write ledger");
+    fs::write(root.join("docs").join("overview.md"), "in progress\n").expect("write docs");
+}
+
+fn write_hosted_workflows(root: &Path) {
+    let dir = root.join(".github").join("workflows");
+    fs::create_dir_all(&dir).expect("create workflows");
+    fs::write(
+        dir.join("legion-release.yml"),
+        "name: Legion Native Release\n",
+    )
+    .expect("write release workflow");
+    fs::write(
+        dir.join("legion-gates.yml"),
+        "run: cargo run -p xtask -- perf-harness\nrun: cargo run -p xtask -- rust-analyzer-smoke\n",
+    )
+    .expect("write gates workflow");
+    fs::write(dir.join("legion-smoke.yml"), "name: Legion Smoke\n").expect("write smoke workflow");
+}
+
+#[test]
+fn claim_audit_rejects_agents_denying_hosted_release_workflow() {
+    let workspace = TempWorkspace::new("agents-deny-release");
+    write_minimal_public_docs(workspace.path());
+    write_hosted_workflows(workspace.path());
+    fs::write(
+        workspace.path().join("AGENTS.md"),
+        "No hosted release workflow is currently configured.\n",
+    )
+    .expect("write stale AGENTS.md");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AGENTS.md") && stderr.contains("legion-release.yml"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn claim_audit_accepts_honest_agents_with_hosted_release_workflow() {
+    let workspace = TempWorkspace::new("agents-honest-release");
+    write_minimal_public_docs(workspace.path());
+    write_hosted_workflows(workspace.path());
+    fs::write(
+        workspace.path().join("AGENTS.md"),
+        "`.github/workflows/legion-release.yml` is a manual unsigned-beta installer workflow; it is not a PR merge gate.\n\
+         Hosted `legion-gates.yml` runs `perf-harness` and `verify-perf-harness` on the 3-OS PR matrix.\n",
+    )
+    .expect("write honest AGENTS.md");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .arg("claim-audit")
+        .current_dir(workspace.path())
+        .output()
+        .expect("run claim-audit binary");
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

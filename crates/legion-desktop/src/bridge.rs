@@ -5,19 +5,20 @@ use std::path::PathBuf;
 
 use legion_project::git_pull_request_url;
 use legion_protocol::{
-    AgentRunId, AssistantRailCommand, BufferId, CollaborationParticipantId, CollaborationSessionId,
-    DebugConfigurationId, DebugSessionId, DelegatedTaskPlanId,
-    DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision, EditablePlanSection,
-    FileId, InlinePredictionRequestId, LegionWorkflowConflictId, LegionWorkflowSessionId,
-    LegionWorkflowSignOffId, LegionWorkflowVerificationGateId, ProposalCancellationReason,
-    ProposalId, ProposalRejectionReason, ProposalRollbackReason, ProtocolTextRange,
-    RemoteWorkspaceSessionId, TerminalSessionId, TextCoordinate, ViewportScroll,
+    AgentRunId, AssistantRailCommand, BufferId, BufferVersion, CaretAffinity,
+    CollaborationParticipantId, CollaborationSessionId, DebugConfigurationId, DebugSessionId,
+    DelegatedTaskPlanId, DelegatedTaskProposalHunkDisposition, DelegatedTaskToolPermissionDecision,
+    EditablePlanSection, FileId, InlinePredictionRequestId, LegionWorkflowConflictId,
+    LegionWorkflowSessionId, LegionWorkflowSignOffId, LegionWorkflowVerificationGateId,
+    LineWrappingPolicy, ProposalCancellationReason, ProposalId, ProposalRejectionReason,
+    ProposalRollbackReason, ProtocolTextRange, RemoteWorkspaceSessionId, SnapshotId,
+    TerminalSessionId, TextCoordinate, ViewportProjection, ViewportScroll, VisualNavigationRequest,
 };
-use legion_protocol::{PluginContribution, PluginId};
+use legion_protocol::{CapabilityId, PluginContribution, PluginId};
 use legion_ui::{
-    CommandDispatchIntent, DebugStepKindProjection, DockMode, GitConflictChoiceProjection,
-    PaletteMode, SearchScopeProjection, ShellProjectionSnapshot, ThemePreferenceProjection,
-    ToastVerbosityProjection,
+    CommandDispatchIntent, DebugStepKindProjection, DockMode, EditorBoundaryKind,
+    GitConflictChoiceProjection, PaletteMode, SearchScopeProjection, ShellProjectionSnapshot,
+    ThemePreferenceProjection, ToastVerbosityProjection,
 };
 use thiserror::Error;
 
@@ -55,6 +56,61 @@ impl Drop for SensitiveString {
     }
 }
 
+/// A finite coordinate in canvas world space.
+///
+/// Exists so `DesktopAction` can carry a position and stay `Eq`. `f32` is not
+/// `Eq` because `NaN != NaN`, and the four view models that embed a
+/// `DesktopAction` derive `Eq` in turn — so the choice was between propagating
+/// an `Eq` removal across them, storing whole pixels (which stalls a slow drag,
+/// where each frame's sub-pixel delta rounds to nothing), or excluding the one
+/// value that breaks the law.
+///
+/// This does the last. `new` maps every non-finite input to zero, so a `NaN`
+/// cannot exist inside the type and reflexivity holds for every value that can.
+/// Equality is by bits, which for finite values is ordinary equality except that
+/// it distinguishes `-0.0` from `0.0` — a distinction with no effect on where a
+/// card is drawn.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldCoord(f32);
+
+impl WorldCoord {
+    /// A coordinate, with non-finite input collapsed to zero.
+    ///
+    /// Zero rather than a saturating bound: an infinite or `NaN` position means
+    /// something upstream went wrong, and a card at the origin is recoverable by
+    /// dragging it, while one at `f32::MAX` is not findable at all.
+    pub fn new(value: f32) -> Self {
+        Self(if value.is_finite() { value } else { 0.0 })
+    }
+
+    /// The underlying value, always finite.
+    pub fn get(self) -> f32 {
+        self.0
+    }
+}
+
+impl PartialEq for WorldCoord {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.to_bits() == other.0.to_bits()
+    }
+}
+
+impl Eq for WorldCoord {}
+
+/// One card's first recorded position on the canvas.
+///
+/// Paired with [`DesktopAction::PlaceCanvasNodes`] so a whole set of defaults
+/// travels as one action.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanvasPlacement {
+    /// Canonical path of the card being placed.
+    pub path: legion_protocol::CanonicalPath,
+    /// World-space x.
+    pub x: WorldCoord,
+    /// World-space y.
+    pub y: WorldCoord,
+}
+
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAction {
@@ -69,10 +125,88 @@ pub enum DesktopAction {
         /// Target product mode.
         mode: DockMode,
     },
+    /// Configure the projected TypeScript toolchain through app authority.
+    ConfigureTypeScriptToolchain {
+        /// Metadata path for the language-server archive.
+        server_archive: String,
+        /// Metadata path for the compiler archive.
+        compiler_archive: String,
+        /// Explicit Node runtime path.
+        node_executable: String,
+    },
+    /// Clear the projected TypeScript toolchain configuration through app authority.
+    ClearTypeScriptToolchain,
+    /// Start the projected language-server session for the active file.
+    StartLspSession,
+    /// Restart the projected language-server session for the active file.
+    RestartLspSession,
     /// Switch to a projected tab.
     SwitchTab {
         /// Target buffer identifier.
         buffer_id: BufferId,
+    },
+    /// Switch what the central panel shows.
+    ///
+    /// Routed through the runtime rather than kept on the renderer, unlike the
+    /// activity-rail selection beside it. The display model is built from the
+    /// view state the runtime hands down, so a toggle the renderer kept to
+    /// itself would flip the rail button and leave the centre — and the status
+    /// line that names the surface — showing the old one.
+    SetCenterSurface {
+        /// Surface to show.
+        surface: crate::view::CenterSurface,
+    },
+    /// Place a canvas node at a world-space position.
+    ///
+    /// Renderer-owned view state, like explorer expansion: the app decides which
+    /// buffers are open, the person decides where the cards sit. Keyed by
+    /// canonical path rather than `BufferId` so an arrangement survives the
+    /// restart that renumbers buffers.
+    MoveCanvasNode {
+        /// Canonical path of the node being placed.
+        path: legion_protocol::CanonicalPath,
+        /// World-space x.
+        x: WorldCoord,
+        /// World-space y.
+        y: WorldCoord,
+        /// Whether the drag has ended and this position is worth persisting.
+        ///
+        /// A drag emits one of these per pointer-movement frame. Writing the
+        /// session file on each would put a rewrite, a validate, a `sync_all`
+        /// and an atomic replace on the renderer thread dozens of times during
+        /// one gesture. The arrangement updates every frame; only the last one
+        /// reaches disk.
+        settled: bool,
+    },
+    /// Record where cards drawn for the first time were laid out.
+    ///
+    /// One action for the whole set rather than one [`Self::MoveCanvasNode`]
+    /// each. Opening the canvas places every unplaced card in a single frame,
+    /// and a settled move persists and rebuilds the projection on its own --
+    /// so N open files meant N validates, N `sync_all`s, N atomic replaces and
+    /// N projection rebuilds on the renderer thread before the first canvas
+    /// frame finished. The work does not grow with the tab count now.
+    PlaceCanvasNodes {
+        /// Where each newly drawn card was laid out.
+        placements: Vec<CanvasPlacement>,
+    },
+    /// Record a connection the person drew between two canvas nodes.
+    ///
+    /// A person's claim that two files are related, which is a weaker and
+    /// different thing from an import or a call. Kept separate from any future
+    /// derived edge so neither can be mistaken for the other.
+    ConnectCanvasNodes {
+        /// Canonical path the connection starts at.
+        from_path: legion_protocol::CanonicalPath,
+        /// Canonical path the connection ends at.
+        to_path: legion_protocol::CanonicalPath,
+    },
+    /// Remove a connection the person drew.
+    DisconnectCanvasNodes {
+        /// Canonical path the connection starts at.
+        from_path: legion_protocol::CanonicalPath,
+        /// Canonical path the connection ends at.
+        to_path: legion_protocol::CanonicalPath,
     },
     /// Request close for a projected tab.
     CloseTab {
@@ -167,6 +301,10 @@ pub enum DesktopAction {
     },
     /// Open the projected Settings surface.
     OpenSettings,
+    /// Open the Help/About overlay.
+    OpenAbout,
+    /// Export a metadata-only support bundle through app authority.
+    ExportSupportBundle,
     /// Update theme preference through app authority.
     SetThemePreference {
         /// Requested theme preference.
@@ -181,6 +319,20 @@ pub enum DesktopAction {
     SetEditorFontSize {
         /// Requested editor font size in points.
         font_size_pt: u16,
+    },
+    /// Run a runnable code lens through app authority.
+    ActivateLanguageCodeLens {
+        /// Buffer the lens belongs to.
+        buffer_id: BufferId,
+        /// Lens identifier selected from projection data.
+        lens_id: String,
+    },
+    /// Set the editor's line wrapping policy through app authority.
+    SetLineWrappingPolicy {
+        /// Requested policy.
+        policy: LineWrappingPolicy,
+        /// Fixed wrap column, carried through unchanged for the fixed policy.
+        wrap_column: Option<u32>,
     },
     /// Update toast verbosity through app authority.
     SetToastVerbosity {
@@ -366,6 +518,20 @@ pub enum DesktopAction {
         /// Projected hunk identifier.
         hunk_id: String,
     },
+    /// Stage every change to one path, hunk or not.
+    ///
+    /// The only way to stage a modified binary file, a mode-only change or a
+    /// pure rename: none of them produce a `@@` hunk, so hunk controls cannot
+    /// reach them and the commit flow was unusable for them.
+    StageGitPath {
+        /// Repository-relative path to stage.
+        path: String,
+    },
+    /// Unstage every change to one path.
+    UnstageGitPath {
+        /// Repository-relative path to unstage.
+        path: String,
+    },
     /// Accept the current (ours) side of a conflicted file.
     AcceptGitConflictCurrent {
         /// Repository-relative path of the conflicted file.
@@ -381,7 +547,12 @@ pub enum DesktopAction {
         /// Canonical path represented by the explorer row.
         path: String,
     },
-    /// Select/reveal an explorer file through app authority.
+    /// The user activated an explorer row (clicked it).
+    ///
+    /// Named for the gesture, not the effect, because the effect depends on
+    /// what the row is: a file opens and is revealed, a directory expands.
+    /// The variant used to mean "reveal only", which is why clicking a file
+    /// used to do nothing a user could see.
     SelectExplorerFile {
         /// Projected workspace file identifier.
         file_id: FileId,
@@ -458,6 +629,41 @@ pub enum DesktopAction {
         plugin_id: PluginId,
         /// Command identifier selected from projection data.
         command_id: String,
+    },
+    /// Decide exactly one extension permission row (P7.F2.T2).
+    ///
+    /// One capability per action. A control that decided several at once would
+    /// be the "trust this extension" toggle the task forbids, and there is no
+    /// action here that could express it.
+    SetExtensionPermission {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+        /// The single capability this decision applies to.
+        capability: CapabilityId,
+        /// Whether the user granted that one capability.
+        granted: bool,
+    },
+    /// Cancel an in-flight Cloud Lane upload (P9.F3.T3).
+    CancelCloudLaneTask {
+        /// Task id selected from Cloud Lane projection data.
+        task_id: String,
+        /// Display-safe reason recorded with the cancellation.
+        reason_label: String,
+    },
+    /// Install a signed extension through app-owned extension authority (P7.F2.T1).
+    InstallExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Update an installed extension through app-owned extension authority.
+    UpdateExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
+    },
+    /// Remove an installed extension through app-owned extension authority.
+    RemoveExtension {
+        /// Manifest identifier selected from catalog projection data.
+        manifest_id: String,
     },
     /// Join a collaboration session through app-owned collaboration authority.
     JoinCollaborationSession {
@@ -629,6 +835,18 @@ pub enum DesktopAction {
         /// Projected insertion coordinate.
         at: TextCoordinate,
     },
+    /// Replace every directed caret range through editor authority.
+    ReplaceDirectedCarets {
+        /// Replacement or insertion payload.
+        text: String,
+    },
+    /// Delete each directed caret's selection or adjacent grapheme cluster.
+    DeleteDirectedCarets {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Delete toward the document start when true; otherwise toward the end.
+        backward: bool,
+    },
     /// Replace a projected range.
     ReplaceRange {
         /// Projected range to replace.
@@ -670,12 +888,92 @@ pub enum DesktopAction {
         /// Cursor coordinate in projection space.
         cursor: TextCoordinate,
     },
+    /// Add a cursor one line above every existing one.
+    ///
+    /// The buffer falls back to the active tab, like the other editing
+    /// actions: the keyboard has no buffer to name.
+    AddCursorAbove {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Add a cursor one line below every existing one.
+    AddCursorBelow {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
+    /// Collapse a multi-cursor set back to the primary caret.
+    ClearExtraCursors {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+    },
     /// Set the primary selection for a buffer or the active buffer.
     SetSelection {
         /// Optional target buffer; falls back to the active tab.
         buffer_id: Option<BufferId>,
         /// Selection range in projection space.
         range: ProtocolTextRange,
+    },
+    /// Set a directed pointer selection while preserving anchor/head order.
+    SetDirectedSelection {
+        /// Optional target buffer.
+        buffer_id: Option<BufferId>,
+        /// Fixed selection anchor.
+        anchor: TextCoordinate,
+        /// Current selection head.
+        head: TextCoordinate,
+    },
+    /// Set the visual cursor while preserving the rendered wrap-side affinity.
+    SetVisualCursor {
+        /// Optional target buffer.
+        buffer_id: Option<BufferId>,
+        /// Layout snapshot identity.
+        expected_snapshot_id: SnapshotId,
+        /// Layout buffer version.
+        expected_buffer_version: BufferVersion,
+        /// Cursor coordinate in projection space.
+        cursor: TextCoordinate,
+        /// Rendered wrap-side affinity.
+        affinity: CaretAffinity,
+    },
+    /// Set a visual directed selection while preserving rendered affinity.
+    SetVisualDirectedSelection {
+        /// Optional target buffer.
+        buffer_id: Option<BufferId>,
+        /// Layout snapshot identity.
+        expected_snapshot_id: SnapshotId,
+        /// Layout buffer version.
+        expected_buffer_version: BufferVersion,
+        /// Fixed selection anchor.
+        anchor: TextCoordinate,
+        /// Current selection head.
+        head: TextCoordinate,
+        /// Rendered wrap-side affinity for the head.
+        head_affinity: CaretAffinity,
+    },
+    /// Move all ordered carets through app-owned shaped visual-row facts.
+    MoveVertically {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Renderer-shaped request with snapshot/version and exact caret guards.
+        request: VisualNavigationRequest,
+    },
+    /// Move every active editor caret to a semantic line/document boundary.
+    MoveToBoundary {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Requested boundary.
+        boundary: EditorBoundaryKind,
+        /// Extend the directed selection from each caret.
+        extend: bool,
+    },
+    /// Move every active editor caret one grapheme boundary horizontally.
+    MoveHorizontally {
+        /// Optional target buffer; falls back to the active tab.
+        buffer_id: Option<BufferId>,
+        /// Move toward the document start when true, otherwise toward the end.
+        left: bool,
+        /// Extend the directed selections.
+        extend: bool,
     },
     /// Select the entire target buffer or active buffer.
     SelectAll {
@@ -751,6 +1049,16 @@ pub enum DesktopAction {
         /// Projected cursor position.
         position: TextCoordinate,
     },
+    /// Request callers of the symbol under the caret in the active buffer.
+    ShowIncomingCalls {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
+    /// Request callees of the symbol under the caret in the active buffer.
+    ShowOutgoingCalls {
+        /// Projected cursor position.
+        position: TextCoordinate,
+    },
     /// Refresh the active buffer outline.
     RefreshOutline,
     /// Refresh inlay hints for the active buffer.
@@ -771,6 +1079,15 @@ pub enum DesktopAction {
     /// Request a code-action proposal preview.
     RequestCodeActionProposal {
         /// Code-action identifier.
+        action_id: String,
+    },
+    /// Request live code-action metadata for the active selection.
+    RequestCodeActions,
+    /// Select an authoritative projected code-action candidate.
+    SelectCodeAction {
+        /// Opaque response identity from the projection.
+        response_id: String,
+        /// Opaque candidate token scoped to that response.
         action_id: String,
     },
     /// Cancel a language operation.
@@ -835,6 +1152,15 @@ pub enum DesktopAction {
     NavigateToDefinition {
         /// Zero-based index into the projected definitions list.
         index: usize,
+    },
+    /// Navigate to a projected reference location.
+    NavigateToReference {
+        /// Canonical project-relative path.
+        path: String,
+        /// Zero-based line.
+        line: u32,
+        /// Zero-based character column.
+        character: u32,
     },
     /// Launch a terminal session through app authority.
     TerminalLaunch {
@@ -1018,6 +1344,31 @@ pub enum DesktopAppRequest {
     ToggleExplorerPath {
         /// Canonical path represented by the explorer row.
         path: String,
+    },
+    /// Answer the unsaved-changes prompt by saving, then closing the tab.
+    ///
+    /// Two dispatches, so this is adapter sequencing rather than one intent.
+    /// The prompt used to emit a bare `Save`, which saved the file and left the
+    /// tab open — the close the user had asked for never happened, and the
+    /// prompt's own button was therefore lying about what it did.
+    SaveAndCloseTab {
+        /// Buffer to save and then close.
+        buffer_id: BufferId,
+    },
+    /// Activate an explorer row: open the file, or expand the directory.
+    ///
+    /// Activation is two app dispatches for a file — open the buffer, then
+    /// reveal the row — because the explorer projection is push-updated by the
+    /// reveal outcome and would otherwise keep highlighting the previous
+    /// selection after the new file opened. Sequencing them is adapter work,
+    /// so this arrives as an app *request* rather than a single intent.
+    ActivateExplorerFile {
+        /// File identifier of the activated row.
+        file_id: FileId,
+        /// Canonical path represented by the activated row.
+        path: String,
+        /// Whether the row is a directory.
+        is_directory: bool,
     },
     /// Open an external URL in the system browser.
     OpenExternalUrl {
@@ -1212,6 +1563,49 @@ pub enum DesktopBridgeError {
         /// Unknown plugin id.
         plugin_id: PluginId,
     },
+    /// Task id was not present in the current Cloud Lane projection.
+    #[error("unknown cloud lane task: {task_id}")]
+    UnknownCloudLaneTask {
+        /// Unknown task id.
+        task_id: String,
+    },
+    /// The task exists but has already reached a terminal state.
+    #[error("cloud lane task {task_id} is {state} and cannot be cancelled")]
+    CloudLaneTaskNotCancellable {
+        /// Task the cancel targeted.
+        task_id: String,
+        /// Terminal state it was already in.
+        state: String,
+    },
+    /// Manifest id was not present in the current extension catalog projection.
+    #[error("unknown extension: {manifest_id}")]
+    UnknownExtension {
+        /// Unknown manifest id.
+        manifest_id: String,
+    },
+    /// The capability is not one this extension asks for.
+    #[error("extension {manifest_id} does not request capability {capability}")]
+    UnknownExtensionCapability {
+        /// Manifest the decision targeted.
+        manifest_id: String,
+        /// Capability with no matching review row.
+        capability: String,
+    },
+    /// The projection says this lifecycle operation is not currently offered.
+    ///
+    /// Emitted when a gesture arrives for an entry the app would refuse — an
+    /// unsigned artifact, a failed signature, or an incomplete permission
+    /// review. Keeping this on the bridge means the renderer cannot smuggle an
+    /// install past the projection's own `can_install` answer.
+    #[error("extension {manifest_id} cannot be {operation} right now: {reason}")]
+    ExtensionOperationUnavailable {
+        /// Manifest the gesture targeted.
+        manifest_id: String,
+        /// Lifecycle operation requested.
+        operation: &'static str,
+        /// Metadata-only refusal reason.
+        reason: String,
+    },
     /// Plugin command id was empty after normalization.
     #[error("plugin command id is empty for plugin {plugin_id:?}")]
     InvalidPluginCommand {
@@ -1397,6 +1791,44 @@ pub enum DesktopBridgeError {
 #[derive(Debug, Default)]
 pub struct DesktopCommandBridge;
 
+/// Converts projected absolute UTF-16 endpoints into the line-local protocol
+/// range expected by the language server. Every endpoint is resolved against
+/// its own line metric; an unknown origin is rejected rather than fabricated
+/// as zero.
+pub(crate) fn code_action_range(viewport: &ViewportProjection) -> Option<ProtocolTextRange> {
+    fn endpoint(
+        viewport: &ViewportProjection,
+        mut position: TextCoordinate,
+    ) -> Option<TextCoordinate> {
+        let absolute_utf16 = position.utf16_offset?;
+        let index = viewport
+            .line_slices
+            .iter()
+            .position(|slice| slice.line_number == position.line)?;
+        let line_start = viewport
+            .line_metrics
+            .get(index)
+            .and_then(|metric| metric.line_start_utf16_offset)?;
+        let character = absolute_utf16.checked_sub(line_start)?;
+        position.character = u32::try_from(character).ok()?;
+        position.utf16_offset = None;
+        Some(position)
+    }
+
+    let source = viewport
+        .selections
+        .first()
+        .cloned()
+        .unwrap_or(ProtocolTextRange {
+            start: viewport.cursor,
+            end: viewport.cursor,
+        });
+    Some(ProtocolTextRange {
+        start: endpoint(viewport, source.start)?,
+        end: endpoint(viewport, source.end)?,
+    })
+}
+
 impl DesktopCommandBridge {
     /// Creates a bridge that owns no app/editor/workspace state.
     pub fn new() -> Self {
@@ -1413,6 +1845,24 @@ impl DesktopCommandBridge {
             DesktopAction::Quit => DesktopBridgeOutput::Intent(CommandDispatchIntent::Quit),
             DesktopAction::SetProductMode { mode } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetProductMode { mode })
+            }
+            DesktopAction::ConfigureTypeScriptToolchain {
+                server_archive,
+                compiler_archive,
+                node_executable,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::ConfigureTypeScriptToolchain {
+                server_archive,
+                compiler_archive,
+                node_executable,
+            }),
+            DesktopAction::ClearTypeScriptToolchain => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ClearTypeScriptToolchain)
+            }
+            DesktopAction::StartLspSession => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::LspStartSession)
+            }
+            DesktopAction::RestartLspSession => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::LspRestartSession)
             }
             DesktopAction::SaveActive => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::Save { buffer_id }
@@ -1439,7 +1889,9 @@ impl DesktopCommandBridge {
             }),
             DesktopAction::SaveDirtyClose { buffer_id } => {
                 self.with_dirty_close_prompt(snapshot, buffer_id, |buffer_id| {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::Save { buffer_id })
+                    DesktopBridgeOutput::AppRequest(DesktopAppRequest::SaveAndCloseTab {
+                        buffer_id,
+                    })
                 })
             }
             DesktopAction::CancelDirtyClose { buffer_id } => {
@@ -1494,6 +1946,14 @@ impl DesktopCommandBridge {
                     token,
                 })
             }
+            // Canvas arrangement is renderer state, in the same category as
+            // explorer expansion: the runtime records it and persists it, and
+            // no app command corresponds to moving a card.
+            DesktopAction::SetCenterSurface { .. }
+            | DesktopAction::MoveCanvasNode { .. }
+            | DesktopAction::PlaceCanvasNodes { .. }
+            | DesktopAction::ConnectCanvasNodes { .. }
+            | DesktopAction::DisconnectCanvasNodes { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissToast { .. } => DesktopBridgeOutput::Noop,
             DesktopAction::DismissOnboarding => DesktopBridgeOutput::Noop,
             DesktopAction::InvokeToastAction { intent } => DesktopBridgeOutput::Intent(intent),
@@ -1502,6 +1962,12 @@ impl DesktopCommandBridge {
             }
             DesktopAction::OpenSettings => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenSettings)
+            }
+            DesktopAction::OpenAbout => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenAbout)
+            }
+            DesktopAction::ExportSupportBundle => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ExportSupportBundle)
             }
             DesktopAction::SetThemePreference { preference } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetThemePreference {
@@ -1516,6 +1982,19 @@ impl DesktopCommandBridge {
                     font_size_pt,
                 })
             }
+            DesktopAction::ActivateLanguageCodeLens { buffer_id, lens_id } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::ActivateLanguageCodeLens {
+                    buffer_id,
+                    lens_id,
+                })
+            }
+            DesktopAction::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            }),
             DesktopAction::SetToastVerbosity { verbosity } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::SetToastVerbosity { verbosity })
             }
@@ -1746,6 +2225,12 @@ impl DesktopCommandBridge {
             DesktopAction::StageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitHunk { hunk_id })
             }
+            DesktopAction::StageGitPath { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::StageGitPath { path })
+            }
+            DesktopAction::UnstageGitPath { path } => {
+                DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitPath { path })
+            }
             DesktopAction::UnstageGitHunk { hunk_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::UnstageGitHunk { hunk_id })
             }
@@ -1768,10 +2253,17 @@ impl DesktopCommandBridge {
                 None => DesktopBridgeOutput::Error(DesktopBridgeError::InvalidPathInput),
             },
             DesktopAction::SelectExplorerFile { file_id } => {
-                if explorer_contains_file(snapshot, file_id) {
-                    DesktopBridgeOutput::Intent(CommandDispatchIntent::RevealInExplorer { file_id })
-                } else {
-                    DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile { file_id })
+                match explorer_node(snapshot, file_id) {
+                    Some(node) => {
+                        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
+                            file_id,
+                            path: node.canonical_path.0.clone(),
+                            is_directory: node.is_directory,
+                        })
+                    }
+                    None => DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile {
+                        file_id,
+                    }),
                 }
             }
             DesktopAction::PreviewProposal { proposal_id } => {
@@ -1861,6 +2353,29 @@ impl DesktopCommandBridge {
                 plugin_id,
                 command_id,
             } => self.with_known_plugin_command(snapshot, plugin_id, command_id),
+            DesktopAction::SetExtensionPermission {
+                manifest_id,
+                capability,
+                granted,
+            } => Self::with_reviewable_extension_permission(
+                snapshot,
+                manifest_id,
+                capability,
+                granted,
+            ),
+            DesktopAction::CancelCloudLaneTask {
+                task_id,
+                reason_label,
+            } => Self::with_cancellable_cloud_lane_task(snapshot, task_id, reason_label),
+            DesktopAction::InstallExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "installed")
+            }
+            DesktopAction::UpdateExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "updated")
+            }
+            DesktopAction::RemoveExtension { manifest_id } => {
+                Self::with_offered_extension_operation(snapshot, manifest_id, "removed")
+            }
             DesktopAction::JoinCollaborationSession { session_id } => {
                 self.with_collaboration_join(snapshot, session_id)
             }
@@ -2123,11 +2638,109 @@ impl DesktopCommandBridge {
                     CommandDispatchIntent::SetCursor { buffer_id, cursor }
                 })
             }
+            DesktopAction::AddCursorAbove { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorAbove { buffer_id }
+                })
+            }
+            DesktopAction::AddCursorBelow { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::AddCursorBelow { buffer_id }
+                })
+            }
+            DesktopAction::ClearExtraCursors { buffer_id } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::ClearExtraCursors { buffer_id }
+                })
+            }
             DesktopAction::SetSelection { buffer_id, range } => {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SetSelection { buffer_id, range }
                 })
             }
+            DesktopAction::SetDirectedSelection {
+                buffer_id,
+                anchor,
+                head,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::SetDirectedSelection {
+                    buffer_id,
+                    anchor,
+                    head,
+                }
+            }),
+            DesktopAction::SetVisualCursor {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                cursor,
+                affinity,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::SetVisualCursor {
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    cursor,
+                    affinity,
+                }
+            }),
+            DesktopAction::SetVisualDirectedSelection {
+                buffer_id,
+                expected_snapshot_id,
+                expected_buffer_version,
+                anchor,
+                head,
+                head_affinity,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::SetVisualDirectedSelection {
+                    buffer_id,
+                    expected_snapshot_id,
+                    expected_buffer_version,
+                    anchor,
+                    head,
+                    head_affinity,
+                }
+            }),
+            DesktopAction::MoveVertically { buffer_id, request } => {
+                self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                    CommandDispatchIntent::MoveVertically { buffer_id, request }
+                })
+            }
+            DesktopAction::ReplaceDirectedCarets { text } => self
+                .with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ReplaceDirectedCarets { buffer_id, text }
+                }),
+            DesktopAction::DeleteDirectedCarets {
+                buffer_id,
+                backward,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::DeleteDirectedCarets {
+                    buffer_id,
+                    backward,
+                }
+            }),
+            DesktopAction::MoveToBoundary {
+                buffer_id,
+                boundary,
+                extend,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::MoveToBoundary {
+                    buffer_id,
+                    boundary,
+                    extend,
+                }
+            }),
+            DesktopAction::MoveHorizontally {
+                buffer_id,
+                left,
+                extend,
+            } => self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
+                CommandDispatchIntent::MoveHorizontally {
+                    buffer_id,
+                    left,
+                    extend,
+                }
+            }),
             DesktopAction::SelectAll { buffer_id } => {
                 self.with_resolved_buffer(snapshot, buffer_id, |buffer_id| {
                     CommandDispatchIntent::SelectAll { buffer_id }
@@ -2229,6 +2842,22 @@ impl DesktopCommandBridge {
                     }
                 })
             }
+            DesktopAction::ShowIncomingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowIncomingCalls {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
+            DesktopAction::ShowOutgoingCalls { position } => {
+                self.with_active_buffer(snapshot, |buffer_id| {
+                    CommandDispatchIntent::ShowOutgoingCalls {
+                        buffer_id,
+                        position,
+                    }
+                })
+            }
             DesktopAction::RefreshInlayHints => self.with_active_buffer(snapshot, |buffer_id| {
                 CommandDispatchIntent::RefreshInlayHints { buffer_id }
             }),
@@ -2255,14 +2884,24 @@ impl DesktopCommandBridge {
                 .with_active_buffer(snapshot, |buffer_id| {
                     CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id }
                 }),
-            DesktopAction::RequestCodeActionProposal { action_id } => {
+            DesktopAction::RequestCodeActionProposal { .. } | DesktopAction::RequestCodeActions => {
+                let Some(viewport) = snapshot.active_buffer_projection.viewport.as_ref() else {
+                    return DesktopBridgeOutput::Noop;
+                };
+                let Some(range) = code_action_range(viewport) else {
+                    return DesktopBridgeOutput::Noop;
+                };
                 self.with_active_buffer(snapshot, |buffer_id| {
-                    CommandDispatchIntent::RequestCodeActionProposal {
-                        buffer_id,
-                        action_id,
-                    }
+                    CommandDispatchIntent::RequestCodeActions { buffer_id, range }
                 })
             }
+            DesktopAction::SelectCodeAction {
+                response_id,
+                action_id,
+            } => DesktopBridgeOutput::Intent(CommandDispatchIntent::SelectCodeAction {
+                response_id,
+                action_id,
+            }),
             DesktopAction::CancelLanguageOperation { operation_id } => {
                 DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelLanguageOperation {
                     operation_id,
@@ -2279,6 +2918,25 @@ impl DesktopCommandBridge {
                         utf16_offset: None,
                     },
                 })
+            }
+            DesktopAction::NavigateToReference {
+                path,
+                line,
+                character,
+            } => {
+                if path.trim().is_empty() {
+                    DesktopBridgeOutput::Noop
+                } else {
+                    DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPathAtPosition {
+                        path,
+                        position: legion_protocol::TextCoordinate {
+                            line,
+                            character,
+                            byte_offset: None,
+                            utf16_offset: None,
+                        },
+                    })
+                }
             }
             // T4: problems panel keyboard-nav intercepted in DesktopRuntime::handle_action.
             DesktopAction::ProblemNext
@@ -2590,6 +3248,129 @@ impl DesktopCommandBridge {
         } else {
             DesktopBridgeOutput::Error(DesktopBridgeError::UnknownAiRun { run_id })
         }
+    }
+
+    /// Translate a single-capability permission gesture, validated against the
+    /// catalog projection so a decision cannot be invented for a capability the
+    /// extension never asked for.
+    fn with_reviewable_extension_permission(
+        snapshot: &ShellProjectionSnapshot,
+        manifest_id: String,
+        capability: CapabilityId,
+        granted: bool,
+    ) -> DesktopBridgeOutput {
+        let Some(entry) = snapshot
+            .extension_catalog
+            .iter()
+            .find(|entry| entry.manifest_id == manifest_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtension {
+                manifest_id,
+            });
+        };
+        if !entry
+            .permissions
+            .iter()
+            .any(|permission| permission.capability == capability)
+        {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtensionCapability {
+                manifest_id,
+                capability: capability.0,
+            });
+        }
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::SetExtensionPermission {
+            manifest_id,
+            capability,
+            granted,
+        })
+    }
+
+    /// Translate an install / update / remove gesture only when the projection
+    /// itself says the operation is currently offered.
+    ///
+    /// The projection's `can_install` already requires a verified signature and
+    /// every permission row individually granted, so an unsigned or tampered
+    /// artifact is refused here as well as in app authority.
+    /// Refuse a cancel unless the projection shows a task that can still be cancelled.
+    ///
+    /// The guard lives here rather than in the painter because the bridge is
+    /// what the tests drive, and because a cancel synthesised by any other
+    /// caller -- a keybinding, a command palette entry -- has to meet the same
+    /// bar as the button.
+    fn with_cancellable_cloud_lane_task(
+        snapshot: &ShellProjectionSnapshot,
+        task_id: String,
+        reason_label: String,
+    ) -> DesktopBridgeOutput {
+        let Some(row) = snapshot
+            .legion_cloud_lane
+            .rows
+            .iter()
+            .find(|row| row.task_id.0 == task_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownCloudLaneTask {
+                task_id,
+            });
+        };
+        if matches!(
+            row.state,
+            legion_protocol::LegionCloudLaneTaskState::Completed
+                | legion_protocol::LegionCloudLaneTaskState::Failed
+                | legion_protocol::LegionCloudLaneTaskState::Cancelled
+        ) {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::CloudLaneTaskNotCancellable {
+                task_id,
+                state: format!("{:?}", row.state),
+            });
+        }
+        DesktopBridgeOutput::Intent(CommandDispatchIntent::CancelCloudLaneTask {
+            task_id,
+            reason_label,
+        })
+    }
+
+    fn with_offered_extension_operation(
+        snapshot: &ShellProjectionSnapshot,
+        manifest_id: String,
+        operation: &'static str,
+    ) -> DesktopBridgeOutput {
+        let Some(entry) = snapshot
+            .extension_catalog
+            .iter()
+            .find(|entry| entry.manifest_id == manifest_id)
+        else {
+            return DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExtension {
+                manifest_id,
+            });
+        };
+
+        let offered = match operation {
+            "installed" => entry.can_install(),
+            "updated" => entry.can_update(),
+            "removed" => entry.can_remove(),
+            _ => false,
+        };
+        if !offered {
+            let reason = entry.blocked_reason.clone().unwrap_or_else(|| {
+                format!(
+                    "signature={} install_state={} undecided_permissions={}",
+                    entry.signature_state.label(),
+                    entry.install_state.label(),
+                    entry.undecided_permissions().len()
+                )
+            });
+            return DesktopBridgeOutput::Error(DesktopBridgeError::ExtensionOperationUnavailable {
+                manifest_id,
+                operation,
+                reason,
+            });
+        }
+
+        DesktopBridgeOutput::Intent(match operation {
+            "installed" => CommandDispatchIntent::InstallExtension { manifest_id },
+            "updated" => CommandDispatchIntent::UpdateExtension { manifest_id },
+            _ => CommandDispatchIntent::RemoveExtension { manifest_id },
+        })
     }
 
     fn with_known_plugin_command(
@@ -3025,12 +3806,20 @@ fn tab_is_known(snapshot: &ShellProjectionSnapshot, buffer_id: BufferId) -> bool
     tabs.iter().any(|tab| tab.buffer_id == buffer_id)
 }
 
-fn explorer_contains_file(snapshot: &ShellProjectionSnapshot, file_id: FileId) -> bool {
+/// The projected explorer row for `file_id`, if the tree still holds one.
+///
+/// Rows are addressed by `FileId` rather than by path because the renderer
+/// only ever has what the projection gave it, and a stale id must fail loudly
+/// rather than resolve to whatever now sits at the same path.
+fn explorer_node(
+    snapshot: &ShellProjectionSnapshot,
+    file_id: FileId,
+) -> Option<&legion_ui::ExplorerNodeProjection> {
     snapshot
         .explorer_projection
         .nodes
         .iter()
-        .any(|node| node.file_id == file_id)
+        .find(|node| node.file_id == file_id)
 }
 
 fn proposal_is_known(snapshot: &ShellProjectionSnapshot, proposal_id: ProposalId) -> bool {
@@ -3295,4 +4084,253 @@ fn active_assist_prediction_id(snapshot: &ShellProjectionSnapshot) -> Option<Str
         .active_prediction
         .as_ref()
         .map(|prediction| prediction.prediction_id.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use legion_ui::Shell;
+
+    #[test]
+    fn typescript_toolchain_actions_translate_to_ui_intents() {
+        let snapshot = Shell::empty("desktop bridge").projection_snapshot();
+        let bridge = DesktopCommandBridge::new();
+        assert_eq!(
+            bridge.translate(
+                DesktopAction::ConfigureTypeScriptToolchain {
+                    server_archive: "server.tgz".to_string(),
+                    compiler_archive: "compiler.tgz".to_string(),
+                    node_executable: "node".to_string(),
+                },
+                &snapshot,
+            ),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::ConfigureTypeScriptToolchain {
+                server_archive: "server.tgz".to_string(),
+                compiler_archive: "compiler.tgz".to_string(),
+                node_executable: "node".to_string(),
+            })
+        );
+        assert_eq!(
+            bridge.translate(DesktopAction::ClearTypeScriptToolchain, &snapshot),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::ClearTypeScriptToolchain)
+        );
+        assert_eq!(
+            bridge.translate(DesktopAction::StartLspSession, &snapshot),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::LspStartSession)
+        );
+        assert_eq!(
+            bridge.translate(DesktopAction::RestartLspSession, &snapshot),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::LspRestartSession)
+        );
+    }
+
+    #[test]
+    fn reference_activation_translates_to_open_path_position() {
+        let snapshot = Shell::empty("desktop bridge").projection_snapshot();
+        let bridge = DesktopCommandBridge::new();
+        assert_eq!(
+            bridge.translate(
+                DesktopAction::NavigateToReference {
+                    path: "src/lib.rs".to_owned(),
+                    line: 6,
+                    character: 3,
+                },
+                &snapshot,
+            ),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::OpenPathAtPosition {
+                path: "src/lib.rs".to_owned(),
+                position: legion_protocol::TextCoordinate {
+                    line: 6,
+                    character: 3,
+                    byte_offset: None,
+                    utf16_offset: None,
+                },
+            })
+        );
+        assert_eq!(
+            bridge.translate(
+                DesktopAction::NavigateToReference {
+                    path: String::new(),
+                    line: 0,
+                    character: 0,
+                },
+                &snapshot,
+            ),
+            DesktopBridgeOutput::Noop
+        );
+    }
+
+    #[test]
+    fn code_action_selection_preserves_response_and_action_tokens() {
+        let snapshot = Shell::empty("desktop bridge").projection_snapshot();
+        let bridge = DesktopCommandBridge::new();
+        assert_eq!(
+            bridge.translate(
+                DesktopAction::SelectCodeAction {
+                    response_id: "response-7".to_owned(),
+                    action_id: "candidate-2".to_owned(),
+                },
+                &snapshot,
+            ),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::SelectCodeAction {
+                response_id: "response-7".to_owned(),
+                action_id: "candidate-2".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn code_action_request_converts_each_multiline_astral_endpoint_from_its_own_origin() {
+        let mut viewport = legion_protocol::ViewportProjection {
+            workspace_id: legion_protocol::WorkspaceId(1),
+            buffer_id: BufferId(1),
+            file_id: None,
+            snapshot_id: SnapshotId(1),
+            buffer_version: BufferVersion(1),
+            visible_range: ProtocolTextRange {
+                start: TextCoordinate {
+                    line: 0,
+                    character: 0,
+                    byte_offset: None,
+                    utf16_offset: Some(0),
+                },
+                end: TextCoordinate {
+                    line: 1,
+                    character: 0,
+                    byte_offset: None,
+                    utf16_offset: Some(6),
+                },
+            },
+            selections: vec![ProtocolTextRange {
+                start: TextCoordinate {
+                    line: 0,
+                    character: 99,
+                    byte_offset: None,
+                    utf16_offset: Some(1),
+                },
+                end: TextCoordinate {
+                    line: 1,
+                    character: 99,
+                    byte_offset: None,
+                    utf16_offset: Some(6),
+                },
+            }],
+            cursor: TextCoordinate {
+                line: 0,
+                character: 0,
+                byte_offset: None,
+                utf16_offset: Some(0),
+            },
+            cursors: Vec::new(),
+            cursor_affinities: Vec::new(),
+            scroll: ViewportScroll {
+                top_line: 0,
+                left_column: 0,
+            },
+            dimensions: legion_protocol::ViewportDimensions {
+                width_px: 800,
+                height_px: 600,
+            },
+            line_wrapping_policy: LineWrappingPolicy::Off,
+            wrap_column: None,
+            mode: legion_protocol::ViewportProjectionMode::default(),
+            line_slices: vec![
+                legion_protocol::ViewportLineSlice {
+                    line_number: 0,
+                    visible_text: "a😀".to_owned(),
+                    byte_range: legion_protocol::ByteRange::new(0, 5),
+                    utf16_range: legion_protocol::Utf16Range {
+                        start: legion_protocol::Utf16Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: legion_protocol::Utf16Position {
+                            line: 0,
+                            character: 3,
+                        },
+                    },
+                    chunk_hash: legion_protocol::FileFingerprint {
+                        algorithm: "test".to_owned(),
+                        value: "0".to_owned(),
+                    },
+                    truncation_state: legion_protocol::ViewportLineTruncationState::None,
+                },
+                legion_protocol::ViewportLineSlice {
+                    line_number: 1,
+                    visible_text: "xy".to_owned(),
+                    byte_range: legion_protocol::ByteRange::new(6, 8),
+                    utf16_range: legion_protocol::Utf16Range {
+                        start: legion_protocol::Utf16Position {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: legion_protocol::Utf16Position {
+                            line: 1,
+                            character: 2,
+                        },
+                    },
+                    chunk_hash: legion_protocol::FileFingerprint {
+                        algorithm: "test".to_owned(),
+                        value: "1".to_owned(),
+                    },
+                    truncation_state: legion_protocol::ViewportLineTruncationState::None,
+                },
+            ],
+            line_metrics: vec![
+                legion_protocol::ViewportLineMetric {
+                    byte_length: 5,
+                    utf16_length: 3,
+                    line_start_byte_offset: Some(0),
+                    line_start_utf16_offset: Some(0),
+                    line_ending_width: 1,
+                    exact: true,
+                },
+                legion_protocol::ViewportLineMetric {
+                    byte_length: 2,
+                    utf16_length: 2,
+                    line_start_byte_offset: Some(6),
+                    line_start_utf16_offset: Some(4),
+                    line_ending_width: 0,
+                    exact: true,
+                },
+            ],
+            decoration_spans: Vec::new(),
+            fold_ranges: Vec::new(),
+            semantic_token_overlays: Vec::new(),
+            large_file_status: None,
+            schema_version: 1,
+        };
+        let range = code_action_range(&viewport).expect("both endpoint origins are present");
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 1);
+        assert_eq!(range.end.line, 1);
+        assert_eq!(range.end.character, 2);
+
+        let mut snapshot = Shell::empty("desktop bridge").projection_snapshot();
+        snapshot.active_buffer_projection.buffer_id = Some(BufferId(1));
+        snapshot.active_buffer_projection.viewport = Some(viewport.clone());
+        assert_eq!(
+            DesktopCommandBridge::new().translate(DesktopAction::RequestCodeActions, &snapshot),
+            DesktopBridgeOutput::Intent(CommandDispatchIntent::RequestCodeActions {
+                buffer_id: BufferId(1),
+                range: ProtocolTextRange {
+                    start: TextCoordinate {
+                        line: 0,
+                        character: 1,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
+                    end: TextCoordinate {
+                        line: 1,
+                        character: 2,
+                        byte_offset: None,
+                        utf16_offset: None,
+                    },
+                },
+            })
+        );
+
+        viewport.line_metrics[1].line_start_utf16_offset = None;
+        assert!(code_action_range(&viewport).is_none());
+    }
 }

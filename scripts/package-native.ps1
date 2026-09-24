@@ -79,6 +79,7 @@ function Render-PackagerConfig {
     $config = $config.Replace("__BINARIES_DIR__", (ConvertTo-TomlString $BinariesDir))
     $config = $config.Replace("__OUT_DIR__", (ConvertTo-TomlString $StagingDir))
     $config = $config.Replace("__PACKAGING_DIR__", (ConvertTo-TomlString $PackagingDir))
+    $config = $config.Replace("__REPO_ROOT__", (ConvertTo-TomlString $RepoRoot))
     [System.IO.File]::WriteAllText($ConfigPath, $config, $Utf8NoBom)
 }
 
@@ -102,6 +103,10 @@ try {
     try {
         cargo build --release -p legion-desktop
         Assert-X64Executable (Join-Path $BinariesDir "legion-desktop.exe")
+        New-Item -ItemType Directory -Force -Path $BinariesDir | Out-Null
+        Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $BinariesDir "LICENSE") -Force
+        Copy-Item -LiteralPath (Join-Path $RepoRoot "docs\PRIVACY.md") -Destination (Join-Path $BinariesDir "PRIVACY.md") -Force
+        Copy-Item -LiteralPath (Join-Path $RepoRoot "THIRD_PARTY_NOTICES.md") -Destination (Join-Path $BinariesDir "THIRD_PARTY_NOTICES.md") -Force
         cargo packager --release --config $ConfigPath
     } finally {
         Pop-Location

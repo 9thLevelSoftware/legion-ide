@@ -6,8 +6,7 @@
 //! which is the default for tests that do not call
 //! `AppComposition::enable_checkpoint_persistence`.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use legion_protocol::{
@@ -332,46 +331,8 @@ impl CheckpointStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Atomic write helper (mirrors the pattern used in FileBackedStorage)
-// ---------------------------------------------------------------------------
-
 fn write_atomically(dest: &Path, body: &[u8]) -> Result<(), StorageError> {
-    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(|err| StorageError::Failed {
-        message: format!("create checkpoint directory failed: {err}"),
-    })?;
-
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let temp = parent.join(format!(".ckpt-tmp-{}-{}.tmp", std::process::id(), suffix));
-
-    let write_result = (|| -> Result<(), StorageError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(|err| StorageError::Failed {
-                message: format!("create checkpoint temp file failed: {err}"),
-            })?;
-        file.write_all(body).map_err(|err| StorageError::Failed {
-            message: format!("write checkpoint temp file failed: {err}"),
-        })?;
-        file.flush().map_err(|err| StorageError::Failed {
-            message: format!("flush checkpoint temp file failed: {err}"),
-        })?;
-        drop(file);
-        fs::rename(&temp, dest).map_err(|err| StorageError::Failed {
-            message: format!("rename checkpoint temp file failed: {err}"),
-        })
-    })();
-
-    if write_result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    write_result
+    crate::fs_atomic::write_atomically_with_symlink_guard(dest, "ckpt-tmp", body, "checkpoint")
 }
 
 // ---------------------------------------------------------------------------

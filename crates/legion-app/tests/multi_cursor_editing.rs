@@ -26,7 +26,6 @@ fn app_with_text(text: &str) -> (AppComposition, BufferId) {
     std::mem::forget(dir);
     (app, buffer_id)
 }
-
 fn cursor_lines(app: &AppComposition, buffer_id: BufferId) -> Vec<(usize, usize)> {
     app.editor()
         .cursors(buffer_id)
@@ -151,5 +150,34 @@ fn a_multi_cursor_edit_is_one_undoable_change() {
         text_of(&app, buffer_id),
         "one\ntwo\n",
         "one keystroke should take one undo to reverse, not one per cursor"
+    );
+}
+
+#[test]
+fn backspace_reaches_every_cursor() {
+    // Typing already reached every cursor; deleting did not, so a multi-cursor
+    // edit could be made and not unmade. Native deletion is directional and
+    // resolves every directed caret in editor authority.
+    let (mut app, buffer_id) = app_with_text("one\ntwo\nsix\n");
+    add_below(&mut app, buffer_id);
+    add_below(&mut app, buffer_id);
+    insert(&mut app, buffer_id, "X");
+    assert_eq!(text_of(&app, buffer_id), "Xone\nXtwo\nXsix\n");
+
+    app.dispatch_ui_intent(CommandDispatchIntent::DeleteDirectedCarets {
+        buffer_id,
+        backward: true,
+    })
+    .expect("delete dispatches");
+
+    assert_eq!(
+        text_of(&app, buffer_id),
+        "one\ntwo\nsix\n",
+        "backspace must undo the multi-cursor insert at every cursor, not just the caret"
+    );
+    assert_eq!(
+        cursor_lines(&app, buffer_id),
+        vec![(0, 0), (1, 0), (2, 0)],
+        "every cursor should step back with its own deletion"
     );
 }

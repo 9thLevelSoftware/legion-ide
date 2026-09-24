@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.43s
+     Running tests\python_app_startup.rs (target\debug\deps\python_app_startup-08100240498e019d.exe)
+
+running 4 tests
+test native_python_rename_external_overwrite_rejects_without_partial_mutation ... ok
+test native_python_diagnostic_clears_after_editor_replace_and_save ... ok
+test native_python_rename_is_reviewable_cancelable_and_saves_cross_file_edit ... ok
+test explicit_python_startup_is_lazy_live_and_restart_preserves_dirty_text ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.48s
+
+     Running tests\typescript_app_startup.rs (target\debug\deps\typescript_app_startup-d9da698c6a613b6d.exe)
+
+running 6 tests
+test native_typescript_formatting_is_reviewable_before_disk_mutation ... ok
+test native_typescript_rename_is_reviewable_and_applies_only_after_approval ... ok
+test native_typescript_organize_imports_is_reviewable_and_removes_only_unused_imports ... ok
+test native_typescript_rename_conflict_does_not_partially_apply ... ok
+test native_typescript_missing_import_code_action_is_reviewable_and_applies_after_approval ... ok
+test explicit_typescript_startup_is_lazy_live_and_restart_preserves_dirty_text ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.83s
+

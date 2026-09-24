@@ -39,6 +39,20 @@ const HEADER_SEPARATOR: &str = "\r\n\r\n";
 /// buggy peer cannot drive an unbounded allocation via `Content-Length`.
 const MAX_FRAME_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
+/// Whether a `callHierarchy/*` request carried back the `data` this mock put on
+/// the prepared item.
+///
+/// The value is arbitrary; what matters is that it survives the round trip.
+fn prepared_data_round_tripped(envelope: &Value) -> bool {
+    envelope
+        .get("params")
+        .and_then(|params| params.get("item"))
+        .and_then(|item| item.get("data"))
+        .and_then(|data| data.get("mockResolution"))
+        .and_then(Value::as_u64)
+        == Some(42)
+}
+
 fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -82,6 +96,15 @@ fn main() {
         let _ = output.flush();
     }
 
+    // Deterministic handshake-failure fixture: emit only a diagnostic on
+    // stderr and close stdout before answering initialize.  This exercises
+    // the app startup path's early stderr drain without relying on a broken
+    // framing implementation or process-global test state.
+    if std::env::var("MOCK_LSP_FAIL_INITIALIZE").as_deref() == Ok("1") {
+        eprintln!("mock_lsp_server: initialize fixture failure");
+        return;
+    }
+
     loop {
         let frame = match read_frame(&mut input) {
             Ok(frame) => frame,
@@ -106,7 +129,17 @@ fn main() {
         let method = envelope.get("method").and_then(Value::as_str).unwrap_or("");
 
         let response = match method {
-            "initialize" => Some(json!({
+            "initialize" => {
+                // One capability can be withheld on request. A mock that
+                // advertises everything cannot show that an *unadvertised*
+                // capability is recorded as unsupported — "records the key" and
+                // "records the right answer" are different properties, and an
+                // implementation marking everything supported would pass a test
+                // that only ever sees advertised capabilities. Withholding is
+                // opt-in so the round-trip tests still get a server that can
+                // answer every read.
+                let withheld = std::env::var("LEGION_MOCK_WITHHOLD_CAPABILITY").ok();
+                let mut response = json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
@@ -114,6 +147,27 @@ fn main() {
                         "textDocumentSync": {"openClose": true, "change": 1},
                         "hoverProvider": true,
                         "definitionProvider": true,
+                        "renameProvider": true,
+                        "documentFormattingProvider": true,
+                        "codeActionProvider": {"codeActionKinds": ["quickfix", "source.organizeImports"]},
+                        // Every capability the read-side gates on. A mock that
+                        // advertises only what the parser already handles can
+                        // never reveal a parser that handles too little, which
+                        // is exactly how `referencesProvider` went unrecorded
+                        // while a fixture-injected health record kept the tests
+                        // green.
+                        // An object rather than a bool, which is what
+                        // rust-analyzer sends and what `as_bool()` used to read
+                        // as "unsupported". Kept object-valued here so the
+                        // `boolean | XOptions` path stays covered.
+                        "completionProvider": {
+                            "triggerCharacters": [".", ":"],
+                        },
+                        "referencesProvider": true,
+                        "documentSymbolProvider": true,
+                        "inlayHintProvider": true,
+                        "codeLensProvider": true,
+                        "callHierarchyProvider": true,
                         // LSP 3.17 pull diagnostics — lets clients exercise
                         // the textDocument/diagnostic request path against
                         // the mock (rust-analyzer 1.96+ serves native
@@ -128,7 +182,17 @@ fn main() {
                         "version": "0.1.0",
                     },
                 },
-            })),
+                });
+                if let Some(name) = withheld
+                    && let Some(capabilities) = response
+                        .get_mut("result")
+                        .and_then(|result| result.get_mut("capabilities"))
+                        .and_then(|capabilities| capabilities.as_object_mut())
+                {
+                    capabilities.remove(name.as_str());
+                }
+                Some(response)
+            }
             // LSP 3.17 pull diagnostics: always answer with a full report
             // containing exactly one severity-1 item, so clients can assert
             // report parsing and publish-params synthesis deterministically.
@@ -265,6 +329,181 @@ fn main() {
                     }
                 ]
             })),
+            // The reads below existed in the product for months and could
+            // never be sent: they gated on capabilities `initialize` did not
+            // record. The mock had no answers for them either, so no test could
+            // have noticed. Answers now exist so the round trip can be proven
+            // rather than assumed.
+            "textDocument/documentSymbol" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "name": "main",
+                        "kind": 12,
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 2, "character": 1}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 0, "character": 3},
+                            "end": {"line": 0, "character": 7}
+                        },
+                        "children": [
+                            {
+                                "name": "inner_helper",
+                                "kind": 12,
+                                "range": {
+                                    "start": {"line": 1, "character": 4},
+                                    "end": {"line": 1, "character": 30}
+                                },
+                                "selectionRange": {
+                                    "start": {"line": 1, "character": 7},
+                                    "end": {"line": 1, "character": 19}
+                                }
+                            }
+                        ]
+                    }
+                ]
+            })),
+            "textDocument/inlayHint" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "position": {"line": 1, "character": 12},
+                        "label": ": MockInferredType",
+                        "kind": 1
+                    }
+                ]
+            })),
+            "textDocument/codeLens" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 7}
+                        },
+                        "command": {
+                            "title": "Run mock_lens_target",
+                            "command": "rust-analyzer.runSingle",
+                            "arguments": [
+                                {
+                                    "kind": "cargo",
+                                    "label": "test mock_lens_target",
+                                    "args": {
+                                        "cargoArgs": ["test", "mock_lens_target"],
+                                        "executableArgs": []
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            })),
+            "textDocument/prepareCallHierarchy" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "name": "mock_prepared_symbol",
+                        "kind": 12,
+                        "uri": "file:///workspace/src/main.rs",
+                        "range": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 2, "character": 1}
+                        },
+                        "selectionRange": {
+                            "start": {"line": 0, "character": 3},
+                            "end": {"line": 0, "character": 7}
+                        },
+                        "data": {"mockResolution": 42}
+                    }
+                ]
+            })),
+            // Both call directions verify the opaque `data` they were handed.
+            //
+            // Without this the mock answers the same way whatever it is sent, so
+            // dropping `data` from the follow-up request changes no observable
+            // outcome and no end-to-end test can see it. `data` is
+            // server-owned resolution state — rust-analyzer round-trips its own
+            // through it — and losing it makes the second request ambiguous for
+            // any server that relies on it, which would present as "the server
+            // returned nothing".
+            "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls"
+                if !prepared_data_round_tripped(&envelope) =>
+            {
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": "item.data was not round-tripped from prepareCallHierarchy"
+                    }
+                }))
+            }
+            "callHierarchy/incomingCalls" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "from": {
+                            "name": "mock_caller",
+                            "kind": 12,
+                            "uri": "file:///workspace/src/caller.rs",
+                            "range": {
+                                "start": {"line": 4, "character": 0},
+                                "end": {"line": 8, "character": 1}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 4, "character": 3},
+                                "end": {"line": 4, "character": 14}
+                            },
+                            "detail": "caller_module"
+                        },
+                        "fromRanges": [
+                            {
+                                "start": {"line": 5, "character": 8},
+                                "end": {"line": 5, "character": 20}
+                            },
+                            {
+                                "start": {"line": 6, "character": 8},
+                                "end": {"line": 6, "character": 20}
+                            }
+                        ]
+                    }
+                ]
+            })),
+            "callHierarchy/outgoingCalls" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": [
+                    {
+                        "to": {
+                            "name": "mock_callee",
+                            "kind": 12,
+                            "uri": "file:///workspace/src/callee.rs",
+                            "range": {
+                                "start": {"line": 10, "character": 0},
+                                "end": {"line": 12, "character": 1}
+                            },
+                            "selectionRange": {
+                                "start": {"line": 10, "character": 3},
+                                "end": {"line": 10, "character": 14}
+                            },
+                            "detail": "callee_module"
+                        },
+                        "fromRanges": [
+                            {
+                                "start": {"line": 1, "character": 4},
+                                "end": {"line": 1, "character": 15}
+                            }
+                        ]
+                    }
+                ]
+            })),
             "textDocument/rename" => {
                 // Return a WorkspaceEdit in legacy `changes` format, echoing
                 // the requesting file's URI and the requested `newName` back so
@@ -363,6 +602,63 @@ fn main() {
                 let _ = output.flush();
                 id.map(|id| json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}))
             }
+            "mock.applyEditThenRespond" => {
+                // Opt-in server→client workspace/applyEdit fixture. The
+                // transport test controls the expected answer and payload
+                // shape through process-local environment variables.
+                let params = match std::env::var("MOCK_APPLY_EDIT_PARAMS").as_deref() {
+                    Ok("oversized") => json!({
+                        "edit": {"changes": {"file:///workspace/src/main.rs": [
+                            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                             "newText": "x".repeat(300 * 1024)}
+                        ]}}
+                    }),
+                    Ok("missing-edit") => json!({"label": "missing edit"}),
+                    Ok("malformed-edit") => json!({"edit": "not-a-workspace-edit"}),
+                    _ => json!({"edit": {"changes": {}}}),
+                };
+                let apply_edit =
+                    if std::env::var("MOCK_APPLY_EDIT_PARAMS").as_deref() == Ok("missing-params") {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": 9100,
+                            "method": "workspace/applyEdit",
+                        })
+                    } else {
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": 9100,
+                            "method": "workspace/applyEdit",
+                            "params": params,
+                        })
+                    };
+                if write_frame(&mut output, &apply_edit).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                let expected_applied =
+                    std::env::var("MOCK_APPLY_EDIT_EXPECT_APPLIED").as_deref() == Ok("1");
+                wait_for_client_answer(
+                    &mut input,
+                    9100,
+                    ExpectedAnswer::ApplyEdit {
+                        applied: expected_applied,
+                    },
+                );
+                let diagnostics = json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": "file:///workspace/src/apply-edit.rs",
+                        "diagnostics": [],
+                    },
+                });
+                if write_frame(&mut output, &diagnostics).is_err() {
+                    return;
+                }
+                let _ = output.flush();
+                id.map(|id| json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}))
+            }
             other => {
                 // Surface a JSON-RPC error for unknown *requests* so the
                 // consumer can map it through the standard error path. Unknown
@@ -393,6 +689,11 @@ enum ExpectedAnswer {
     NullResult,
     /// A JSON-RPC error response with code -32601.
     MethodNotFound,
+    /// A workspace/applyEdit result with the expected applied flag.
+    ApplyEdit {
+        /// Expected `result.applied` value.
+        applied: bool,
+    },
 }
 
 /// Blocks reading frames until the client answers the server→client request
@@ -439,6 +740,20 @@ fn wait_for_client_answer<R: Read + BufRead>(
                 if code != Some(-32601) {
                     eprintln!(
                         "mock_lsp_server: expected -32601 error answer to {expected_id}, got: {envelope}"
+                    );
+                    std::process::exit(3);
+                }
+            }
+            ExpectedAnswer::ApplyEdit { applied } => {
+                let result = envelope.get("result").and_then(Value::as_object);
+                if envelope.get("error").is_some()
+                    || result
+                        .and_then(|result| result.get("applied"))
+                        .and_then(Value::as_bool)
+                        != Some(applied)
+                {
+                    eprintln!(
+                        "mock_lsp_server: expected workspace/applyEdit applied={applied} answer to {expected_id}, got: {envelope}"
                     );
                     std::process::exit(3);
                 }

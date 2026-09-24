@@ -10,7 +10,8 @@ fn rust_analyzer_launch_is_resolved_through_the_product_registry() {
     let registry = LanguageServerAdapterRegistry::tier_two();
     let workspace_id = WorkspaceId(1);
     let rust_configs = registry
-        .process_configs_for_workspace_language(workspace_id, &LanguageId("rust".to_string()));
+        .process_configs_for_workspace_language(workspace_id, &LanguageId("rust".to_string()))
+        .expect("system adapter should resolve");
 
     assert_eq!(
         rust_configs.len(),

@@ -1,4 +1,4 @@
-//! `RustAnalyzerSession` — launch + handshake orchestrator (WS-LANG-01 LANG.03/04).
+//! Language-server launch + handshake orchestration (WS-LANG-01 LANG.03/04).
 //!
 //! Owns a live [`LspStdioSession`] and the [`LspServerHealthRecord`] that tracks
 //! binary provenance, handshake status, and runtime health.
@@ -6,10 +6,12 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use legion_lsp::{DiscoveredBinary, LspStdioSession, LspStdioSpawner, LspSupervisorConfig};
+use legion_lsp::{
+    DiscoveredBinary, LspNodeVersion, LspStdioSession, LspStdioSpawner, LspSupervisorConfig,
+};
 use legion_protocol::{
-    LanguageId, LanguageServerId, LspCapabilitySummary, LspResultStatus, LspServerBinaryProvenance,
-    LspServerHealthRecord, SnapshotId,
+    CapabilityDecisionId, FileFingerprint, LanguageId, LanguageServerId, LspCapabilitySummary,
+    LspResultStatus, LspServerBinaryProvenance, LspServerHealthRecord, SnapshotId,
 };
 
 use super::RustAnalyzerDiscovery;
@@ -47,11 +49,14 @@ pub struct LspReadOutcome {
     pub status: LspResultStatus,
 }
 
-/// Errors raised while launching or initializing the rust-analyzer session.
+/// Errors raised while launching or initializing a language-server session.
 #[derive(Debug)]
 pub enum LanguageSessionError {
     /// No binary could be discovered through any resolution source.
     Discovery,
+    /// Supplied launch metadata does not match the supervisor policy identity
+    /// or is incomplete. This is checked before the launcher is touched.
+    InvalidConfiguration(String),
     /// The process failed to launch or spawn.
     Launch(legion_lsp::LspRuntimeError),
     /// The `initialize` handshake failed.
@@ -66,18 +71,21 @@ pub enum LanguageSessionError {
 impl std::fmt::Display for LanguageSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LanguageSessionError::Discovery => write!(f, "rust-analyzer binary not found"),
-            LanguageSessionError::Launch(e) => write!(f, "rust-analyzer launch failed: {e}"),
+            LanguageSessionError::Discovery => write!(f, "language-server binary not found"),
+            LanguageSessionError::InvalidConfiguration(e) => {
+                write!(f, "language-server launch configuration is invalid: {e}")
+            }
+            LanguageSessionError::Launch(e) => write!(f, "language-server launch failed: {e}"),
             LanguageSessionError::Handshake(e) => {
-                write!(f, "rust-analyzer handshake failed: {e}")
+                write!(f, "language-server handshake failed: {e}")
             }
             LanguageSessionError::ReadRequest(e) => {
-                write!(f, "rust-analyzer read request failed: {e}")
+                write!(f, "language-server read request failed: {e}")
             }
             LanguageSessionError::Unavailable => {
                 write!(
                     f,
-                    "rust-analyzer session is not initialized or is in backoff"
+                    "language-server session is not initialized or is in backoff"
                 )
             }
         }
@@ -86,7 +94,30 @@ impl std::fmt::Display for LanguageSessionError {
 
 impl std::error::Error for LanguageSessionError {}
 
-/// Inputs for launching the rust-analyzer session.
+/// Validated metadata and supervisor inputs for launching any language server.
+pub struct LanguageServerLaunchConfig {
+    /// Supervisor / process config. Its policy identity is authoritative.
+    pub supervisor: LspSupervisorConfig,
+    /// Server identity, which must match the supervisor policy identity.
+    pub server_id: LanguageServerId,
+    /// Language identity, which must match the supervisor policy identity.
+    pub language_id: LanguageId,
+    /// Provenance of the approved binary.
+    pub binary_provenance: LspServerBinaryProvenance,
+    /// Optional hash of the approved artifact.
+    pub artifact_hash: Option<FileFingerprint>,
+    /// Additional verified artifact identities required by the launch, such
+    /// as the compiler paired with an offline TypeScript server bundle.
+    pub artifact_dependencies: Vec<FileFingerprint>,
+    /// Optional version of the approved language server package.
+    pub version: Option<String>,
+    /// Observed Node runtime version used to launch a downloaded server.
+    pub node_runtime_version: Option<LspNodeVersion>,
+    /// Optional decision authorizing a downloaded artifact.
+    pub download_decision_id: Option<CapabilityDecisionId>,
+}
+
+/// Inputs for launching the rust-analyzer compatibility adapter.
 pub struct RustAnalyzerLaunchConfig {
     /// Discovery inputs (resolution order: configured → project-local → PATH → bundled).
     pub discovery: RustAnalyzerDiscovery,
@@ -98,19 +129,236 @@ pub struct RustAnalyzerLaunchConfig {
     pub language_id: LanguageId,
 }
 
-/// Owns a live rust-analyzer stdio session and its health record.
-pub struct RustAnalyzerSession {
+/// Owns a live language-neutral stdio session and its health record.
+pub struct LanguageServerSession {
     session: LspStdioSession,
     health: LspServerHealthRecord,
+    /// Bounded exact command identifiers advertised by executeCommandProvider.
+    execute_command_ids: Vec<String>,
     /// Shared ring buffer populated by the background stderr drain thread
     /// spawned in `startup_session()`.  Callers clone the `Arc` to extract
     /// the ring for projection (PKT-LSP-C T4).
     pub(crate) stderr_ring: Arc<Mutex<VecDeque<String>>>,
 }
 
-impl RustAnalyzerSession {
-    /// Resolves discovery for provenance, launches the stdio process, and seeds
-    /// the health record with `init_status = Unavailable` until `initialize` is called.
+/// Compatibility name retained for existing Rust-analyzer callers.
+pub type RustAnalyzerSession = LanguageServerSession;
+
+/// Capability keys the read side gates requests on.
+///
+/// One list, because this was two: the parser recorded three keys while
+/// `issue_lsp_read` checked nine, so five requests could never be sent. Adding
+/// a gated request means adding its key here, and
+/// `tests/lsp_capability_gating.rs` fails when the two drift.
+const GATED_READ_CAPABILITIES: &[&str] = &[
+    "hoverProvider",
+    "definitionProvider",
+    "completionProvider",
+    "referencesProvider",
+    "documentSymbolProvider",
+    "inlayHintProvider",
+    "codeLensProvider",
+    "callHierarchyProvider",
+];
+
+/// Edit-producing provider capabilities admitted only when initialize
+/// explicitly advertises them. Object-valued options count as supported;
+/// null, false, and absence remain unsupported.
+const GATED_WRITE_CAPABILITIES: &[&str] = &[
+    "renameProvider",
+    "documentFormattingProvider",
+    "codeActionProvider",
+    "executeCommandProvider",
+];
+
+const EXECUTE_COMMAND_ID_LIMIT: usize = 128;
+const EXECUTE_COMMAND_ID_MAX_BYTES: usize = 256;
+
+impl LanguageServerSession {
+    /// Launches a server from supplied, already-approved metadata.
+    pub fn launch_configured(
+        config: LanguageServerLaunchConfig,
+        launcher: &mut impl LspStdioSpawner,
+    ) -> Result<Self, LanguageSessionError> {
+        let policy_identity = &config.supervisor.launch_policy.identity;
+        if config.server_id.0 == 0 {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "server_id must be nonzero".to_string(),
+            ));
+        }
+        if config.language_id.0.trim().is_empty() {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "language_id must be nonempty".to_string(),
+            ));
+        }
+        if policy_identity.workspace_id.0 == 0 {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "identity workspace_id must be nonzero".to_string(),
+            ));
+        }
+        let Some(root_id) = policy_identity.root_id else {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "identity root_id is required".to_string(),
+            ));
+        };
+        if root_id.0 == 0 {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "identity root_id must be nonzero".to_string(),
+            ));
+        }
+        let policy = &config.supervisor.launch_policy;
+        let posture = &policy.posture;
+        if posture.workspace_id.0 == 0 {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "posture workspace_id must be nonzero".to_string(),
+            ));
+        }
+        if policy_identity.workspace_id != posture.workspace_id {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "identity and posture workspace_id differ".to_string(),
+            ));
+        }
+        if posture.required_capability.0 != "lsp.launch" {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "launch posture must authorize lsp.launch".to_string(),
+            ));
+        }
+        if posture.decision_id.is_none_or(|decision| decision.0 == 0) {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "lsp.launch decision_id must be nonzero".to_string(),
+            ));
+        }
+        // Re-run the protocol policy derivation instead of approximating its
+        // lifecycle with a boolean. In particular, a trusted/privacy-allowed
+        // posture with runtime activation deferred is `RuntimeActivationDeferred`,
+        // while an untrusted or privacy-denied posture has a different refusal
+        // disposition and reason code.
+        let expected_policy = legion_protocol::LspLaunchPolicyDecision::evaluate(
+            policy_identity.clone(),
+            posture.clone(),
+            policy.runtime_activation_accepted,
+            policy.correlation_id,
+            policy.causality_id,
+            policy.diagnostics.clone(),
+            policy.schema_version,
+        );
+        if policy.disposition != expected_policy.disposition
+            || policy.process_launch_allowed != expected_policy.process_launch_allowed
+            || policy.reason_code != expected_policy.reason_code
+        {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "launch policy disposition, posture, and allowed bit disagree".to_string(),
+            ));
+        }
+        if config.supervisor.launch_policy.correlation_id.0 == 0 {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "launch policy correlation_id must be nonzero".to_string(),
+            ));
+        }
+        if config.supervisor.launch_policy.causality_id.0.is_nil() {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "launch policy causality_id must be nonzero".to_string(),
+            ));
+        }
+        if policy_identity.server_id != config.server_id {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "server_id does not match supervisor policy identity".to_string(),
+            ));
+        }
+        if policy_identity.language_id != config.language_id {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "language_id does not match supervisor policy identity".to_string(),
+            ));
+        }
+        if config
+            .download_decision_id
+            .is_some_and(|decision| decision.0 == 0)
+        {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "download_decision_id must be nonzero".to_string(),
+            ));
+        }
+        if config
+            .version
+            .as_ref()
+            .is_some_and(|version| version.trim().is_empty())
+        {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "version must be nonempty when supplied".to_string(),
+            ));
+        }
+        if !matches!(
+            config.binary_provenance,
+            LspServerBinaryProvenance::Downloaded
+        ) && config.node_runtime_version.is_some()
+        {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "Node runtime version requires downloaded provenance".to_string(),
+            ));
+        }
+        match config.binary_provenance {
+            LspServerBinaryProvenance::Downloaded => {
+                let Some(hash) = config.artifact_hash.as_ref() else {
+                    return Err(LanguageSessionError::InvalidConfiguration(
+                        "downloaded provenance requires an artifact hash".to_string(),
+                    ));
+                };
+                if !is_sha256_fingerprint(hash) {
+                    return Err(LanguageSessionError::InvalidConfiguration(
+                        "downloaded artifact hash must be a 64-digit sha256 fingerprint"
+                            .to_string(),
+                    ));
+                }
+                if config
+                    .artifact_dependencies
+                    .iter()
+                    .any(|dependency| !is_sha256_fingerprint(dependency))
+                {
+                    return Err(LanguageSessionError::InvalidConfiguration(
+                        "downloaded artifact dependency must be a 64-digit sha256 fingerprint"
+                            .to_string(),
+                    ));
+                }
+            }
+            _ if config.artifact_hash.is_some()
+                || config.download_decision_id.is_some()
+                || !config.artifact_dependencies.is_empty() =>
+            {
+                return Err(LanguageSessionError::InvalidConfiguration(
+                    "artifact hash and download decision require downloaded provenance".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        // LspStdioSession performs the mandatory supervisor policy gate before
+        // invoking the supplied launcher. This config is metadata, not an
+        // approval receipt, and never grants process launch by itself.
+        let session = LspStdioSession::start(config.supervisor, launcher)
+            .map_err(LanguageSessionError::Launch)?;
+        let health = LspServerHealthRecord {
+            server_id: config.server_id,
+            language_id: config.language_id,
+            binary_provenance: config.binary_provenance,
+            binary_path_hash: None,
+            artifact_hash: config.artifact_hash,
+            version: config.version,
+            init_status: LspResultStatus::Unavailable,
+            capabilities: Vec::new(),
+            diagnostics_latency_ms: None,
+            restart_count: 0,
+            download_decision_id: config.download_decision_id,
+            schema_version: LspServerHealthRecord::schema_version(),
+        };
+        Ok(Self {
+            session,
+            health,
+            execute_command_ids: Vec::new(),
+            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
+        })
+    }
+
+    /// Resolves Rust-analyzer discovery, then delegates to the generic path.
     pub fn launch(
         config: RustAnalyzerLaunchConfig,
         launcher: &mut impl LspStdioSpawner,
@@ -121,31 +369,20 @@ impl RustAnalyzerSession {
             DiscoveredBinary::NotFound => return Err(LanguageSessionError::Discovery),
         };
 
-        // Launch the stdio session through the caller-supplied launcher.
-        let session = LspStdioSession::start(config.supervisor, launcher)
-            .map_err(LanguageSessionError::Launch)?;
-
-        // Seed the health record; init_status is Unavailable until initialize() succeeds.
-        let health = LspServerHealthRecord {
-            server_id: config.server_id,
-            language_id: config.language_id,
-            binary_provenance: provenance,
-            binary_path_hash: None,
-            artifact_hash: None,
-            version: None,
-            init_status: LspResultStatus::Unavailable,
-            capabilities: Vec::new(),
-            diagnostics_latency_ms: None,
-            restart_count: 0,
-            download_decision_id: None,
-            schema_version: LspServerHealthRecord::schema_version(),
-        };
-
-        Ok(Self {
-            session,
-            health,
-            stderr_ring: Arc::new(Mutex::new(VecDeque::new())),
-        })
+        Self::launch_configured(
+            LanguageServerLaunchConfig {
+                supervisor: config.supervisor,
+                server_id: config.server_id,
+                language_id: config.language_id,
+                binary_provenance: provenance,
+                artifact_hash: None,
+                artifact_dependencies: Vec::new(),
+                version: None,
+                node_runtime_version: None,
+                download_decision_id: None,
+            },
+            launcher,
+        )
     }
 
     /// Sends the LSP `initialize` request and the `initialized` notification,
@@ -187,6 +424,7 @@ impl RustAnalyzerSession {
             .map_err(LanguageSessionError::Handshake)?;
 
         self.health.init_status = response.status;
+        self.execute_command_ids.clear();
 
         // Parse capability summaries from the initialize result body.
         // Only populate when the handshake succeeded; an error result has no capabilities.
@@ -196,11 +434,29 @@ impl RustAnalyzerSession {
                 .get("capabilities")
                 .and_then(|v| v.as_object())
         {
-            // Track the capability keys we care about for read-side gating.
-            for cap_name in ["hoverProvider", "definitionProvider", "completionProvider"] {
+            // Every capability the read side gates on, from one list, because
+            // two lists in two files drifted: `issue_lsp_read` refused to send
+            // references, document symbols, inlay hints and code lenses for as
+            // long as this loop named only three keys, and the gate cannot be
+            // opened by a capability nobody recorded.
+            //
+            // Nothing caught it. The tests for those requests inject a health
+            // record directly, so they asserted that a request fires when the
+            // capability is present — true — and never that it was present.
+            // In use it looked like a working feature, because a refused gate
+            // falls back to the lexical index and the panel still fills.
+            //
+            // `tests/lsp_capability_gating.rs` now drives the real handshake
+            // against a mock advertising all of them and fails if this list
+            // falls behind again.
+            for &cap_name in GATED_READ_CAPABILITIES {
+                // `boolean | XOptions` per LSP: rust-analyzer sends an object
+                // for several of these, and `as_bool()` on an object is `None`
+                // — which read as "unsupported" and closed the gate on a server
+                // that had just said yes.
                 let supported = caps
                     .get(cap_name)
-                    .map(|v| v.as_bool().unwrap_or(false))
+                    .map(|v| !v.is_null() && v.as_bool() != Some(false))
                     .unwrap_or(false);
                 self.health.capabilities.push(LspCapabilitySummary {
                     capability: cap_name.to_string(),
@@ -211,6 +467,34 @@ impl RustAnalyzerSession {
                     schema_version: 1,
                 });
             }
+            for &cap_name in GATED_WRITE_CAPABILITIES {
+                let supported = caps
+                    .get(cap_name)
+                    .map(|v| !v.is_null() && v.as_bool() != Some(false))
+                    .unwrap_or(false);
+                self.health.capabilities.push(LspCapabilitySummary {
+                    capability: cap_name.to_string(),
+                    supported,
+                    dynamic_registration: false,
+                    option_hash: None,
+                    redaction_hints: Vec::new(),
+                    schema_version: 1,
+                });
+            }
+            self.execute_command_ids = parse_execute_command_ids(caps);
+            let resolve_supported = caps
+                .get("codeActionProvider")
+                .and_then(|value| value.get("resolveProvider"))
+                .map(|value| !value.is_null() && value.as_bool() != Some(false))
+                .unwrap_or(false);
+            self.health.capabilities.push(LspCapabilitySummary {
+                capability: "codeActionResolveProvider".to_string(),
+                supported: resolve_supported,
+                dynamic_registration: false,
+                option_hash: None,
+                redaction_hints: Vec::new(),
+                schema_version: 1,
+            });
             // `diagnosticProvider` (LSP 3.17 pull diagnostics) is an object
             // capability, not a bool: present-and-not-false means supported.
             // rust-analyzer >= 1.96-era serves NATIVE diagnostics (type
@@ -446,6 +730,24 @@ impl RustAnalyzerSession {
             .any(|c| c.capability == "diagnosticProvider" && c.supported)
     }
 
+    /// Returns whether the current initialize response advertised this exact
+    /// execute-command identifier. The list is replaced on every initialize
+    /// and bounded to keep server metadata from becoming an unbounded cache.
+    pub fn supports_execute_command(&self, command_id: &str) -> bool {
+        !command_id.is_empty()
+            && command_id.len() <= EXECUTE_COMMAND_ID_MAX_BYTES
+            && self
+                .execute_command_ids
+                .binary_search_by(|candidate| candidate.as_str().cmp(command_id))
+                .is_ok()
+    }
+
+    /// Returns the bounded exact command identifiers from the current
+    /// initialize response for app/session capability projection.
+    pub(crate) fn execute_command_ids(&self) -> &[String] {
+        &self.execute_command_ids
+    }
+
     /// Issues a `textDocument/diagnostic` pull request (LSP 3.17) for `uri`
     /// and parses the document diagnostic report.
     ///
@@ -458,9 +760,10 @@ impl RustAnalyzerSession {
     /// live. Transport/timeout failures surface as
     /// [`LanguageSessionError::ReadRequest`]; callers polling in a loop
     /// should treat those as retryable.
-    pub fn pull_diagnostics(
+    pub fn pull_diagnostics_with_context(
         &mut self,
         uri: &str,
+        operation_context: legion_protocol::LspOperationContext,
     ) -> Result<PulledDiagnostics, LanguageSessionError> {
         if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
             return Err(LanguageSessionError::Unavailable);
@@ -473,7 +776,7 @@ impl RustAnalyzerSession {
             .request(
                 "textDocument/diagnostic".to_string(),
                 params,
-                super::operation_context(),
+                operation_context,
             )
             .map_err(LanguageSessionError::ReadRequest)?;
         Ok(parse_pull_diagnostics_result(&response.result, uri))
@@ -493,16 +796,26 @@ impl RustAnalyzerSession {
     /// Returns [`LanguageSessionError::Unavailable`] immediately if the session
     /// is not in an initialized/live state (e.g. post-crash backoff). No write
     /// is made to the transport in that case.
-    pub fn request_read(
+    pub fn request_read_with_context(
         &mut self,
         method: &str,
         params: serde_json::Value,
         snapshot_id: SnapshotId,
+        operation_context: Option<legion_protocol::LspOperationContext>,
     ) -> Result<LspReadOutcome, LanguageSessionError> {
         if self.health.init_status != legion_protocol::LspResultStatus::Fresh {
             return Err(LanguageSessionError::Unavailable);
         }
-        let ctx = super::operation_context_for_snapshot(snapshot_id);
+        let Some(ctx) = operation_context else {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "document LSP requests require an app-admitted operation context".to_string(),
+            ));
+        };
+        if ctx.snapshot_id != snapshot_id {
+            return Err(LanguageSessionError::InvalidConfiguration(
+                "document LSP context snapshot does not match request snapshot".to_string(),
+            ));
+        }
         let response = self
             .session
             .request(method.to_string(), params, ctx)
@@ -601,29 +914,7 @@ impl RustAnalyzerSession {
             return;
         };
         let ring = self.stderr_ring.clone();
-        std::thread::spawn(move || {
-            use std::io::BufRead;
-            /// Maximum byte length of a retained stderr line.
-            const LINE_MAX_LEN: usize = 512;
-            /// Maximum number of lines retained in the ring buffer.
-            const RING_CAPACITY: usize = 100;
-            let reader = std::io::BufReader::new(stderr);
-            for raw in reader.lines() {
-                let Ok(raw_line) = raw else { break };
-                let truncated: String = if raw_line.len() > LINE_MAX_LEN {
-                    format!("{}…", &raw_line[..LINE_MAX_LEN])
-                } else {
-                    raw_line
-                };
-                let redacted = super::redact_lsp_stderr_line(&truncated);
-                if let Ok(mut guard) = ring.lock() {
-                    if guard.len() >= RING_CAPACITY {
-                        guard.pop_front();
-                    }
-                    guard.push_back(redacted);
-                }
-            }
-        });
+        std::thread::spawn(move || super::app_lsp::drain_stderr_reader(stderr, ring));
     }
 
     /// Returns a clone of the shared stderr ring-buffer `Arc` so callers can
@@ -655,6 +946,40 @@ impl RustAnalyzerSession {
         self.health.restart_count = attempt + 1;
         Some(policy.backoff_for_attempt(attempt))
     }
+}
+
+fn parse_execute_command_ids(
+    capabilities: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut command_ids = Vec::new();
+    let Some(commands) = capabilities
+        .get("executeCommandProvider")
+        .and_then(|value| value.get("commands"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return command_ids;
+    };
+    for command in commands.iter().take(EXECUTE_COMMAND_ID_LIMIT) {
+        let Some(command) = command.as_str() else {
+            continue;
+        };
+        if command.is_empty() || command.len() > EXECUTE_COMMAND_ID_MAX_BYTES {
+            continue;
+        }
+        command_ids.push(command.to_string());
+    }
+    command_ids.sort_unstable();
+    command_ids.dedup();
+    command_ids
+}
+
+fn is_sha256_fingerprint(fingerprint: &FileFingerprint) -> bool {
+    fingerprint.algorithm.eq_ignore_ascii_case("sha256")
+        && fingerprint.value.len() == 64
+        && fingerprint
+            .value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Builds the LSP `initialize` request params.
@@ -898,5 +1223,452 @@ mod initialize_params_tests {
             params["capabilities"]["textDocument"]["publishDiagnostics"], false,
             "a scalar overlay replaces the default object outright"
         );
+    }
+}
+
+#[cfg(test)]
+mod configured_launch_tests {
+    use super::*;
+    use legion_lsp::{LspServerProcessConfig, LspStdioLauncher, LspStdioProcess};
+    use legion_protocol::{
+        CapabilityId, CausalityId, CorrelationId, LspConfiguredServerIdentity,
+        LspLaunchPolicyDecision, LspWorkspaceTrustPosture, RedactionHint, SemanticPrivacyScope,
+        WorkspaceId, WorkspaceRootId, WorkspaceTrustState,
+    };
+
+    struct MustNotSpawn;
+
+    impl LspStdioSpawner for MustNotSpawn {
+        fn spawn_stdio(
+            &mut self,
+            _config: &LspServerProcessConfig,
+        ) -> legion_lsp::LspRuntimeResult<LspStdioProcess> {
+            panic!("invalid configuration reached process spawn")
+        }
+    }
+
+    struct FailsToSpawn;
+
+    impl LspStdioSpawner for FailsToSpawn {
+        fn spawn_stdio(
+            &mut self,
+            _config: &LspServerProcessConfig,
+        ) -> legion_lsp::LspRuntimeResult<LspStdioProcess> {
+            Err(legion_lsp::LspRuntimeError::SpawnFailed {
+                code: "test.no_process".to_string(),
+            })
+        }
+    }
+
+    struct RecordingSpawner {
+        inner: LspStdioLauncher,
+        command: Option<String>,
+        args: Vec<String>,
+    }
+
+    impl LspStdioSpawner for RecordingSpawner {
+        fn spawn_stdio(
+            &mut self,
+            config: &LspServerProcessConfig,
+        ) -> legion_lsp::LspRuntimeResult<LspStdioProcess> {
+            self.command = Some(config.command.clone());
+            self.args = config.args.clone();
+            self.inner.spawn_stdio(config)
+        }
+    }
+
+    fn config(server_id: LanguageServerId, language_id: &str) -> LanguageServerLaunchConfig {
+        let identity = LspConfiguredServerIdentity {
+            server_id: LanguageServerId(7),
+            workspace_id: WorkspaceId(55),
+            root_id: Some(WorkspaceRootId(5)),
+            language_id: LanguageId("python".to_string()),
+            display_name: "pyright".to_string(),
+            command_hash: FileFingerprint {
+                algorithm: "test".to_string(),
+                value: "command".to_string(),
+            },
+            args_hash: None,
+            env_hash: None,
+            cwd_hash: None,
+            settings_hash: None,
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        };
+        let policy = LspLaunchPolicyDecision::evaluate(
+            identity,
+            LspWorkspaceTrustPosture {
+                workspace_id: WorkspaceId(55),
+                workspace_trust_state: WorkspaceTrustState::Trusted,
+                privacy_scope: SemanticPrivacyScope::Workspace,
+                privacy_scope_allowed: true,
+                required_capability: CapabilityId("lsp.launch".to_string()),
+                // Process-spawn approval is distinct from any download
+                // decision carried by the launch metadata below.
+                decision_id: Some(CapabilityDecisionId(2)),
+                diagnostics: Vec::new(),
+                schema_version: 1,
+            },
+            true,
+            CorrelationId(1),
+            CausalityId(uuid::Uuid::from_u128(1)),
+            Vec::new(),
+            1,
+        );
+        LanguageServerLaunchConfig {
+            supervisor: LspSupervisorConfig {
+                launch_policy: policy,
+                process: LspServerProcessConfig {
+                    command: "pyright-langserver".to_string(),
+                    args: vec!["--stdio".to_string()],
+                    cwd: None,
+                    env: Vec::new(),
+                },
+                initial_backoff_ms: 1,
+                max_backoff_ms: 2,
+                max_restart_attempts: 1,
+            },
+            server_id,
+            language_id: LanguageId(language_id.to_string()),
+            binary_provenance: LspServerBinaryProvenance::Downloaded,
+            artifact_hash: Some(FileFingerprint {
+                algorithm: "sha256".to_string(),
+                value: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .to_string(),
+            }),
+            artifact_dependencies: Vec::new(),
+            version: Some("1.2.3".to_string()),
+            node_runtime_version: None,
+            // Local verified artifact import has no network/download decision;
+            // the separate lsp.launch decision is carried by posture.
+            download_decision_id: None,
+        }
+    }
+
+    #[test]
+    fn generic_config_rejects_identity_mismatch_before_spawn() {
+        let mut launcher = MustNotSpawn;
+        let result = LanguageServerSession::launch_configured(
+            config(LanguageServerId(8), "python"),
+            &mut launcher,
+        );
+        assert!(matches!(
+            result,
+            Err(LanguageSessionError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn generic_config_rejects_empty_language_before_spawn() {
+        let mut launcher = MustNotSpawn;
+        let result = LanguageServerSession::launch_configured(
+            config(LanguageServerId(7), " "),
+            &mut launcher,
+        );
+        assert!(matches!(
+            result,
+            Err(LanguageSessionError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn generic_config_rejects_malformed_artifact_dependency_before_spawn() {
+        let mut invalid = config(LanguageServerId(7), "python");
+        invalid.artifact_dependencies.push(FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "not-a-digest".to_string(),
+        });
+        let mut launcher = MustNotSpawn;
+        assert!(matches!(
+            LanguageServerSession::launch_configured(invalid, &mut launcher),
+            Err(LanguageSessionError::InvalidConfiguration(reason))
+                if reason.contains("artifact dependency")
+        ));
+    }
+
+    #[test]
+    fn generic_config_rejects_zero_or_cross_workspace_metadata_before_spawn() {
+        let mut cases = Vec::new();
+        let mut zero_identity_workspace = config(LanguageServerId(7), "python");
+        zero_identity_workspace
+            .supervisor
+            .launch_policy
+            .identity
+            .workspace_id = WorkspaceId(0);
+        cases.push(zero_identity_workspace);
+        let mut zero_root = config(LanguageServerId(7), "python");
+        zero_root.supervisor.launch_policy.identity.root_id = Some(WorkspaceRootId(0));
+        cases.push(zero_root);
+        let mut mismatch = config(LanguageServerId(7), "python");
+        mismatch.supervisor.launch_policy.posture.workspace_id = WorkspaceId(56);
+        cases.push(mismatch);
+
+        for invalid in cases {
+            let mut launcher = MustNotSpawn;
+            assert!(matches!(
+                LanguageServerSession::launch_configured(invalid, &mut launcher),
+                Err(LanguageSessionError::InvalidConfiguration(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn generic_config_rejects_missing_or_wrong_process_spawn_decision_before_spawn() {
+        let mut missing = config(LanguageServerId(7), "python");
+        missing.supervisor.launch_policy.posture.decision_id = None;
+        let mut wrong_capability = config(LanguageServerId(7), "python");
+        wrong_capability
+            .supervisor
+            .launch_policy
+            .posture
+            .required_capability = CapabilityId("network.fetch".to_string());
+
+        for invalid in [missing, wrong_capability] {
+            let mut launcher = MustNotSpawn;
+            assert!(matches!(
+                LanguageServerSession::launch_configured(invalid, &mut launcher),
+                Err(LanguageSessionError::InvalidConfiguration(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn generic_config_rejects_contradictory_policy_before_spawn() {
+        let mut invalid = config(LanguageServerId(7), "python");
+        invalid.supervisor.launch_policy.disposition =
+            legion_protocol::LspLaunchDisposition::DisabledCapabilityDenied;
+        let mut launcher = MustNotSpawn;
+        assert!(matches!(
+            LanguageServerSession::launch_configured(invalid, &mut launcher),
+            Err(LanguageSessionError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn generic_config_keeps_denied_policy_fail_closed_without_spawning() {
+        let mut denied = config(LanguageServerId(7), "python");
+        denied
+            .supervisor
+            .launch_policy
+            .posture
+            .workspace_trust_state = legion_protocol::WorkspaceTrustState::Untrusted;
+        let policy = &denied.supervisor.launch_policy;
+        let identity = policy.identity.clone();
+        let posture = policy.posture.clone();
+        let runtime_activation_accepted = policy.runtime_activation_accepted;
+        let correlation_id = policy.correlation_id;
+        let causality_id = policy.causality_id;
+        let diagnostics = policy.diagnostics.clone();
+        let schema_version = policy.schema_version;
+        denied.supervisor.launch_policy = legion_protocol::LspLaunchPolicyDecision::evaluate(
+            identity,
+            posture,
+            runtime_activation_accepted,
+            correlation_id,
+            causality_id,
+            diagnostics,
+            schema_version,
+        );
+        let mut launcher = MustNotSpawn;
+        assert!(matches!(
+            LanguageServerSession::launch_configured(denied, &mut launcher),
+            Err(LanguageSessionError::Launch(
+                legion_lsp::LspRuntimeError::SupervisionRefused { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn generic_config_rejects_forged_privacy_denial_disposition() {
+        let mut forged = config(LanguageServerId(7), "python");
+        forged.supervisor.launch_policy.runtime_activation_accepted = false;
+        forged.supervisor.launch_policy.disposition =
+            legion_protocol::LspLaunchDisposition::DisabledPrivacyDenied;
+        forged.supervisor.launch_policy.reason_code =
+            "lsp.supervision.disabled.privacy_denied".to_string();
+        forged.supervisor.launch_policy.process_launch_allowed = false;
+        let mut launcher = MustNotSpawn;
+        assert!(matches!(
+            LanguageServerSession::launch_configured(forged, &mut launcher),
+            Err(LanguageSessionError::InvalidConfiguration(_))
+        ));
+    }
+
+    #[test]
+    fn evaluated_runtime_deferred_policy_reaches_supervisor_without_spawning() {
+        let mut deferred = config(LanguageServerId(7), "python");
+        deferred
+            .supervisor
+            .launch_policy
+            .runtime_activation_accepted = false;
+        deferred.supervisor.launch_policy.disposition =
+            legion_protocol::LspLaunchDisposition::RuntimeActivationDeferred;
+        deferred.supervisor.launch_policy.reason_code =
+            "lsp.supervision.runtime_deferred".to_string();
+        deferred.supervisor.launch_policy.process_launch_allowed = false;
+        let mut launcher = MustNotSpawn;
+        assert!(matches!(
+            LanguageServerSession::launch_configured(deferred, &mut launcher),
+            Err(LanguageSessionError::Launch(
+                legion_lsp::LspRuntimeError::SupervisionRefused { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn generic_config_requires_download_metadata_consistency() {
+        let mut missing_hash = config(LanguageServerId(7), "python");
+        missing_hash.artifact_hash = None;
+        let mut invalid_hash = config(LanguageServerId(7), "python");
+        invalid_hash.artifact_hash = Some(FileFingerprint {
+            algorithm: "sha256".to_string(),
+            value: "artifact".to_string(),
+        });
+        let mut local_with_download_metadata = config(LanguageServerId(7), "python");
+        local_with_download_metadata.binary_provenance = LspServerBinaryProvenance::Configured;
+        local_with_download_metadata.download_decision_id = Some(CapabilityDecisionId(9));
+        let mut local_offline = config(LanguageServerId(7), "python");
+        local_offline.binary_provenance = LspServerBinaryProvenance::Configured;
+        local_offline.artifact_hash = None;
+        local_offline.download_decision_id = None;
+
+        for invalid in [missing_hash, invalid_hash, local_with_download_metadata] {
+            let mut launcher = MustNotSpawn;
+            assert!(matches!(
+                LanguageServerSession::launch_configured(invalid, &mut launcher),
+                Err(LanguageSessionError::InvalidConfiguration(_))
+            ));
+        }
+
+        // A verified local/offline artifact has no network download decision;
+        // lsp.launch approval remains in the posture decision above.
+        let mut launcher = FailsToSpawn;
+        let result = LanguageServerSession::launch_configured(local_offline, &mut launcher);
+        assert!(matches!(result, Err(LanguageSessionError::Launch(_))));
+    }
+
+    #[test]
+    fn generic_python_launch_preserves_metadata_args_and_read_route() {
+        let current_exe = std::env::current_exe().expect("test executable path");
+        let profile_dir = current_exe
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("target profile directory");
+        let mock_name = if cfg!(windows) {
+            "mock_lsp_server.exe"
+        } else {
+            "mock_lsp_server"
+        };
+        let mock_path = profile_dir.join(mock_name);
+        assert!(
+            mock_path.is_file(),
+            "mock_lsp_server not found at {}; run `cargo build -p legion-lsp --bin mock_lsp_server` first",
+            mock_path.display()
+        );
+
+        let mut config = config(LanguageServerId(7), "python");
+        config.supervisor.process.command = mock_path.to_string_lossy().into_owned();
+        config.supervisor.process.args = vec!["--stdio".to_string(), "--python".to_string()];
+        let expected_artifact = config.artifact_hash.clone();
+        let expected_version = config.version.clone();
+        let expected_decision = config.download_decision_id;
+        let expected_command = config.supervisor.process.command.clone();
+        let mut launcher = RecordingSpawner {
+            inner: LspStdioLauncher::new(),
+            command: None,
+            args: Vec::new(),
+        };
+        let mut session = LanguageServerSession::launch_configured(config, &mut launcher)
+            .expect("generic configured launch should succeed");
+        assert_eq!(launcher.command.as_deref(), Some(expected_command.as_str()));
+        assert_eq!(launcher.args, vec!["--stdio", "--python"]);
+        assert_eq!(session.health().server_id, LanguageServerId(7));
+        assert_eq!(
+            session.health().language_id,
+            LanguageId("python".to_string())
+        );
+        assert_eq!(
+            session.health().binary_provenance,
+            LspServerBinaryProvenance::Downloaded
+        );
+        assert_eq!(session.health().artifact_hash, expected_artifact);
+        assert_eq!(session.health().version, expected_version);
+        assert_eq!(session.health().download_decision_id, expected_decision);
+
+        session.initialize("file:///workspace").expect("initialize");
+        let outcome = session
+            .request_read_with_context(
+                "textDocument/completion",
+                serde_json::json!({"textDocument": {"uri": "file:///workspace/main.py"}}),
+                SnapshotId(11),
+                Some(super::super::operation_context_for_snapshot(SnapshotId(11))),
+            )
+            .expect("completion request should route through generic session");
+        assert_eq!(outcome.issued_snapshot, SnapshotId(11));
+        assert_eq!(outcome.result["items"][0]["label"], "mockCompletion");
+    }
+}
+
+#[cfg(test)]
+mod execute_command_capability_tests {
+    use super::parse_execute_command_ids;
+
+    #[test]
+    fn parses_exact_commands_skips_malformed_and_enforces_bound() {
+        let mut commands = vec![
+            serde_json::json!("rust-analyzer.reload"),
+            serde_json::json!("rust-analyzer.organizeImports"),
+            serde_json::json!(null),
+            serde_json::json!(42),
+            serde_json::json!(""),
+            serde_json::json!("x".repeat(257)),
+        ];
+        commands.extend((0..130).map(|index| serde_json::json!(format!("test.command.{index}"))));
+        let capabilities = serde_json::json!({
+            "executeCommandProvider": { "commands": commands }
+        });
+        let ids = parse_execute_command_ids(capabilities.as_object().expect("object"));
+        // The parser bounds the wire array it examines at 128 entries.  The
+        // malformed records occupy four of those slots, so only 124 valid
+        // identifiers are retained from this deliberately adversarial input.
+        assert_eq!(ids.len(), 124);
+        assert!(ids.iter().any(|id| id == "rust-analyzer.reload"));
+        assert!(ids.iter().any(|id| id == "rust-analyzer.organizeImports"));
+        assert!(!ids.iter().any(|id| id.is_empty()));
+        assert!(!ids.iter().any(|id| id.len() > 256));
+        assert!(!ids.iter().any(|id| id == "unknown.command"));
+    }
+
+    #[test]
+    fn absent_or_malformed_provider_has_no_exact_commands() {
+        for capabilities in [
+            serde_json::json!({}),
+            serde_json::json!({ "executeCommandProvider": false }),
+            serde_json::json!({ "executeCommandProvider": { "commands": [null, 7] } }),
+        ] {
+            assert!(
+                parse_execute_command_ids(capabilities.as_object().expect("object")).is_empty()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod stderr_drain_tests {
+    use super::super::app_lsp::drain_stderr_reader;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn shared_stderr_drain_handles_utf8_boundary_without_panicking() {
+        let mut input = vec![b'x'; 511];
+        input.extend_from_slice("€\n".as_bytes());
+        let ring = Arc::new(Mutex::new(VecDeque::new()));
+        drain_stderr_reader(&input[..], ring.clone());
+
+        let lines = ring.lock().expect("stderr ring lock");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with('…'));
+        assert!(lines[0].len() <= 512);
     }
 }

@@ -1,15 +1,18 @@
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use legion_lsp::{
-    LspRuntimeError, LspServerProcessConfig, LspStdioProcess, LspStdioSession, LspStdioSpawner,
-    LspSupervisorConfig, LspTextDocumentIdentity, code_lens_request, completion_request,
-    declaration_request, definition_request, document_symbol_request, folding_range_request,
-    hover_request, implementation_request, inlay_hint_request, project_code_lens_response,
-    project_completion_response, project_document_symbol_response, project_hover_response,
-    project_inlay_hint_response, project_location_response, project_workspace_symbol_response,
-    references_request, semantic_tokens_full_request, signature_help_request,
-    type_definition_request, workspace_symbol_request,
+    LspProcessHandle, LspRuntimeError, LspServerProcessConfig, LspStdioProcess, LspStdioSession,
+    LspStdioSpawner, LspSupervisorConfig, LspTextDocumentIdentity, STDOUT_READER_QUEUE_CAP,
+    code_lens_request, completion_request, declaration_request, definition_request,
+    document_symbol_request, folding_range_request, hover_request, implementation_request,
+    inlay_hint_request, project_code_lens_response, project_completion_response,
+    project_document_symbol_response, project_hover_response, project_inlay_hint_response,
+    project_location_response, project_workspace_symbol_response, references_request,
+    semantic_tokens_full_request, signature_help_request, type_definition_request,
+    workspace_symbol_request,
 };
 use legion_protocol::{
     BufferId, BufferVersion, CancellationTokenId, CapabilityDecisionId, CapabilityId, CausalityId,
@@ -1070,5 +1073,86 @@ fn stdio_lsp_session_reader_records_malformed_frame_and_child_stays_alive() {
     assert!(
         session.is_running(),
         "mock server must still be alive after emitting a malformed frame"
+    );
+}
+
+fn fixture_config(mode: &str) -> LspServerProcessConfig {
+    LspServerProcessConfig {
+        command: env!("CARGO_BIN_EXE_lsp_stdio_fixture").to_string(),
+        args: vec![mode.to_string()],
+        cwd: None,
+        env: Vec::new(),
+    }
+}
+
+fn wait_for_fixture_ready(process: &mut LspStdioProcess) {
+    let stderr = process
+        .take_stderr()
+        .expect("fixture stderr must be captured");
+    let mut line = String::new();
+    BufReader::new(stderr)
+        .read_line(&mut line)
+        .expect("read fixture ready line");
+    assert!(
+        line.contains("ready"),
+        "fixture must announce the grandchild is holding stdout, got {line:?}"
+    );
+}
+
+fn wait_until_mailbox_blocked(process: &LspStdioProcess) {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(5) {
+        // `frames_forwarded` increments before the blocking send, so a full
+        // cap plus the in-flight send is QUEUE_CAP + 1.
+        if process.reader_stats().frames_forwarded as usize > STDOUT_READER_QUEUE_CAP {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "reader mailbox never filled; forwarded {}",
+        process.reader_stats().frames_forwarded
+    );
+}
+
+#[test]
+fn stdio_process_kill_joins_while_grandchild_holds_stdout() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut process = launcher
+        .spawn_stdio(&fixture_config("hold-tree"))
+        .expect("spawn grandchild stdout holder");
+    wait_for_fixture_ready(&mut process);
+    let started = Instant::now();
+    process.kill();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "kill must join the stdout reader even when a grandchild inherited stdout, elapsed {:?}",
+        started.elapsed()
+    );
+    assert!(
+        !process.is_running(),
+        "direct child must be reaped after process-tree kill"
+    );
+    let stats = process.reader_stats();
+    assert!(
+        !stats.tree_kill_failed,
+        "supervised spawn must confirm descendant teardown, terminal={:?}",
+        stats.terminal
+    );
+}
+
+#[test]
+fn stdio_process_kill_unblocks_full_reader_mailbox() {
+    let mut launcher = legion_lsp::LspStdioLauncher::new();
+    let mut process = launcher
+        .spawn_stdio(&fixture_config("flood"))
+        .expect("spawn stdout flood writer");
+    wait_until_mailbox_blocked(&process);
+    let started = Instant::now();
+    process.kill();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "kill must unblock a reader parked on a full bounded mailbox, elapsed {:?}",
+        started.elapsed()
     );
 }

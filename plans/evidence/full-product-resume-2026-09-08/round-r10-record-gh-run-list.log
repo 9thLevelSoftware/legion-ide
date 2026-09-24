@@ -1,0 +1,15 @@
+CMD: gh run list --branch codex/full-product-resume --workflow "Legion Gates" --limit 30
+CWD: D:/legion-ide-completion
+ROLE: record
+BEGIN
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34322199039	31m34s	2026-09-09T07:06:27Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34316428495	30m46s	2026-09-09T05:49:15Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34310164431	29m50s	2026-09-09T04:14:10Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34303929889	30m27s	2026-09-09T02:37:06Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34282248413	34m14s	2026-09-08T21:44:30Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34273852331	24m42s	2026-09-08T20:16:40Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34255550868	31m55s	2026-09-08T17:11:04Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34244560707	29m16s	2026-09-08T15:24:36Z
+completed	failure	Resumed full-product completion: rounds r00-r07 (component evidence only, no acceptance change)	Legion Gates	codex/full-product-resume	pull_request	34235634538	37m41s	2026-09-08T14:01:38Z
+END
+EXIT=0

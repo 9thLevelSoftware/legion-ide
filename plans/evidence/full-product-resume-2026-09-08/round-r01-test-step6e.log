@@ -1,0 +1,4 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running `target\debug\xtask.exe extract-before-modify`
+extract-before-modify: no chokepoint file grew past its slack
+EXIT=0

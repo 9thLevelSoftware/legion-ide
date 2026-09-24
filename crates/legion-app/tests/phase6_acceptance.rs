@@ -11,7 +11,23 @@ use legion_editor::{TextEdit, TextPosition};
 use legion_protocol::{
     PrincipalId, TerminalPanelStatusKind, ViewportSemanticTokenKind, WorkspaceTrustState,
 };
-use legion_ui::{CommandDispatchIntent, GitHunkStageProjection, ShellLayoutProjection};
+use legion_ui::{
+    CommandDispatchIntent, GitHunkStageProjection, GitProjection, ShellLayoutProjection,
+};
+
+fn git_updated(
+    app: &mut AppComposition,
+    intent: CommandDispatchIntent,
+    what: &str,
+) -> GitProjection {
+    match app.dispatch_ui_intent(intent).unwrap_or_else(|error| {
+        panic!("{what} dispatch failed: {error}");
+    }) {
+        AppCommandOutcome::GitUpdated(_) => {}
+        other => panic!("expected GitUpdated from {what}, got {other:?}"),
+    }
+    app.drain_git_until_idle()
+}
 
 static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,14 +57,14 @@ impl Drop for TempWorkspace {
 
 fn create_root() -> TempWorkspace {
     let root = std::env::temp_dir().join(format!(
-        "legion-app-phase6-{}-{}",
+        "legion-app-phase6-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-            + TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
+            .map_or(0, |value| value.as_millis() as u64),
+        TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&root).expect("create temp root");
+    std::fs::create_dir(&root).expect("create temp root");
     TempWorkspace { root }
 }
 
@@ -243,13 +259,7 @@ fn acceptance_git_commit_cycle() {
     app.save_active_buffer().expect("save_active_buffer");
 
     // RefreshGit -- expect dirty file (GP-1 s6 pattern).
-    let git_projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("RefreshGit dispatch")
-    {
-        AppCommandOutcome::GitUpdated(p) => p,
-        other => panic!("expected GitUpdated from RefreshGit, got {other:?}"),
-    };
+    let git_projection = git_updated(&mut app, CommandDispatchIntent::RefreshGit, "RefreshGit");
     assert!(
         !git_projection.changed_files.is_empty(),
         "expected dirty files after save"
@@ -264,24 +274,20 @@ fn acceptance_git_commit_cycle() {
     let hunk_id = hunk.hunk_id.clone();
 
     // Stage the hunk (GP-1 s6 pattern).
-    match app
-        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
-        .expect("StageGitHunk dispatch")
-    {
-        AppCommandOutcome::GitUpdated(_) => {}
-        other => panic!("expected GitUpdated from StageGitHunk, got {other:?}"),
-    }
+    git_updated(
+        &mut app,
+        CommandDispatchIntent::StageGitHunk { hunk_id },
+        "StageGitHunk",
+    );
 
     // Commit via app authority (GP-1 s6 pattern).
-    let committed = match app
-        .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
+    let committed = git_updated(
+        &mut app,
+        CommandDispatchIntent::CommitGitChanges {
             message: "phase6: acceptance git cycle verification".to_string(),
-        })
-        .expect("CommitGitChanges dispatch")
-    {
-        AppCommandOutcome::GitUpdated(p) => p,
-        other => panic!("expected GitUpdated from CommitGitChanges, got {other:?}"),
-    };
+        },
+        "CommitGitChanges",
+    );
 
     // Assert clean worktree after commit.
     assert!(
@@ -371,13 +377,11 @@ fn acceptance_full_journey() {
     }
 
     // ---- Step 4: Git commit cycle ----
-    let git_projection = match app
-        .dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
-        .expect("RefreshGit")
-    {
-        AppCommandOutcome::GitUpdated(p) => p,
-        other => panic!("step 4: expected GitUpdated, got {other:?}"),
-    };
+    let git_projection = git_updated(
+        &mut app,
+        CommandDispatchIntent::RefreshGit,
+        "step 4 RefreshGit",
+    );
     assert!(
         !git_projection.changed_files.is_empty(),
         "step 4: expected dirty files"
@@ -390,23 +394,19 @@ fn acceptance_full_journey() {
         .expect("step 4: expected unstaged hunk");
     let hunk_id = hunk.hunk_id.clone();
 
-    match app
-        .dispatch_ui_intent(CommandDispatchIntent::StageGitHunk { hunk_id })
-        .expect("StageGitHunk")
-    {
-        AppCommandOutcome::GitUpdated(_) => {}
-        other => panic!("step 4: expected GitUpdated from StageGitHunk, got {other:?}"),
-    }
+    git_updated(
+        &mut app,
+        CommandDispatchIntent::StageGitHunk { hunk_id },
+        "step 4 StageGitHunk",
+    );
 
-    let committed = match app
-        .dispatch_ui_intent(CommandDispatchIntent::CommitGitChanges {
+    let committed = git_updated(
+        &mut app,
+        CommandDispatchIntent::CommitGitChanges {
             message: "phase6: full journey acceptance".to_string(),
-        })
-        .expect("CommitGitChanges")
-    {
-        AppCommandOutcome::GitUpdated(p) => p,
-        other => panic!("step 4: expected GitUpdated from CommitGitChanges, got {other:?}"),
-    };
+        },
+        "step 4 CommitGitChanges",
+    );
     assert!(
         committed.changed_files.is_empty(),
         "step 4: worktree should be clean after commit"

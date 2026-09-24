@@ -12,7 +12,7 @@
 //!
 //! - **No filesystem mutation.** The translator only reads document state
 //!   supplied through [`DocumentResolver`] and the raw JSON input.
-//! - **Typed rejection.** Unsupported shapes (annotated edits, unresolvable
+//! - **Typed rejection.** Unsupported shapes and unresolvable
 //!   URIs) surface as [`TranslationError`] variants, never silently dropped.
 //! - **Precondition completeness.** Every `WorkspaceTextEdit` carries the
 //!   full version context that the applying layer needs to detect stale
@@ -34,6 +34,9 @@ use legion_protocol::{
 };
 use serde_json::Value;
 use uuid::Uuid;
+
+mod change_annotations;
+pub(crate) use change_annotations::normalize_pyright_annotations;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Document resolver contract
@@ -87,7 +90,7 @@ pub trait DocumentResolver {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TranslationError {
     /// The WorkspaceEdit JSON has a shape the translator does not support
-    /// (e.g. annotated edits with `annotationId`, unrecognised `kind`).
+    /// (e.g. an unrecognised resource-operation `kind`).
     UnsupportedShape {
         /// Human-readable explanation for the rejection.
         reason: String,
@@ -228,6 +231,7 @@ pub fn translate_workspace_edit(
         // Empty WorkspaceEdit is valid (e.g. no-op rename).
     }
 
+    let change_annotations = change_annotations::translate_annotations(raw)?;
     let target_coverage = build_target_coverage(&file_edits, &file_operations);
 
     Ok(WorkspaceEditProposalPayload {
@@ -238,6 +242,7 @@ pub fn translate_workspace_edit(
         target_coverage,
         file_edits,
         file_operations,
+        change_annotations,
         required_capability: capability,
         diagnostics,
         schema_version: 1,
@@ -265,17 +270,6 @@ fn translate_text_document_edit(
             reason: "textDocument.uri missing or not a string".to_string(),
         }
     })?;
-
-    // Reject annotated edits (with `annotationId`) — unsupported shape.
-    if let Some(edits_array) = change.get("edits").and_then(Value::as_array) {
-        for edit in edits_array {
-            if edit.get("annotationId").is_some() {
-                return Err(TranslationError::UnsupportedShape {
-                    reason: "annotated edits (annotationId) are not supported".to_string(),
-                });
-            }
-        }
-    }
 
     // Check for optional LSP document version for diagnostics.
     let lsp_version = text_doc.get("version").and_then(Value::as_i64);
@@ -947,10 +941,9 @@ mod tests {
         );
     }
 
-    // ── T2-3: Annotated edit → typed rejection ─────────────────────────────────
+    // ── T2-3: Undefined annotation → typed rejection ──────────────────────────
 
-    /// An edit bearing `annotationId` must be rejected with
-    /// `TranslationError::UnsupportedShape` — never silently dropped.
+    /// An edit bearing an undefined `annotationId` must be rejected, never dropped.
     #[test]
     fn t2_annotated_edit_is_rejected_with_typed_error() {
         let uri = "file:///workspace/src/lib.rs";
@@ -985,8 +978,8 @@ mod tests {
         .expect_err("annotated edit must be rejected");
 
         assert!(
-            matches!(err, TranslationError::UnsupportedShape { .. }),
-            "expected UnsupportedShape, got {err:?}"
+            matches!(err, TranslationError::MalformedEdit { .. }),
+            "expected MalformedEdit, got {err:?}"
         );
     }
 

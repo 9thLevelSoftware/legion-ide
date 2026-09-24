@@ -115,6 +115,30 @@ fn platform_smoke_metrics_compute_percentiles_and_variance() {
 }
 
 #[test]
+fn platform_smoke_metrics_keep_oldest_input_pending_until_a_later_paint() {
+    let mut recorder = FrameTimingRecorder::new();
+    let start = Instant::now();
+    recorder.record_input(start);
+    recorder.record_input(start + Duration::from_millis(1));
+
+    // One paint closes the grouped pending span using the oldest arrival. The
+    // newer input is already reflected by the same resulting snapshot.
+    recorder.record_paint(start + Duration::from_millis(10));
+    assert_eq!(recorder.input_paint_samples().len(), 1);
+    approx_eq(
+        recorder
+            .input_paint_samples()
+            .next()
+            .expect("first sample")
+            .duration_ms,
+        10.0,
+    );
+
+    recorder.record_paint(start + Duration::from_millis(21));
+    assert_eq!(recorder.input_paint_samples().len(), 1);
+}
+
+#[test]
 fn platform_smoke_report_markdown_contains_required_fields() {
     let report = RendererSmokeReport {
         command: "cargo run -p legion-desktop -- --smoke".to_string(),
@@ -268,4 +292,116 @@ fn platform_smoke_adapter_paths_route_without_metrics_payloads() {
     let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/metrics.rs"))
         .expect("metrics source should be readable");
     common::assert_source_excludes(&source, "src/metrics.rs", &["String", "payload", "text"]);
+}
+
+/// Build a report whose only interesting property is its status.
+fn report_with_status(status: RendererSmokeStatus, errors: Vec<String>) -> RendererSmokeReport {
+    RendererSmokeReport {
+        command: "cargo run -p legion-desktop -- --smoke".to_string(),
+        status,
+        workspace: PathBuf::from("."),
+        file: None,
+        duration_ms: 1500,
+        timing: FrameTimingSummary::default(),
+        focus_smoke: "not observed".to_string(),
+        menu_smoke: "not observed".to_string(),
+        shortcut_smoke: "not observed".to_string(),
+        clipboard_smoke: "not observed".to_string(),
+        ime_smoke: "not observed".to_string(),
+        theme_smoke: "not observed".to_string(),
+        high_dpi_smoke: "not observed".to_string(),
+        focus_traversal_smoke: "not observed".to_string(),
+        file_dialog_smoke: "not observed".to_string(),
+        accessibility_smoke: "not observed".to_string(),
+        accessibility_tree_smoke: "not observed".to_string(),
+        accessibility_projection_node_count: 0,
+        large_file_degraded_status: "not observed".to_string(),
+        bounded_search_status: "not observed".to_string(),
+        full_text_projection_status: "not observed".to_string(),
+        errors,
+    }
+}
+
+/// A failed smoke must not exit 0.
+///
+/// `run_smoke` used to write the evidence file and return `Ok(())` whatever the
+/// report said, so `legion-desktop --smoke` printed nothing, exited 0, and left
+/// behind a report reading `status: failed`. Any caller that trusted the exit
+/// code -- a shell wrapper under `set -e`, a CI step, a person reading a green
+/// tick -- was told a failed gate had passed.
+///
+/// The evidence file is asserted on as well as the result, because the fix must
+/// not trade one defect for another: writing evidence before deciding the exit
+/// code is the deliberate contract, and a guard that returned early on failure
+/// would leave the operator with no report to read.
+#[test]
+fn a_failed_smoke_reports_failure_to_its_caller() {
+    let workspace = TempEvidenceDir::new();
+    let evidence = workspace.path().join("failed.md");
+    let report = report_with_status(
+        RendererSmokeStatus::Failed,
+        vec!["high-DPI scale was not observed during smoke run".to_string()],
+    );
+
+    let result = legion_desktop::smoke::finish_smoke(&report, &evidence);
+
+    assert!(
+        result.is_err(),
+        "a smoke run whose report says `status: failed` returned success to its caller"
+    );
+
+    let contents = fs::read_to_string(&evidence)
+        .expect("evidence must be written before the status becomes an error");
+    assert!(
+        contents.contains("status: failed"),
+        "evidence should record the failed status, got: {contents}"
+    );
+    assert!(
+        contents.contains("high-DPI scale was not observed"),
+        "evidence should record why the smoke failed, got: {contents}"
+    );
+}
+
+/// A blocked smoke is not a passing smoke either.
+///
+/// "Blocked" means the native window never ran. Treating that as success turns
+/// the smoke into a gate that cannot fail on any machine without a display.
+#[test]
+fn a_blocked_smoke_reports_failure_to_its_caller() {
+    let workspace = TempEvidenceDir::new();
+    let evidence = workspace.path().join("blocked.md");
+    let report = report_with_status(
+        RendererSmokeStatus::Blocked,
+        vec!["no window system available".to_string()],
+    );
+
+    let result = legion_desktop::smoke::finish_smoke(&report, &evidence);
+
+    assert!(
+        result.is_err(),
+        "a smoke run whose report says `status: blocked` returned success to its caller"
+    );
+    let contents = fs::read_to_string(&evidence).expect("evidence should still be written");
+    assert!(
+        contents.contains("status: blocked"),
+        "evidence should record the blocked status, got: {contents}"
+    );
+}
+
+/// The passing case still passes, so the guard above is a status check rather
+/// than a blanket failure.
+#[test]
+fn a_passed_smoke_reports_success_and_writes_evidence() {
+    let workspace = TempEvidenceDir::new();
+    let evidence = workspace.path().join("passed.md");
+    let report = report_with_status(RendererSmokeStatus::Passed, Vec::new());
+
+    legion_desktop::smoke::finish_smoke(&report, &evidence)
+        .expect("a passing smoke must return success");
+
+    let contents = fs::read_to_string(&evidence).expect("evidence should be written");
+    assert!(
+        contents.contains("status: passed"),
+        "evidence should record the passed status, got: {contents}"
+    );
 }

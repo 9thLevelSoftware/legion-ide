@@ -34,6 +34,27 @@ pub const DEBUG_SIMULATED_BANNER: &str = "Debugger is simulated in this build";
 /// Banner when a live DAP adapter process is connected (B3 dual-mode honesty).
 pub const DEBUG_LIVE_BANNER: &str = "Debugger connected to a live adapter process";
 
+/// Banner while no debug session is running.
+///
+/// The dual-mode banner reports which runtime the *current session* is using,
+/// and there is no session to report on before a launch or after a stop. It
+/// used to fall through to [`DEBUG_SIMULATED_BANNER`] in that state, so a build
+/// with `LEGION_DAP_ADAPTER` set to a real `lldb-dap` read "Debugger is
+/// simulated in this build" while idle — and read it again immediately after
+/// disconnecting from the live adapter it had just been driving. Neither claim
+/// was true, and the second one contradicted the banner shown one click
+/// earlier. Which runtime answers is decided at launch, so that is what this
+/// says.
+/// Deliberately "no active session" rather than "idle". The banner renders
+/// directly above the status line, and a launch denied for an untrusted
+/// workspace -- or failed because `LEGION_DAP_MODE=live` could not resolve an
+/// adapter -- also leaves `active_session_id` as `None`. Calling that "idle"
+/// contradicts the `Denied` or `Failed` line underneath it and reads as though
+/// nothing had been attempted. The neutral phrasing is true in all three
+/// cases, so the status line is left to say which one happened.
+pub const DEBUG_NO_SESSION_BANNER: &str =
+    "No active debug session (fixture or live adapter is chosen when a session launches)";
+
 /// Prefix for plugin management rows that cannot execute WASM in product composition.
 pub const PLUGIN_EXECUTION_UNAVAILABLE: &str = "execution=not-available";
 

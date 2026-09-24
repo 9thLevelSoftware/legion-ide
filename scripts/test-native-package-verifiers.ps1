@@ -1,5 +1,6 @@
-# Contract tests for scripts/verify-native-package.sh and
-# scripts/verify-native-package.ps1.
+# Contract tests for scripts/verify-native-package.sh,
+# scripts/verify-native-package.ps1 and
+# scripts/stage-native-acceptance-package.ps1.
 #
 # These tests exercise the verifier boundaries against synthetic fixtures and
 # require neither real installers nor a macOS/Linux host:
@@ -10,7 +11,15 @@
 #   * every exit writes VALIDATION-SUMMARY.toml with result = "failed" on
 #     failure so the publish gate can never mistake a crash for a pass;
 #   * the Windows version reader rejects a missing MSI ProductVersion with an
-#     actionable error (synthetic MSI built via Windows Installer Automation).
+#     actionable error (synthetic MSI built via Windows Installer Automation);
+#   * the acceptance staging step recomputes the MSI hash against its sidecar,
+#     refuses a cargo build directory as a source -- target/debug,
+#     target/release, the packager's own target/native-package/cargo-target/*,
+#     and any debug/release directory carrying a .fingerprint marker -- while
+#     still accepting target/release-smoke, requires exactly one
+#     legion-desktop.exe in the extraction tree, stages the whole payload
+#     directory, records signed = false with the exact signing prerequisite,
+#     and is idempotent across two runs.
 #
 # Host-specific tooling (dpkg-deb, AppImage runtime, hdiutil, msiexec) remains
 # the authority for actual installation/extraction semantics; those paths run
@@ -24,6 +33,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $shVerifier = Join-Path $repoRoot "scripts/verify-native-package.sh"
 $psVerifier = Join-Path $repoRoot "scripts/verify-native-package.ps1"
+$stageScript = Join-Path $repoRoot "scripts/stage-native-acceptance-package.ps1"
 $testSha = "0123456789abcdef0123456789abcdef01234567"
 $isWindowsHost = ($env:OS -eq "Windows_NT")
 
@@ -183,6 +193,44 @@ function New-EmptyPropertyTableMsi([string]$Path) {
         $database.Commit()
     } finally {
         foreach ($comObject in @($view, $database, $installer)) {
+            if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
+            }
+        }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+    }
+}
+
+function New-ProductVersionMsi([string]$Path, [string]$Value) {
+    # A real Windows Installer database whose Property table carries
+    # ProductVersion with the exact bytes given -- including padding, which is
+    # the point of the regression this builds a fixture for.
+    $installer = $null
+    $database = $null
+    $view = $null
+    # Declared out here so the finally block can release it. Leaving the insert
+    # view out of that list held the database file open, and the next read of
+    # the .msi failed with "being used by another process" -- which looks like
+    # a flaky test rather than a leaked COM handle.
+    $insert = $null
+    try {
+        try {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+        } catch {
+            throw "SKIP: WindowsInstaller.Installer COM is unavailable: $($_.Exception.Message)"
+        }
+        $database = $installer.OpenDatabase($Path, 3) # msiOpenDatabaseModeCreateDirect
+        $sql = 'CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(0) NOT NULL LOCALIZABLE PRIMARY KEY `Property`)'
+        $view = $database.OpenView($sql)
+        [void]$view.Execute()
+        [void]$view.Close()
+        $insert = $database.OpenView("INSERT INTO ``Property`` (``Property``, ``Value``) VALUES ('ProductVersion', '$Value')")
+        [void]$insert.Execute()
+        [void]$insert.Close()
+        $database.Commit()
+    } finally {
+        foreach ($comObject in @($insert, $view, $database, $installer)) {
             if ($null -ne $comObject -and [System.Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
                 [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($comObject)
             }
@@ -376,6 +424,55 @@ Invoke-Test "ps verifier rejects an MSI whose sha256 does not match" {
     Assert-True ($summaryText -match 'checksum = "not-run"') "summary must not report checksum as passed"
 }
 
+# --- Windows version reader: padded ProductVersion is not a mismatch ---
+
+Invoke-Test "ps verifier accepts a ProductVersion carrying surrounding whitespace" {
+    if (-not $isWindowsHost) {
+        throw "SKIP: Windows Installer Automation requires a Windows host"
+    }
+    # Regression: the COM StringData accessor returns the Property value with
+    # padding, and the comparison is ordinal, so every release failed with
+    # "expected 0.0.2, found  0.0.2" -- two identical versions and a verifier
+    # insisting they differed. The whole release pipeline was blocked by it.
+    $packageDir = New-FixtureDir "msi-padded-product-version"
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath " 0.0.1 "
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $run = Invoke-PsVerifier @(
+        "-PackageDir", $packageDir,
+        "-ReleaseVersion", "0.0.1",
+        "-SourceSha", $testSha,
+        "-WorkspaceRoot", $workspace
+    )
+    # The fixture is not a real installable package, so the verifier still
+    # fails later at extraction. What must not appear is the version mismatch.
+    Assert-True ($run.Output -notmatch 'ProductVersion mismatch') `
+        "padded ProductVersion was reported as a mismatch: $($run.Output)"
+}
+
+Invoke-Test "ps verifier still rejects a genuinely different ProductVersion" {
+    if (-not $isWindowsHost) {
+        throw "SKIP: Windows Installer Automation requires a Windows host"
+    }
+    # The other half of the trim: narrowing the comparison must not stop it
+    # catching a real mismatch.
+    $packageDir = New-FixtureDir "msi-wrong-product-version"
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath "0.0.9"
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $run = Invoke-PsVerifier @(
+        "-PackageDir", $packageDir,
+        "-ReleaseVersion", "0.0.1",
+        "-SourceSha", $testSha,
+        "-WorkspaceRoot", $workspace
+    )
+    Assert-True ($run.ExitCode -ne 0) "verifier unexpectedly passed: $($run.Output)"
+    Assert-True ($run.Output -match 'ProductVersion mismatch') `
+        "a real version mismatch was not reported: $($run.Output)"
+}
+
 # --- Windows version reader: missing ProductVersion is an actionable error ---
 
 Invoke-Test "ps verifier rejects an MSI without ProductVersion with an actionable error" {
@@ -400,6 +497,412 @@ Invoke-Test "ps verifier rejects an MSI without ProductVersion with an actionabl
     Assert-True ($summaryText -match 'checksum = "passed"') "checksum should pass before the version reader runs"
     Assert-True ($summaryText -match 'package_version = "not-run"') "package_version must not be reported as passed"
     Assert-True ($summaryText -match 'result = "failed"') "summary lacks result = `"failed`""
+}
+
+# --- Acceptance staging step: scripts/stage-native-acceptance-package.ps1 ---
+#
+# Every fixture below is synthetic. The staging script never opens the MSI as a
+# Windows Installer database and never runs msiexec, so these tests need no real
+# installer, no product build and no elevation.
+
+$signingPrerequisite = "Owner-supplied signing, notarization and update-feed infrastructure; no signing credential, certificate, key, notarization tool, provider or feed is available in the retained facts."
+
+function Invoke-StageScript([string[]]$Arguments) {
+    $oldPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $stdout = & $script:psExe -NoProfile -ExecutionPolicy Bypass -File $script:stageScript @Arguments 2>&1 | ForEach-Object { "$_" }
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldPreference
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output   = ($stdout -join "`n")
+    }
+}
+
+# A package directory holding a synthetic MSI, its sidecar and the metadata the
+# packager writes. $ChecksumOverride replaces the real hash so the mismatch
+# rejection can be exercised without corrupting the artifact.
+function New-StagePackageFixture([string]$Dir, [string]$ChecksumOverride) {
+    New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+    $msiPath = Join-Path $Dir "legion-desktop-windows-x64-msi.msi"
+    [System.IO.File]::WriteAllText($msiPath, "synthetic msi bytes for staging tests", [System.Text.Encoding]::ASCII)
+    $hash = if ([string]::IsNullOrEmpty($ChecksumOverride)) {
+        (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else {
+        $ChecksumOverride
+    }
+    [System.IO.File]::WriteAllText(
+        "$msiPath.sha256",
+        "$hash *legion-desktop-windows-x64-msi.msi",
+        [System.Text.Encoding]::ASCII
+    )
+    Write-MetadataFile $Dir "windows" "x64" "wix"
+    return $msiPath
+}
+
+# An extraction tree shaped like the one `msiexec /a` produces: a payload
+# directory holding the product executable beside the resources the MSI carries,
+# including a nested one so whole-directory copying is actually exercised.
+function New-StagePayloadTree([string]$Root, [int]$ExecutableCount) {
+    $payload = Join-Path $Root "Legion/Legion"
+    New-Item -ItemType Directory -Force -Path $payload | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload "resources") | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $payload "LICENSE"), "synthetic license`n", [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText((Join-Path $payload "PRIVACY.md"), "synthetic privacy notice`n", [System.Text.Encoding]::ASCII)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $payload "resources/THIRD_PARTY_NOTICES.md"),
+        "synthetic third party notices`n",
+        [System.Text.Encoding]::ASCII
+    )
+    if ($ExecutableCount -ge 1) {
+        [System.IO.File]::WriteAllText((Join-Path $payload "legion-desktop.exe"), "synthetic product payload", [System.Text.Encoding]::ASCII)
+    }
+    if ($ExecutableCount -ge 2) {
+        $second = Join-Path $Root "Legion/Duplicate"
+        New-Item -ItemType Directory -Force -Path $second | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $second "legion-desktop.exe"), "second synthetic product payload", [System.Text.Encoding]::ASCII)
+    }
+    return $payload
+}
+
+function Write-PayloadBinding([string]$PackageDir, [string]$ExecutablePath) {
+    $hash = (Get-FileHash -LiteralPath $ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $name = Split-Path -Leaf $ExecutablePath
+    [System.IO.File]::WriteAllText(
+        (Join-Path $PackageDir "$name.sha256"),
+        "$hash *$name",
+        [System.Text.Encoding]::ASCII
+    )
+}
+
+Invoke-Test "stage script rejects a source under target/debug" {
+    $fixture = New-FixtureDir "stage-target-debug"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "target/debug"
+    New-StagePayloadTree $source 1 | Out-Null
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted a target/debug source: $($run.Output)"
+    Assert-True ($run.Output -match 'Refusing to stage a development build') `
+        "no development-build refusal in output: $($run.Output)"
+    Assert-True ($run.Output -match 'target/debug or target/release') `
+        "refusal does not name the refused directories: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+
+    # The same refusal for the debug directory the packager's own redirected
+    # CARGO_TARGET_DIR would produce, and without -DryRun so the "nothing was
+    # copied" oracle is a real one: a run that refused must still leave no
+    # destination behind on a path where success would have created it.
+    $cargoFixture = New-FixtureDir "stage-cargo-target-debug"
+    $cargoPackageDir = Join-Path $cargoFixture "package"
+    New-StagePackageFixture $cargoPackageDir "" | Out-Null
+    $cargoSource = Join-Path $cargoFixture "target/native-package/cargo-target/debug"
+    New-StagePayloadTree $cargoSource 1 | Out-Null
+    $cargoDestination = Join-Path $cargoFixture "destination"
+    $cargoRun = Invoke-StageScript @(
+        "-PackageDir", $cargoPackageDir,
+        "-StagingSource", $cargoSource,
+        "-DestinationDir", $cargoDestination
+    )
+    Assert-True ($cargoRun.ExitCode -ne 0) `
+        "stage script accepted a cargo-target/debug source: $($cargoRun.Output)"
+    Assert-True ($cargoRun.Output -match 'Refusing to stage a development build') `
+        "no development-build refusal for cargo-target/debug: $($cargoRun.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $cargoDestination)) `
+        "a refused non-dry run created the destination directory"
+}
+
+Invoke-Test "stage script rejects a source under target/release" {
+    $fixture = New-FixtureDir "stage-target-release"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "target/release"
+    New-StagePayloadTree $source 1 | Out-Null
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted a target/release source: $($run.Output)"
+    Assert-True ($run.Output -match 'Refusing to stage a development build') `
+        "no development-build refusal in output: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+
+    # The refusal matches whole path segments, so the verifier's own extraction
+    # root -- target/release-smoke/... -- must still be accepted. Without this
+    # half, a substring check would pass the test above and break every real run.
+    $smokeFixture = New-FixtureDir "stage-target-release-smoke"
+    $smokePackageDir = Join-Path $smokeFixture "package"
+    New-StagePackageFixture $smokePackageDir "" | Out-Null
+    $smokeSource = Join-Path $smokeFixture "target/release-smoke/windows-x64-msi/staging"
+    New-StagePayloadTree $smokeSource 1 | Out-Null
+    $smokeRun = Invoke-StageScript @(
+        "-PackageDir", $smokePackageDir,
+        "-StagingSource", $smokeSource,
+        "-DestinationDir", (Join-Path $smokeFixture "destination"),
+        "-DryRun"
+    )
+    Assert-True ($smokeRun.ExitCode -eq 0) `
+        "target/release-smoke was refused as a development build: $($smokeRun.Output)"
+
+    # scripts/package-native.ps1 redirects CARGO_TARGET_DIR to
+    # target/native-package/cargo-target, so the release build this pipeline
+    # actually produces -- legion-desktop.exe beside LICENSE, PRIVACY.md and
+    # THIRD_PARTY_NOTICES.md -- lands in .../cargo-target/release, not in
+    # target/release. That is the one directory the guard has to catch, and it
+    # runs here without -DryRun so the destination oracle is real.
+    $cargoFixture = New-FixtureDir "stage-cargo-target-release"
+    $cargoPackageDir = Join-Path $cargoFixture "package"
+    New-StagePackageFixture $cargoPackageDir "" | Out-Null
+    $cargoSource = Join-Path $cargoFixture "target/native-package/cargo-target/release"
+    New-StagePayloadTree $cargoSource 1 | Out-Null
+    $cargoDestination = Join-Path $cargoFixture "destination"
+    $cargoRun = Invoke-StageScript @(
+        "-PackageDir", $cargoPackageDir,
+        "-StagingSource", $cargoSource,
+        "-DestinationDir", $cargoDestination
+    )
+    Assert-True ($cargoRun.ExitCode -ne 0) `
+        "stage script accepted a cargo-target/release source: $($cargoRun.Output)"
+    Assert-True ($cargoRun.Output -match 'Refusing to stage a development build') `
+        "no development-build refusal for cargo-target/release: $($cargoRun.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $cargoDestination)) `
+        "a refused non-dry run created the destination directory"
+
+    # A cargo build directory whose parent is named nothing like `target`: the
+    # name rule cannot see it, so the `.fingerprint` marker must.
+    $markerFixture = New-FixtureDir "stage-fingerprint-marker"
+    $markerPackageDir = Join-Path $markerFixture "package"
+    New-StagePackageFixture $markerPackageDir "" | Out-Null
+    $markerSource = Join-Path $markerFixture "out/renamed/release"
+    New-StagePayloadTree $markerSource 1 | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $markerSource ".fingerprint") | Out-Null
+    $markerDestination = Join-Path $markerFixture "destination"
+    $markerRun = Invoke-StageScript @(
+        "-PackageDir", $markerPackageDir,
+        "-StagingSource", $markerSource,
+        "-DestinationDir", $markerDestination
+    )
+    Assert-True ($markerRun.ExitCode -ne 0) `
+        "stage script accepted a .fingerprint-marked release directory: $($markerRun.Output)"
+    Assert-True ($markerRun.Output -match '\.fingerprint marker') `
+        "refusal does not name the cargo build marker: $($markerRun.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $markerDestination)) `
+        "a refused non-dry run created the destination directory"
+}
+
+Invoke-Test "stage script rejects an MSI whose sha256 does not match its sidecar" {
+    $fixture = New-FixtureDir "stage-bad-checksum"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir $zeroHash | Out-Null
+    $source = Join-Path $fixture "extract"
+    New-StagePayloadTree $source 1 | Out-Null
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted a mismatched checksum: $($run.Output)"
+    Assert-True ($run.Output -match 'MSI checksum mismatch') "no checksum mismatch error in output: $($run.Output)"
+    Assert-True ($run.Output -match [regex]::Escape($zeroHash)) "refusal does not name the expected hash: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+}
+
+Invoke-Test "stage script rejects an extraction tree with no legion-desktop.exe" {
+    $fixture = New-FixtureDir "stage-no-executable"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    New-StagePayloadTree $source 0 | Out-Null
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted an extraction tree with no product: $($run.Output)"
+    Assert-True ($run.Output -match 'Expected exactly one legion-desktop\.exe') `
+        "no single-executable assertion in output: $($run.Output)"
+    Assert-True ($run.Output -match 'found 0') "refusal does not report the candidate count: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+}
+
+Invoke-Test "stage script rejects an extraction tree with more than one legion-desktop.exe" {
+    $fixture = New-FixtureDir "stage-two-executables"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    New-StagePayloadTree $source 2 | Out-Null
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted an ambiguous extraction tree: $($run.Output)"
+    Assert-True ($run.Output -match 'Expected exactly one legion-desktop\.exe') `
+        "no single-executable assertion in output: $($run.Output)"
+    Assert-True ($run.Output -match 'found 2') "refusal does not report the candidate count: $($run.Output)"
+    Assert-True ($run.Output -match 'Duplicate') "refusal does not name every candidate: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+}
+
+Invoke-Test "stage script stages the whole payload directory and writes STAGING-EVIDENCE.toml" {
+    $fixture = New-FixtureDir "stage-payload"
+    $packageDir = Join-Path $fixture "package"
+    $msiPath = New-StagePackageFixture $packageDir ""
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination
+    )
+    Assert-True ($run.ExitCode -eq 0) "stage script failed on a valid fixture: $($run.Output)"
+
+    $stagedExecutable = Join-Path $destination "legion-desktop.exe"
+    Assert-True (Test-Path -LiteralPath $stagedExecutable -PathType Leaf) `
+        "legion-desktop.exe was not staged: $($run.Output)"
+    foreach ($expected in @("LICENSE", "PRIVACY.md", "resources/THIRD_PARTY_NOTICES.md")) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $destination $expected) -PathType Leaf) `
+            "payload file $expected was not staged"
+    }
+    $sourceHash = (Get-FileHash -LiteralPath (Join-Path $payload "legion-desktop.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stagedHash = (Get-FileHash -LiteralPath $stagedExecutable -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($stagedHash -eq $sourceHash) "staged executable is not byte-identical to the extracted one"
+
+    $evidencePath = Join-Path $destination "STAGING-EVIDENCE.toml"
+    Assert-True (Test-Path -LiteralPath $evidencePath -PathType Leaf) "STAGING-EVIDENCE.toml was not written"
+    $evidence = Get-Content -LiteralPath $evidencePath -Raw
+    $msiHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($evidence -match "source_msi_sha256 = `"$msiHash`"") "evidence lacks the recomputed MSI hash"
+    Assert-True ($evidence -match "staged_executable_sha256 = `"$stagedHash`"") "evidence lacks the staged executable hash"
+    Assert-True ($evidence -match 'release_version = "0\.0\.1"') "evidence lacks release_version from RELEASE-METADATA.toml"
+    Assert-True ($evidence -match 'git_sha = "0123456789abcdef0123456789abcdef01234567"') "evidence lacks git_sha from RELEASE-METADATA.toml"
+    Assert-True ($evidence -match 'payload_file_count = 4') "evidence does not count all four payload files"
+}
+
+Invoke-Test "stage evidence records signed = false and the exact signing prerequisite" {
+    $fixture = New-FixtureDir "stage-signed-false"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination
+    )
+    Assert-True ($run.ExitCode -eq 0) "stage script failed on a valid fixture: $($run.Output)"
+    $evidence = Get-Content -LiteralPath (Join-Path $destination "STAGING-EVIDENCE.toml") -Raw
+    Assert-True ($evidence -match '(?m)^signed = false$') "evidence does not record signed = false"
+    Assert-True ($evidence -notmatch '(?m)^signed = true$') "evidence claims the artifact is signed"
+    Assert-True ($evidence -match 'signer_status = "unsigned-beta/no-os-code-signing"') `
+        "evidence does not carry signer_status verbatim from RELEASE-METADATA.toml"
+    Assert-True ($evidence.Contains("signing_prerequisite = `"$signingPrerequisite`"")) `
+        "evidence does not carry the exact signing prerequisite string"
+    Assert-True ($evidence -match 'clean_machine_prerequisite = "A clean virtual machine for each supported OS with no prior Legion installation\."') `
+        "evidence does not carry the clean-machine prerequisite"
+}
+
+Invoke-Test "stage script is idempotent across two runs" {
+    $fixture = New-FixtureDir "stage-idempotent"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
+    $destination = Join-Path $fixture "destination"
+    $arguments = @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination
+    )
+
+    $first = Invoke-StageScript $arguments
+    Assert-True ($first.ExitCode -eq 0) "first stage run failed: $($first.Output)"
+    # A file only a stale first run could leave behind: the second run must
+    # replace the destination, not merge into it.
+    [System.IO.File]::WriteAllText((Join-Path $destination "stale-leftover.txt"), "stale`n", [System.Text.Encoding]::ASCII)
+    $firstEvidence = (Get-Content -LiteralPath (Join-Path $destination "STAGING-EVIDENCE.toml") -Raw)
+
+    $second = Invoke-StageScript $arguments
+    Assert-True ($second.ExitCode -eq 0) "second stage run failed: $($second.Output)"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $destination "stale-leftover.txt"))) `
+        "the second run left a stale file in the destination"
+
+    $secondEvidence = (Get-Content -LiteralPath (Join-Path $destination "STAGING-EVIDENCE.toml") -Raw)
+    $normalize = {
+        param([string]$Text)
+        ($Text -split "`n" | Where-Object { -not $_.StartsWith("staged_utc = ") }) -join "`n"
+    }
+    Assert-True ((& $normalize $firstEvidence) -eq (& $normalize $secondEvidence)) `
+        "evidence differs between runs beyond the timestamp"
+    Assert-True ($secondEvidence -match '(?m)^staged_utc = "\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z"$') `
+        "evidence lacks a UTC timestamp"
+
+    $staged = @(Get-ChildItem -LiteralPath $destination -Recurse -File | ForEach-Object { $_.FullName.Substring($destination.Length) } | Sort-Object)
+    Assert-True ($staged.Count -eq 5) "expected four payload files plus STAGING-EVIDENCE.toml; found $($staged.Count): $($staged -join ', ')"
+}
+
+Invoke-Test "stage script rejects a payload whose hash does not match the MSI sidecar" {
+    $fixture = New-FixtureDir "stage-unbound-payload"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    $exe = Join-Path $payload "legion-desktop.exe"
+    Write-PayloadBinding $packageDir $exe
+    [System.IO.File]::WriteAllText($exe, "unrelated product bytes", [System.Text.Encoding]::ASCII)
+    $destination = Join-Path $fixture "destination"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted an unbound payload: $($run.Output)"
+    Assert-True ($run.Output -match 'Staged payload is not the verified MSI content') `
+        "refusal does not name the MSI-to-payload bind: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath $destination)) "a refused run created the destination directory"
+}
+
+Invoke-Test "stage script rejects a destination nested inside the staging source" {
+    $fixture = New-FixtureDir "stage-nested-destination"
+    $packageDir = Join-Path $fixture "package"
+    New-StagePackageFixture $packageDir "" | Out-Null
+    $source = Join-Path $fixture "extract"
+    $payload = New-StagePayloadTree $source 1
+    Write-PayloadBinding $packageDir (Join-Path $payload "legion-desktop.exe")
+    $destination = Join-Path $source "out/package"
+    $run = Invoke-StageScript @(
+        "-PackageDir", $packageDir,
+        "-StagingSource", $source,
+        "-DestinationDir", $destination,
+        "-DryRun"
+    )
+    Assert-True ($run.ExitCode -ne 0) "stage script accepted a nested destination: $($run.Output)"
+    Assert-True ($run.Output -match 'nested inside the source path') `
+        "refusal does not name the nested destination: $($run.Output)"
 }
 
 Write-Host ""

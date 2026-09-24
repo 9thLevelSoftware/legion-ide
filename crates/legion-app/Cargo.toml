@@ -61,6 +61,8 @@ uuid = { workspace = true }
 serde_json = { workspace = true }
 syntect = { workspace = true }
 hex = { workspace = true }
+tar = { workspace = true }
+flate2 = { workspace = true }
 
 # PKT-UPDATER: rename the binary so Windows installer-detection heuristic
 # (which auto-elevates any exe containing "update" in its name) does not

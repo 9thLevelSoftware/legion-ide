@@ -1,0 +1,333 @@
+schema_version = 1
+model = "qwen2.5-coder:14b"
+arm = "governed"
+endpoint = "replay://cassettes"
+recorded_at_utc = "2026-08-19T06:05:52Z"
+suite_fingerprint = "bench-suite-v1:e6ae1f88e5dfbca4"
+cassette_set_hash = "sha256:9a57f6d87cafe596503c55eba381b2a611540a72ba5945f5a2039b1b62cb1cd9"
+
+[[tasks]]
+id = "bench-live-01"
+status = "failed"
+score = 50
+tests_passed = false
+diff_files = 1
+turns = 2
+task_success = true
+tool_calls = 1
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-live-02"
+status = "skipped"
+score = 0
+tests_passed = false
+diff_files = 0
+turns = 0
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-01"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-02"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-03"
+status = "failed"
+score = 54
+tests_passed = true
+diff_files = 0
+turns = 2
+task_success = false
+tool_calls = 1
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-04"
+status = "passed"
+score = 83
+tests_passed = true
+diff_files = 2
+turns = 3
+task_success = true
+tool_calls = 3
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-05"
+status = "skipped"
+score = 0
+tests_passed = false
+diff_files = 0
+turns = 0
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-06"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-07"
+status = "passed"
+score = 87
+tests_passed = true
+diff_files = 1
+turns = 3
+task_success = true
+tool_calls = 2
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-py-08"
+status = "passed"
+score = 90
+tests_passed = true
+diff_files = 1
+turns = 2
+task_success = true
+tool_calls = 1
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-01"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-02"
+status = "skipped"
+score = 0
+tests_passed = false
+diff_files = 0
+turns = 0
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-03"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-04"
+status = "failed"
+score = 48
+tests_passed = false
+diff_files = 0
+turns = 4
+task_success = false
+tool_calls = 10
+duplicate_tool_calls = 0
+retries = 6
+cassette_drift = 3
+
+[[tasks]]
+id = "bench-rust-05"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-06"
+status = "skipped"
+score = 0
+tests_passed = false
+diff_files = 0
+turns = 0
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-07"
+status = "passed"
+score = 87
+tests_passed = true
+diff_files = 1
+turns = 3
+task_success = true
+tool_calls = 2
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-rust-08"
+status = "failed"
+score = 47
+tests_passed = false
+diff_files = 1
+turns = 3
+task_success = true
+tool_calls = 2
+duplicate_tool_calls = 0
+retries = 1
+cassette_drift = 2
+
+[[tasks]]
+id = "bench-ts-01"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-02"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 1
+duplicate_tool_calls = 0
+retries = 1
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-03"
+status = "failed"
+score = 39
+tests_passed = false
+diff_files = 3
+turns = 3
+task_success = true
+tool_calls = 7
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-04"
+status = "failed"
+score = 46
+tests_passed = false
+diff_files = 2
+turns = 2
+task_success = true
+tool_calls = 2
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-05"
+status = "skipped"
+score = 0
+tests_passed = false
+diff_files = 0
+turns = 0
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-06"
+status = "failed"
+score = 57
+tests_passed = false
+diff_files = 0
+turns = 1
+task_success = false
+tool_calls = 0
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+
+[[tasks]]
+id = "bench-ts-07"
+status = "failed"
+score = 50
+tests_passed = false
+diff_files = 1
+turns = 2
+task_success = true
+tool_calls = 1
+duplicate_tool_calls = 0
+retries = 0
+cassette_drift = 0
+

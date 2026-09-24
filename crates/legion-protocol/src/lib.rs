@@ -28,6 +28,8 @@ pub const LEGACY_PRODUCT_ENV_PREFIX: &str = "DEVIL";
 pub mod capability;
 /// Budget caps and audit-step DTOs for the delegated task execution loop.
 pub mod delegate_loop;
+/// Extension catalog projection DTOs for install / update / remove (P7.F2).
+pub mod extensions;
 /// Context manifest structured-assembly helpers.
 pub mod manifest;
 pub mod plan;
@@ -36,10 +38,20 @@ pub mod release_manifest;
 pub mod risk;
 pub mod scope;
 pub mod tools;
+/// DTOs for app-routed shaped visual vertical navigation.
+pub mod visual_navigation;
+
+mod language_toolchain;
+pub use language_toolchain::*;
+pub use visual_navigation::*;
 
 pub use capability::AssistedAiCapabilityMatrix;
 pub use delegate_loop::{
     DelegatedTaskLoopBudget, DelegatedTaskLoopStepKind, DelegatedTaskLoopStepRecord,
+};
+pub use extensions::{
+    ExtensionCatalogEntry, ExtensionInstallState, ExtensionPermissionProjection,
+    ExtensionPermissionState, ExtensionSignatureState,
 };
 pub use manifest::{ContextManifestAssembly, ContextManifestSources};
 pub use plan::{
@@ -91,6 +103,16 @@ pub struct FileId(pub u128);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BufferVersion(pub u64);
+
+/// Which side of a soft-wrapped visual row owns a caret at a shared boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CaretAffinity {
+    /// Prefer the preceding visual row (the compatibility default).
+    #[default]
+    Upstream,
+    /// Prefer the following visual row.
+    Downstream,
+}
 
 /// Canonical file content version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -539,6 +561,18 @@ pub struct ViewportLineMetric {
     pub byte_length: u64,
     /// Total UTF-16 code-unit length for the logical line.
     pub utf16_length: u64,
+    /// Absolute byte offset of the logical line start in the snapshot.
+    ///
+    /// `None` means the producer does not know the snapshot origin; consumers
+    /// must never treat an unknown origin as zero.
+    #[serde(default)]
+    pub line_start_byte_offset: Option<u64>,
+    /// Absolute UTF-16 offset of the logical line start in the snapshot.
+    ///
+    /// `None` means the producer does not know the snapshot origin; consumers
+    /// must never treat an unknown origin as zero.
+    #[serde(default)]
+    pub line_start_utf16_offset: Option<u64>,
     /// Width of the line ending in bytes.
     pub line_ending_width: u8,
     /// Whether the metric is exact rather than estimated.
@@ -646,6 +680,12 @@ pub struct ViewportProjection {
     /// Projected cursor coordinates in render order.
     #[serde(default)]
     pub cursors: Vec<TextCoordinate>,
+    /// Visual row affinity aligned one-for-one with [`Self::cursors`].
+    ///
+    /// Legacy payloads omit this field and therefore mean `Upstream` for each
+    /// projected cursor.
+    #[serde(default)]
+    pub cursor_affinities: Vec<CaretAffinity>,
     /// Scroll offsets.
     pub scroll: ViewportScroll,
     /// Viewport dimensions.
@@ -4110,6 +4150,41 @@ pub struct WorkspaceTextEdit {
     pub preconditions: ProposalVersionPreconditions,
 }
 
+/// Review metadata associated with one or more entries in a workspace edit.
+///
+/// The identifier and text are untrusted human-review metadata. They do not
+/// authorize mutation or carry executable instructions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceEditChangeAnnotation {
+    /// LSP annotation identifier referenced by translated edit entries.
+    pub id: String,
+    /// Short reviewer-facing label.
+    pub label: String,
+    /// Optional reviewer-facing explanation.
+    pub description: Option<String>,
+    /// Whether the source requested explicit confirmation for this annotation.
+    pub needs_confirmation: bool,
+    /// Immutable indices into the containing payload's edit and operation arrays.
+    pub targets: Vec<WorkspaceEditAnnotationTarget>,
+}
+
+/// A workspace-edit entry associated with a change annotation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkspaceEditAnnotationTarget {
+    /// A text edit within a file edit, using payload-local indices.
+    TextEdit {
+        /// Index into [`WorkspaceEditProposalPayload::file_edits`].
+        file_edit_index: u32,
+        /// Index into the selected file edit's `EditBatch`.
+        edit_index: u32,
+    },
+    /// A file operation, using a payload-local index.
+    FileOperation {
+        /// Index into [`WorkspaceEditProposalPayload::file_operations`].
+        operation_index: u32,
+    },
+}
+
 /// File operation inside a proposal-ready workspace edit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileOperation {
@@ -4151,6 +4226,9 @@ pub struct WorkspaceEditProposalPayload {
     pub file_edits: Vec<WorkspaceTextEdit>,
     /// File create/delete/rename operations.
     pub file_operations: Vec<WorkspaceFileOperation>,
+    /// LSP change annotations retained for reviewer-facing semantics.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_annotations: Vec<WorkspaceEditChangeAnnotation>,
     /// Capability required before any mutation may apply.
     pub required_capability: CapabilityId,
     /// Diagnostics explaining proposal translation decisions.
@@ -4585,6 +4663,8 @@ pub enum ProposalPreviewWarningKind {
     RawSourceRedacted,
     /// Runtime implementation is intentionally unsupported in this phase.
     UnsupportedRuntime,
+    /// LSP supplied change annotation requires reviewer attention.
+    ChangeAnnotation,
 }
 
 /// Bounded warning emitted during proposal preview.
@@ -8234,6 +8314,8 @@ pub struct DelegatedTaskProjection {
     pub chat_messages: Vec<DelegatedTaskChatMessage>,
     /// Codebase context citations selected for Delegate chat turns.
     pub context_citations: Vec<DelegatedTaskContextCitation>,
+    /// Provider routes the chat turns in this projection actually used.
+    pub provider_routes: Vec<DelegatedTaskProviderRoute>,
     /// Per-hunk proposal review queues owned by human approval state.
     pub proposal_reviews: Vec<DelegatedTaskProposalReview>,
     /// Tool permission rows for Ask/Write Delegate profiles.
@@ -8263,6 +8345,37 @@ pub enum DelegatedTaskChatRole {
     Assistant,
     /// System or policy-authored Delegate note.
     System,
+}
+
+/// Where a Delegate turn's provider request went, for the person reviewing it.
+///
+/// Metadata only: the destination, the provider that answered, and how the
+/// invocation ended. No prompt, no excerpt, no credential -- the same discipline
+/// as every other projection here, and the reason this can be rendered beside a
+/// transcript.
+///
+/// It exists because a Delegate turn could upload a buffer excerpt while the
+/// surface that ran it retained nothing a reviewer could read about the
+/// destination. Assist carries that evidence in its proposal; this is the same
+/// evidence for the path that has no proposal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DelegatedTaskProviderRoute {
+    /// Stable route identifier, matching the phase-4 audit record.
+    pub route_id: String,
+    /// Provider that was authorized and invoked.
+    pub provider_id: String,
+    /// Model label as the route declared it.
+    pub model_label: String,
+    /// Whether this route carries workspace text off the machine.
+    pub egress_label: String,
+    /// Destination host, without userinfo or path.
+    pub destination_label: String,
+    /// How the invocation ended.
+    pub invocation_state: AssistedAiProviderInvocationState,
+    /// Redaction hints for this route record.
+    pub redaction_hints: Vec<RedactionHint>,
+    /// Route DTO schema version.
+    pub schema_version: u16,
 }
 
 /// Codebase context citation used by Delegate chat and planning surfaces.
@@ -12766,6 +12879,9 @@ pub fn delegated_task_projection_from_plan_contracts(
         tool_permission_request_count: tool_permission_requests.len() as u32,
         chat_messages,
         context_citations,
+        // Filled by the composition layer, which is the only place that knows
+        // where a turn's request went.
+        provider_routes: Vec::new(),
         proposal_reviews,
         tool_permission_requests,
         generated_at,
@@ -16206,6 +16322,10 @@ pub enum LanguageToolingOperationKind {
     InlayHints,
     /// Code lens refresh.
     CodeLens,
+    /// Call-hierarchy callers lookup.
+    IncomingCalls,
+    /// Call-hierarchy callees lookup.
+    OutgoingCalls,
     /// Formatting proposal conversion.
     FormattingProposal,
     /// Rename proposal conversion.
@@ -16286,6 +16406,39 @@ pub struct LanguageQuickFixProjection {
     /// Redaction hints for the row.
     pub redaction_hints: Vec<RedactionHint>,
     /// Quick-fix row schema version.
+    pub schema_version: u16,
+}
+
+/// Metadata-only candidate returned by one live `textDocument/codeAction`
+/// response.  The action identifier is opaque and scoped to `response_id`;
+/// the payload remains app-owned and is never carried in the UI projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageCodeActionProjection {
+    /// Opaque response identity used to reject selections from older results.
+    pub response_id: String,
+    /// Opaque candidate token scoped to `response_id`.
+    pub action_id: String,
+    /// Bounded server-provided display title.
+    pub title: String,
+    /// Optional server-provided action kind.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Whether the server marked this candidate preferred.
+    pub is_preferred: bool,
+    /// Disabled reason, when the server supplied one.
+    #[serde(default)]
+    pub disabled_reason: Option<String>,
+    /// Whether the candidate carries a workspace edit.
+    pub has_edit: bool,
+    /// Whether the candidate carries a command payload.
+    pub has_command: bool,
+    /// Buffer identity used for the request, when the document is open.
+    #[serde(default)]
+    pub buffer_id: Option<BufferId>,
+    /// Snapshot identity used for the request, when known.
+    #[serde(default)]
+    pub snapshot_id: Option<SnapshotId>,
+    /// Candidate row schema version.
     pub schema_version: u16,
 }
 
@@ -16512,113 +16665,20 @@ pub struct LspSessionLogProjection {
     pub schema_version: u16,
 }
 
-/// Projection-only language tooling panel state for the active editor buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LanguageToolingProjection {
-    /// Workspace represented by the projection, when one is open.
-    pub workspace_id: Option<WorkspaceId>,
-    /// Active editor buffer represented by the projection, when one is open.
-    pub buffer_id: Option<BufferId>,
-    /// Active file represented by the projection, when one is open.
-    pub file_id: Option<FileId>,
-    /// High-level projection status.
-    pub status: LanguageToolingStatusKind,
-    /// Bounded metadata-only status message.
-    pub status_message: String,
-    /// Diagnostic/problem rows.
-    pub problems: Vec<LanguageProblemProjection>,
-    /// Quick-fix rows derived from diagnostic/problem rows.
-    pub quick_fixes: Vec<LanguageQuickFixProjection>,
-    /// Breadcrumb rows for the active cursor position.
-    pub breadcrumbs: Vec<LanguageBreadcrumbProjection>,
-    /// Sticky scope rows for the active cursor position.
-    pub sticky_scopes: Vec<LanguageStickyScopeProjection>,
-    /// Inlay hint rows for the active buffer.
-    pub inlay_hints: Vec<LanguageInlayHintProjection>,
-    /// Code lens rows for the active buffer.
-    pub code_lenses: Vec<LanguageCodeLensProjection>,
-    /// Current hover result.
-    pub hover: Option<LanguageHoverProjection>,
-    /// Current completion rows.
-    pub completions: Vec<LanguageCompletionProjection>,
-    /// Current definition locations.
-    pub definitions: Vec<LanguageLocationProjection>,
-    /// Current reference locations.
-    pub references: Vec<LanguageLocationProjection>,
-    /// Current outline rows.
-    pub outline: Vec<LanguageOutlineSymbolProjection>,
-    /// Recent operation status rows.
-    pub operations: Vec<LanguageToolingOperationProjection>,
-    /// Count of stale results discarded before projection.
-    pub stale_result_count: u32,
-    /// Count of cancellation acknowledgements projected.
-    pub cancellation_count: u32,
-    /// Projection generation timestamp.
-    pub generated_at: TimestampMillis,
-    /// Redaction hints for the whole projection.
-    pub redaction_hints: Vec<RedactionHint>,
-    /// Projection schema version.
-    pub schema_version: u16,
-    /// Live LSP server health records for the active workspace (D2).
-    ///
-    /// Populated by `AppComposition::shell_projection_snapshot()` from the
-    /// background `LspSessionHandle`.  Empty when no LSP session is active.
-    /// `lsp_health_rows()` in `legion-desktop` renders these into the
-    /// language tooling status section.
-    #[serde(default)]
-    pub lsp_health_records: Vec<LspServerHealthRecord>,
-    /// LSP session lifecycle status including backoff countdown (PKT-LSP-C T3).
-    ///
-    /// `Some` once a session has been attempted (Starting/Live/BackingOff/
-    /// Refused/Failed); `None` when the session is `Idle` (no startup yet).
-    #[serde(default)]
-    pub lsp_session_status: Option<LspSessionStatusProjection>,
-    /// Redacted ring-buffer projection of the LSP server stderr (PKT-LSP-C T4).
-    ///
-    /// `Some` only when the session is `Live` and the ring contains at least
-    /// one line.  `None` when the session is `Idle`, `Starting`, or failed,
-    /// or when no stderr output has been received yet.
-    #[serde(default)]
-    pub lsp_session_log: Option<LspSessionLogProjection>,
-}
-
-impl LanguageToolingProjection {
-    /// Construct an empty language tooling projection.
-    pub fn empty() -> Self {
-        Self {
-            workspace_id: None,
-            buffer_id: None,
-            file_id: None,
-            status: LanguageToolingStatusKind::Idle,
-            status_message: "Language tooling idle".to_string(),
-            problems: Vec::new(),
-            quick_fixes: Vec::new(),
-            breadcrumbs: Vec::new(),
-            sticky_scopes: Vec::new(),
-            inlay_hints: Vec::new(),
-            code_lenses: Vec::new(),
-            hover: None,
-            completions: Vec::new(),
-            definitions: Vec::new(),
-            references: Vec::new(),
-            outline: Vec::new(),
-            operations: Vec::new(),
-            stale_result_count: 0,
-            cancellation_count: 0,
-            generated_at: TimestampMillis(0),
-            redaction_hints: vec![RedactionHint::MetadataOnly],
-            schema_version: 1,
-            lsp_health_records: Vec::new(),
-            lsp_session_status: None,
-            lsp_session_log: None,
-        }
-    }
-}
-
-impl Default for LanguageToolingProjection {
-    fn default() -> Self {
-        Self::empty()
-    }
+/// Which way a call-hierarchy query was asked.
+///
+/// The rows for both directions are `LanguageLocationProjection`, because a
+/// call is a place in a file like a reference is, and reusing the row type puts
+/// call hierarchy in the panel that already lists locations rather than
+/// requiring a surface of its own. What the row type cannot carry is which
+/// question produced it, and "who calls this" and "what does this call" are
+/// opposite answers that look identical in a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CallHierarchyDirection {
+    /// Callers of the symbol: `callHierarchy/incomingCalls`.
+    Incoming,
+    /// Callees of the symbol: `callHierarchy/outgoingCalls`.
+    Outgoing,
 }
 
 /// High-level terminal panel status.
@@ -17401,6 +17461,8 @@ pub enum LspContractValidationError {
     MissingPrecondition,
     /// Workspace edit did not include complete target coverage.
     IncompleteTargetCoverage,
+    /// Change annotation metadata or target associations were invalid.
+    InvalidChangeAnnotations,
     /// Workspace edit source was not an LSP edit-producing source.
     UnsupportedEditSource,
 }
@@ -17472,6 +17534,51 @@ pub fn convert_lsp_edit_to_workspace_proposal(
 pub fn validate_lsp_edit_proposal_contract(
     input: &LspEditProposalConversionInput,
 ) -> Result<(), LspContractValidationError> {
+    let mut annotation_ids = std::collections::HashSet::new();
+    let mut annotated_targets = std::collections::HashSet::new();
+    let mut annotation_bytes = 0usize;
+    if input.workspace_edit.change_annotations.len() > 256 {
+        return Err(LspContractValidationError::InvalidChangeAnnotations);
+    }
+    for annotation in &input.workspace_edit.change_annotations {
+        annotation_bytes = annotation_bytes
+            .saturating_add(annotation.id.len())
+            .saturating_add(annotation.label.len())
+            .saturating_add(annotation.description.as_ref().map_or(0, String::len));
+        if !annotation_ids.insert(&annotation.id)
+            || annotation.id.len() > 256
+            || annotation.label.len() > 1024
+            || annotation
+                .description
+                .as_ref()
+                .is_some_and(|text| text.len() > 8192)
+            || annotation_bytes > 64 * 1024
+        {
+            return Err(LspContractValidationError::InvalidChangeAnnotations);
+        }
+        for target in &annotation.targets {
+            let (identity, valid) = match target {
+                WorkspaceEditAnnotationTarget::TextEdit {
+                    file_edit_index,
+                    edit_index,
+                } => (
+                    (0, *file_edit_index, *edit_index),
+                    input
+                        .workspace_edit
+                        .file_edits
+                        .get(*file_edit_index as usize)
+                        .is_some_and(|file| (*edit_index as usize) < file.edits.edits.len()),
+                ),
+                WorkspaceEditAnnotationTarget::FileOperation { operation_index } => (
+                    (1, *operation_index, 0),
+                    (*operation_index as usize) < input.workspace_edit.file_operations.len(),
+                ),
+            };
+            if !valid || !annotated_targets.insert(identity) || annotated_targets.len() > 4096 {
+                return Err(LspContractValidationError::InvalidChangeAnnotations);
+            }
+        }
+    }
     if input.request.correlation_id.0 == 0 {
         return Err(LspContractValidationError::ZeroCorrelationId);
     }
@@ -17760,6 +17867,11 @@ pub enum LspCodeActionPayload {
         workspace_edit: WorkspaceEditProposalPayload,
         /// Command descriptor.
         command: LspCommandDescriptor,
+    },
+    /// Deferred action data that must be sent through `codeAction/resolve`.
+    Resolve {
+        /// Opaque server-owned resolve data retained under the app payload budget.
+        data: serde_json::Value,
     },
     /// Disabled action with metadata-only reason.
     Disabled {
@@ -21312,6 +21424,34 @@ pub struct CapabilityRequestContext {
     /// Whether a hard cost cap is enforced for this cloud request.
     #[serde(default)]
     pub cloud_lane_hard_cap_enforced: bool,
+    /// Stable identifier of the AI provider this request would dispatch to.
+    ///
+    /// Signed org policy bundles (P9.F2.T3) match this against the provider
+    /// allowlist. `None` means the caller did not declare a provider, which a
+    /// bundle with an active allowlist treats as a denial rather than a pass.
+    #[serde(default)]
+    pub ai_provider_id: Option<String>,
+    /// MCP server identifier for an MCP tool call.
+    #[serde(default)]
+    pub mcp_server_id: Option<String>,
+    /// MCP tool name for an MCP tool call.
+    #[serde(default)]
+    pub mcp_tool_name: Option<String>,
+    /// Estimated cost of this single request, in cents, for budget-cap checks.
+    #[serde(default)]
+    pub budget_request_cost_cents: Option<u64>,
+    /// Model tokens this single request is estimated to consume.
+    #[serde(default)]
+    pub budget_request_tokens: Option<u64>,
+    /// Cost already spent in the enclosing session, in cents.
+    #[serde(default)]
+    pub budget_session_spent_cents: Option<u64>,
+    /// Retention window, in days, requested for captured raw source.
+    #[serde(default)]
+    pub retention_requested_days: Option<u32>,
+    /// Destination label an export request would write to.
+    #[serde(default)]
+    pub export_destination: Option<String>,
 }
 
 /// Plugin action proposal.
@@ -21957,6 +22097,61 @@ pub struct TrustRecord {
     pub schema_version: u16,
 }
 
+/// Serde default for fields that are absent only in older records.
+pub(crate) fn default_true() -> bool {
+    true
+}
+
+/// Where one canvas node sits, and what it is a node of.
+///
+/// Positions are adapter-local view state in the same category as explorer
+/// expansion: the app owns which buffers are open, the renderer owns where the
+/// person put them. Stored in world coordinates, not screen coordinates, so a
+/// layout survives a different window size.
+///
+/// Keyed by canonical path rather than `BufferId`, because buffer ids are
+/// assigned per session and a layout that forgot its arrangement on every
+/// restart would not be a layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasNode {
+    /// Canonical path of the file this node shows.
+    pub path: CanonicalPath,
+    /// World-space x offset.
+    pub x: f32,
+    /// World-space y offset.
+    pub y: f32,
+    /// Whether a person put the card here, rather than the layout doing it.
+    ///
+    /// The two cases need telling apart and geometry cannot do it. A card the
+    /// layout placed on a default slot may be moved out of a collision freely;
+    /// a card somebody dragged somewhere must never be moved by anything except
+    /// them, even onto another card, because overlapping two cards is a thing
+    /// people do on purpose.
+    ///
+    /// Defaults to `true` for records written before this field existed: an
+    /// arrangement already on disk was arrived at somehow, and treating it as
+    /// deliberate risks leaving two cards overlapping, while treating it as
+    /// automatic risks moving something a person placed. The first is visible
+    /// and fixable by dragging; the second is neither.
+    #[serde(default = "crate::default_true")]
+    pub placed_by_person: bool,
+}
+
+/// A connection the person drew between two canvas nodes.
+///
+/// Deliberately not derived from the code. An edge here means "I say these are
+/// related", which is a different and weaker claim than an import or a call --
+/// and one nothing else in the tree can currently make, since no workspace-wide
+/// index retains import targets. Keeping the two apart means a derived edge can
+/// be added later without silently reinterpreting what a person drew.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionCanvasEdge {
+    /// Canonical path of the node the connection starts at.
+    pub from_path: CanonicalPath,
+    /// Canonical path of the node the connection ends at.
+    pub to_path: CanonicalPath,
+}
+
 /// Persisted session tab record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionTab {
@@ -22090,6 +22285,12 @@ pub struct WorkspaceSessionRecord {
     pub layout_splits: Vec<SessionLayoutSplit>,
     /// Expanded explorer paths.
     pub explorer_expansion: Vec<CanonicalPath>,
+    /// Where the person placed each canvas node, in world coordinates.
+    #[serde(default)]
+    pub canvas_nodes: Vec<SessionCanvasNode>,
+    /// Connections the person drew between canvas nodes.
+    #[serde(default)]
+    pub canvas_edges: Vec<SessionCanvasEdge>,
     /// Panel state.
     pub panel_state: SessionPanelState,
     /// Mode-scoped dock layouts.
@@ -22098,6 +22299,9 @@ pub struct WorkspaceSessionRecord {
     /// Persisted workbench UI settings.
     #[serde(default)]
     pub workbench_settings: WorkbenchSettingsRecord,
+    /// Metadata-only local language toolchain settings.
+    #[serde(default)]
+    pub language_toolchain_settings: LanguageToolchainSettingsRecord,
     /// Durable memory snapshot used to restore workspace memory across restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_snapshot_json: Option<String>,
@@ -24944,6 +25148,25 @@ pub struct LegionCloudLaneProjection {
     pub redaction_hints: Vec<RedactionHint>,
     /// Projection schema version.
     pub schema_version: u16,
+}
+
+impl LegionCloudLaneProjection {
+    /// The projection a shell shows when no Cloud Lane runtime is enabled.
+    ///
+    /// Deliberately not `Default`: an empty projection and a *disabled* one
+    /// look identical in their rows and mean opposite things to a reader, so
+    /// the disabled case says so in its status label.
+    pub fn disabled() -> Self {
+        Self {
+            projection_id: "legion-cloud-lane:disabled".to_string(),
+            runtime_enabled: false,
+            rows: Vec::new(),
+            status_label: "Legion Cloud Lane runtime disabled by policy".to_string(),
+            generated_at: TimestampMillis(0),
+            redaction_hints: vec![RedactionHint::MetadataOnly],
+            schema_version: 1,
+        }
+    }
 }
 
 /// Workflow lifecycle state for Legion orchestration metadata.

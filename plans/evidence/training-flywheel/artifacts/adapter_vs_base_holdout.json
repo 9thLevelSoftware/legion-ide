@@ -1,0 +1,1544 @@
+{
+  "adapter": "target/training-flywheel/adapter",
+  "adapter_scored": {
+    "accuracy": 0.951923,
+    "confusion": {
+      "Accepted": {
+        "Accepted": 47,
+        "Rejected": 2
+      },
+      "Rejected": {
+        "Accepted": 3,
+        "Rejected": 52
+      }
+    },
+    "correct": 99,
+    "example_count": 104,
+    "predicted_counts": {
+      "Accepted": 50,
+      "Rejected": 54
+    },
+    "predictions": [
+      {
+        "example_id": "training-candidate:assist:audit:req-100028:1028:rejected",
+        "logprob_accepted": -2.020648,
+        "logprob_rejected": -0.145648,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100039:1039:rejected",
+        "logprob_accepted": -2.697381,
+        "logprob_rejected": -0.072381,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100052:1052:accepted",
+        "logprob_accepted": -0.006242,
+        "logprob_rejected": -5.256242,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100059:1059:accepted",
+        "logprob_accepted": -0.090503,
+        "logprob_rejected": -2.465503,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100071:1071:accepted",
+        "logprob_accepted": -0.010632,
+        "logprob_rejected": -4.635632,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100080:1080:accepted",
+        "logprob_accepted": -0.003276,
+        "logprob_rejected": -5.878276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100084:1084:accepted",
+        "logprob_accepted": -0.071677,
+        "logprob_rejected": -2.696677,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100103:1103:accepted",
+        "logprob_accepted": -0.090795,
+        "logprob_rejected": -2.465795,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100118:1118:rejected",
+        "logprob_accepted": -0.008749,
+        "logprob_rejected": -4.883749,
+        "predicted": "Accepted",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100132:1132:rejected",
+        "logprob_accepted": -2.932152,
+        "logprob_rejected": -0.057152,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100148:1148:accepted",
+        "logprob_accepted": -0.005821,
+        "logprob_rejected": -5.255821,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100167:1167:accepted",
+        "logprob_accepted": -0.203341,
+        "logprob_rejected": -1.703341,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100176:1176:rejected",
+        "logprob_accepted": -2.24011,
+        "logprob_rejected": -0.11511,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100190:1190:accepted",
+        "logprob_accepted": -0.00201,
+        "logprob_rejected": -6.50201,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100197:1197:rejected",
+        "logprob_accepted": -3.531812,
+        "logprob_rejected": -0.031813,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100209:1209:accepted",
+        "logprob_accepted": -0.002475,
+        "logprob_rejected": -6.252475,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100223:1223:rejected",
+        "logprob_accepted": -2.466952,
+        "logprob_rejected": -0.091952,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100229:1229:rejected",
+        "logprob_accepted": -3.049897,
+        "logprob_rejected": -0.049897,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100242:1242:rejected",
+        "logprob_accepted": -3.652068,
+        "logprob_rejected": -0.027068,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100251:1251:rejected",
+        "logprob_accepted": -3.531981,
+        "logprob_rejected": -0.031981,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100256:1256:rejected",
+        "logprob_accepted": -0.227164,
+        "logprob_rejected": -1.602164,
+        "predicted": "Accepted",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100265:1265:accepted",
+        "logprob_accepted": -0.350251,
+        "logprob_rejected": -1.225251,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100275:1275:accepted",
+        "logprob_accepted": -0.071581,
+        "logprob_rejected": -2.696581,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100287:1287:accepted",
+        "logprob_accepted": -0.080622,
+        "logprob_rejected": -2.580622,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100300:1300:accepted",
+        "logprob_accepted": -0.07156,
+        "logprob_rejected": -2.69656,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100309:1309:rejected",
+        "logprob_accepted": -2.130378,
+        "logprob_rejected": -0.130379,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100316:1316:rejected",
+        "logprob_accepted": -3.050399,
+        "logprob_rejected": -0.050399,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100321:1321:accepted",
+        "logprob_accepted": -0.034717,
+        "logprob_rejected": -3.409717,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100332:1332:rejected",
+        "logprob_accepted": -2.814029,
+        "logprob_rejected": -0.064029,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100354:1354:rejected",
+        "logprob_accepted": -2.81414,
+        "logprob_rejected": -0.06414,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100369:1369:accepted",
+        "logprob_accepted": -0.034607,
+        "logprob_rejected": -3.409606,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100381:1381:rejected",
+        "logprob_accepted": -2.696985,
+        "logprob_rejected": -0.071985,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100392:1392:rejected",
+        "logprob_accepted": -3.050261,
+        "logprob_rejected": -0.050261,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100406:1406:accepted",
+        "logprob_accepted": -2.813845,
+        "logprob_rejected": -0.063845,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100421:1421:accepted",
+        "logprob_accepted": -0.202971,
+        "logprob_rejected": -1.702971,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100432:1432:accepted",
+        "logprob_accepted": -0.008743,
+        "logprob_rejected": -4.883743,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100438:1438:rejected",
+        "logprob_accepted": -2.581926,
+        "logprob_rejected": -0.081926,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100459:1459:accepted",
+        "logprob_accepted": -0.002764,
+        "logprob_rejected": -6.127764,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100469:1469:rejected",
+        "logprob_accepted": -3.531981,
+        "logprob_rejected": -0.031981,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100476:1476:rejected",
+        "logprob_accepted": -2.129946,
+        "logprob_rejected": -0.129946,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100480:1480:accepted",
+        "logprob_accepted": -0.018968,
+        "logprob_rejected": -4.018968,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100488:1488:rejected",
+        "logprob_accepted": -2.581676,
+        "logprob_rejected": -0.081677,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100500:1500:rejected",
+        "logprob_accepted": -2.931679,
+        "logprob_rejected": -0.056679,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100518:1518:rejected",
+        "logprob_accepted": -2.697096,
+        "logprob_rejected": -0.072096,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100533:1533:rejected",
+        "logprob_accepted": -2.931685,
+        "logprob_rejected": -0.056685,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100553:1553:rejected",
+        "logprob_accepted": -2.931674,
+        "logprob_rejected": -0.056673,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100563:1563:accepted",
+        "logprob_accepted": -0.002686,
+        "logprob_rejected": -6.127687,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100580:1580:rejected",
+        "logprob_accepted": -2.129926,
+        "logprob_rejected": -0.129926,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100588:1588:rejected",
+        "logprob_accepted": -3.170546,
+        "logprob_rejected": -0.045546,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100596:1596:accepted",
+        "logprob_accepted": -0.003276,
+        "logprob_rejected": -5.878276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100609:1609:accepted",
+        "logprob_accepted": -0.102461,
+        "logprob_rejected": -2.352461,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100616:1616:accepted",
+        "logprob_accepted": -2.240811,
+        "logprob_rejected": -0.115811,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100624:1624:accepted",
+        "logprob_accepted": -0.003276,
+        "logprob_rejected": -5.878276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100631:1631:accepted",
+        "logprob_accepted": -0.017193,
+        "logprob_rejected": -4.142193,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100646:1646:accepted",
+        "logprob_accepted": -0.162137,
+        "logprob_rejected": -1.912137,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100659:1659:accepted",
+        "logprob_accepted": -0.021546,
+        "logprob_rejected": -3.896546,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100680:1680:rejected",
+        "logprob_accepted": -2.814042,
+        "logprob_rejected": -0.064042,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100691:1691:rejected",
+        "logprob_accepted": -2.814545,
+        "logprob_rejected": -0.064545,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100701:1701:accepted",
+        "logprob_accepted": -0.002807,
+        "logprob_rejected": -6.127808,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100715:1715:rejected",
+        "logprob_accepted": -3.050227,
+        "logprob_rejected": -0.050227,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100730:1730:rejected",
+        "logprob_accepted": -2.46644,
+        "logprob_rejected": -0.09144,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100745:1745:rejected",
+        "logprob_accepted": -2.352717,
+        "logprob_rejected": -0.102717,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100755:1755:accepted",
+        "logprob_accepted": -0.161941,
+        "logprob_rejected": -1.911941,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100761:1761:rejected",
+        "logprob_accepted": -2.240618,
+        "logprob_rejected": -0.115618,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100770:1770:rejected",
+        "logprob_accepted": -3.653209,
+        "logprob_rejected": -0.028209,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100778:1778:accepted",
+        "logprob_accepted": -0.031067,
+        "logprob_rejected": -3.531067,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100784:1784:rejected",
+        "logprob_accepted": -2.581266,
+        "logprob_rejected": -0.081266,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100793:1793:rejected",
+        "logprob_accepted": -2.813893,
+        "logprob_rejected": -0.063893,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100799:1799:rejected",
+        "logprob_accepted": -2.814021,
+        "logprob_rejected": -0.064021,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100806:1806:rejected",
+        "logprob_accepted": -2.931634,
+        "logprob_rejected": -0.056634,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100823:1823:accepted",
+        "logprob_accepted": -0.128508,
+        "logprob_rejected": -2.128508,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100842:1842:rejected",
+        "logprob_accepted": -3.531812,
+        "logprob_rejected": -0.031813,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100849:1849:accepted",
+        "logprob_accepted": -0.063739,
+        "logprob_rejected": -2.813739,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100870:1870:rejected",
+        "logprob_accepted": -3.050374,
+        "logprob_rejected": -0.050374,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100876:1876:accepted",
+        "logprob_accepted": -0.012096,
+        "logprob_rejected": -4.512095,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100890:1890:accepted",
+        "logprob_accepted": -0.128657,
+        "logprob_rejected": -2.128657,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100901:1901:accepted",
+        "logprob_accepted": -0.0078,
+        "logprob_rejected": -5.007801,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100916:1916:rejected",
+        "logprob_accepted": -2.580827,
+        "logprob_rejected": -0.080827,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100928:1928:rejected",
+        "logprob_accepted": -2.697618,
+        "logprob_rejected": -0.072618,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100947:1947:accepted",
+        "logprob_accepted": -0.008749,
+        "logprob_rejected": -4.883749,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100958:1958:accepted",
+        "logprob_accepted": -0.007769,
+        "logprob_rejected": -5.007769,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100968:1968:rejected",
+        "logprob_accepted": -2.697787,
+        "logprob_rejected": -0.072787,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100980:1980:accepted",
+        "logprob_accepted": -0.010586,
+        "logprob_rejected": -4.635586,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100991:1991:rejected",
+        "logprob_accepted": -2.46681,
+        "logprob_rejected": -0.09181,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101001:2001:rejected",
+        "logprob_accepted": -3.409621,
+        "logprob_rejected": -0.034622,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101010:2010:accepted",
+        "logprob_accepted": -0.129245,
+        "logprob_rejected": -2.129245,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101027:2027:rejected",
+        "logprob_accepted": -2.58119,
+        "logprob_rejected": -0.08119,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101037:2037:rejected",
+        "logprob_accepted": -2.352961,
+        "logprob_rejected": -0.102961,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101045:2045:rejected",
+        "logprob_accepted": -2.466689,
+        "logprob_rejected": -0.091689,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101054:2054:accepted",
+        "logprob_accepted": -0.071581,
+        "logprob_rejected": -2.696581,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101062:2062:rejected",
+        "logprob_accepted": -2.58119,
+        "logprob_rejected": -0.08119,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101073:2073:rejected",
+        "logprob_accepted": -3.050077,
+        "logprob_rejected": -0.050077,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101078:2078:rejected",
+        "logprob_accepted": -2.931505,
+        "logprob_rejected": -0.056505,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101091:2091:accepted",
+        "logprob_accepted": -0.31497,
+        "logprob_rejected": -1.31497,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101100:2100:accepted",
+        "logprob_accepted": -0.02433,
+        "logprob_rejected": -3.77433,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101113:2113:accepted",
+        "logprob_accepted": -0.144299,
+        "logprob_rejected": -2.019299,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101120:2120:accepted",
+        "logprob_accepted": -0.009789,
+        "logprob_rejected": -4.759789,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101131:2131:rejected",
+        "logprob_accepted": -3.169369,
+        "logprob_rejected": -0.04437,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101137:2137:accepted",
+        "logprob_accepted": -0.010403,
+        "logprob_rejected": -4.635403,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101146:2146:accepted",
+        "logprob_accepted": -0.162506,
+        "logprob_rejected": -1.912506,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101156:2156:rejected",
+        "logprob_accepted": -3.652068,
+        "logprob_rejected": -0.027068,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101161:2161:rejected",
+        "logprob_accepted": -2.240303,
+        "logprob_rejected": -0.115303,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101176:2176:rejected",
+        "logprob_accepted": -0.283288,
+        "logprob_rejected": -1.408288,
+        "predicted": "Accepted",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101194:2194:accepted",
+        "logprob_accepted": -0.203489,
+        "logprob_rejected": -1.703489,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      }
+    ]
+  },
+  "base": {
+    "accuracy": 0.596154,
+    "confusion": {
+      "Accepted": {
+        "Accepted": 9,
+        "Rejected": 40
+      },
+      "Rejected": {
+        "Accepted": 2,
+        "Rejected": 53
+      }
+    },
+    "correct": 62,
+    "example_count": 104,
+    "predicted_counts": {
+      "Accepted": 11,
+      "Rejected": 93
+    },
+    "predictions": [
+      {
+        "example_id": "training-candidate:assist:audit:req-100028:1028:rejected",
+        "logprob_accepted": -6.34045,
+        "logprob_rejected": -5.77795,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100039:1039:rejected",
+        "logprob_accepted": -5.477229,
+        "logprob_rejected": -5.164729,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100052:1052:accepted",
+        "logprob_accepted": -5.71902,
+        "logprob_rejected": -5.34402,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100059:1059:accepted",
+        "logprob_accepted": -5.877327,
+        "logprob_rejected": -5.627327,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100071:1071:accepted",
+        "logprob_accepted": -5.610848,
+        "logprob_rejected": -5.235848,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100080:1080:accepted",
+        "logprob_accepted": -5.547276,
+        "logprob_rejected": -5.547276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100084:1084:accepted",
+        "logprob_accepted": -5.692727,
+        "logprob_rejected": -5.317727,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100103:1103:accepted",
+        "logprob_accepted": -5.735697,
+        "logprob_rejected": -5.485697,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100118:1118:rejected",
+        "logprob_accepted": -5.908108,
+        "logprob_rejected": -5.908108,
+        "predicted": "Accepted",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100132:1132:rejected",
+        "logprob_accepted": -5.812078,
+        "logprob_rejected": -5.499578,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100148:1148:accepted",
+        "logprob_accepted": -6.0296,
+        "logprob_rejected": -5.7171,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100167:1167:accepted",
+        "logprob_accepted": -5.623964,
+        "logprob_rejected": -5.561464,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100176:1176:rejected",
+        "logprob_accepted": -6.235093,
+        "logprob_rejected": -5.985093,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100190:1190:accepted",
+        "logprob_accepted": -5.810688,
+        "logprob_rejected": -5.498188,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100197:1197:rejected",
+        "logprob_accepted": -5.631203,
+        "logprob_rejected": -5.068703,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100209:1209:accepted",
+        "logprob_accepted": -5.821085,
+        "logprob_rejected": -5.383585,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100223:1223:rejected",
+        "logprob_accepted": -5.559185,
+        "logprob_rejected": -5.121685,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100229:1229:rejected",
+        "logprob_accepted": -6.179714,
+        "logprob_rejected": -5.929714,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100242:1242:rejected",
+        "logprob_accepted": -5.986601,
+        "logprob_rejected": -5.861601,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100251:1251:rejected",
+        "logprob_accepted": -5.700918,
+        "logprob_rejected": -5.200918,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100256:1256:rejected",
+        "logprob_accepted": -5.658482,
+        "logprob_rejected": -5.658482,
+        "predicted": "Accepted",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100265:1265:accepted",
+        "logprob_accepted": -5.747207,
+        "logprob_rejected": -5.497207,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100275:1275:accepted",
+        "logprob_accepted": -5.801387,
+        "logprob_rejected": -5.676387,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100287:1287:accepted",
+        "logprob_accepted": -5.741762,
+        "logprob_rejected": -5.429262,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100300:1300:accepted",
+        "logprob_accepted": -5.648875,
+        "logprob_rejected": -5.336375,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100309:1309:rejected",
+        "logprob_accepted": -5.811187,
+        "logprob_rejected": -5.686187,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100316:1316:rejected",
+        "logprob_accepted": -5.962242,
+        "logprob_rejected": -5.587242,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100321:1321:accepted",
+        "logprob_accepted": -5.566926,
+        "logprob_rejected": -5.504426,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100332:1332:rejected",
+        "logprob_accepted": -5.880643,
+        "logprob_rejected": -5.130643,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100354:1354:rejected",
+        "logprob_accepted": -5.981831,
+        "logprob_rejected": -5.419331,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100369:1369:accepted",
+        "logprob_accepted": -5.542895,
+        "logprob_rejected": -5.542895,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100381:1381:rejected",
+        "logprob_accepted": -5.955595,
+        "logprob_rejected": -5.268095,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100392:1392:rejected",
+        "logprob_accepted": -5.973948,
+        "logprob_rejected": -5.473948,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100406:1406:accepted",
+        "logprob_accepted": -5.901424,
+        "logprob_rejected": -5.088924,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100421:1421:accepted",
+        "logprob_accepted": -5.477911,
+        "logprob_rejected": -4.977911,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100432:1432:accepted",
+        "logprob_accepted": -5.76059,
+        "logprob_rejected": -5.82309,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100438:1438:rejected",
+        "logprob_accepted": -5.503934,
+        "logprob_rejected": -5.253934,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100459:1459:accepted",
+        "logprob_accepted": -6.154212,
+        "logprob_rejected": -6.029212,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100469:1469:rejected",
+        "logprob_accepted": -5.700918,
+        "logprob_rejected": -5.200918,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100476:1476:rejected",
+        "logprob_accepted": -6.235502,
+        "logprob_rejected": -5.548002,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100480:1480:accepted",
+        "logprob_accepted": -5.496453,
+        "logprob_rejected": -5.433953,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100488:1488:rejected",
+        "logprob_accepted": -5.509875,
+        "logprob_rejected": -5.259875,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100500:1500:rejected",
+        "logprob_accepted": -5.942207,
+        "logprob_rejected": -5.442207,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100518:1518:rejected",
+        "logprob_accepted": -6.093706,
+        "logprob_rejected": -5.781206,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100533:1533:rejected",
+        "logprob_accepted": -5.75228,
+        "logprob_rejected": -4.93978,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100553:1553:rejected",
+        "logprob_accepted": -6.038321,
+        "logprob_rejected": -5.600821,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100563:1563:accepted",
+        "logprob_accepted": -5.91777,
+        "logprob_rejected": -5.66777,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100580:1580:rejected",
+        "logprob_accepted": -5.550434,
+        "logprob_rejected": -5.425434,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100588:1588:rejected",
+        "logprob_accepted": -5.719528,
+        "logprob_rejected": -5.219528,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100596:1596:accepted",
+        "logprob_accepted": -5.547276,
+        "logprob_rejected": -5.547276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100609:1609:accepted",
+        "logprob_accepted": -6.13721,
+        "logprob_rejected": -5.94971,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100616:1616:accepted",
+        "logprob_accepted": -5.445847,
+        "logprob_rejected": -5.383347,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100624:1624:accepted",
+        "logprob_accepted": -5.547276,
+        "logprob_rejected": -5.547276,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100631:1631:accepted",
+        "logprob_accepted": -6.092323,
+        "logprob_rejected": -5.842323,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100646:1646:accepted",
+        "logprob_accepted": -5.829331,
+        "logprob_rejected": -5.766831,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100659:1659:accepted",
+        "logprob_accepted": -5.694045,
+        "logprob_rejected": -5.631545,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100680:1680:rejected",
+        "logprob_accepted": -5.816209,
+        "logprob_rejected": -5.253709,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100691:1691:rejected",
+        "logprob_accepted": -5.818559,
+        "logprob_rejected": -5.631059,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100701:1701:accepted",
+        "logprob_accepted": -6.107349,
+        "logprob_rejected": -5.919849,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100715:1715:rejected",
+        "logprob_accepted": -5.960721,
+        "logprob_rejected": -5.335721,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100730:1730:rejected",
+        "logprob_accepted": -5.821061,
+        "logprob_rejected": -5.258561,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100745:1745:rejected",
+        "logprob_accepted": -6.199942,
+        "logprob_rejected": -5.449942,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100755:1755:accepted",
+        "logprob_accepted": -5.628773,
+        "logprob_rejected": -5.628773,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100761:1761:rejected",
+        "logprob_accepted": -5.613352,
+        "logprob_rejected": -5.550852,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100770:1770:rejected",
+        "logprob_accepted": -5.890631,
+        "logprob_rejected": -5.265631,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100778:1778:accepted",
+        "logprob_accepted": -5.603245,
+        "logprob_rejected": -5.165745,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100784:1784:rejected",
+        "logprob_accepted": -6.042665,
+        "logprob_rejected": -5.605165,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100793:1793:rejected",
+        "logprob_accepted": -6.15485,
+        "logprob_rejected": -5.59235,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100799:1799:rejected",
+        "logprob_accepted": -6.040498,
+        "logprob_rejected": -5.540498,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100806:1806:rejected",
+        "logprob_accepted": -6.011355,
+        "logprob_rejected": -5.261355,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100823:1823:accepted",
+        "logprob_accepted": -5.461362,
+        "logprob_rejected": -5.273862,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100842:1842:rejected",
+        "logprob_accepted": -5.631203,
+        "logprob_rejected": -5.068703,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100849:1849:accepted",
+        "logprob_accepted": -5.708867,
+        "logprob_rejected": -5.396367,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100870:1870:rejected",
+        "logprob_accepted": -5.891582,
+        "logprob_rejected": -5.391582,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100876:1876:accepted",
+        "logprob_accepted": -5.661095,
+        "logprob_rejected": -5.723595,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100890:1890:accepted",
+        "logprob_accepted": -5.898351,
+        "logprob_rejected": -5.773351,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100901:1901:accepted",
+        "logprob_accepted": -5.760027,
+        "logprob_rejected": -5.760027,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100916:1916:rejected",
+        "logprob_accepted": -5.971041,
+        "logprob_rejected": -5.783541,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100928:1928:rejected",
+        "logprob_accepted": -5.737625,
+        "logprob_rejected": -5.362625,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100947:1947:accepted",
+        "logprob_accepted": -5.908108,
+        "logprob_rejected": -5.908108,
+        "predicted": "Accepted",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100958:1958:accepted",
+        "logprob_accepted": -5.813348,
+        "logprob_rejected": -5.750848,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100968:1968:rejected",
+        "logprob_accepted": -5.622718,
+        "logprob_rejected": -5.310218,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100980:1980:accepted",
+        "logprob_accepted": -5.643223,
+        "logprob_rejected": -5.205723,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-100991:1991:rejected",
+        "logprob_accepted": -5.39105,
+        "logprob_rejected": -5.14105,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101001:2001:rejected",
+        "logprob_accepted": -5.982721,
+        "logprob_rejected": -5.857721,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101010:2010:accepted",
+        "logprob_accepted": -6.079979,
+        "logprob_rejected": -5.892479,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101027:2027:rejected",
+        "logprob_accepted": -6.075243,
+        "logprob_rejected": -5.762743,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101037:2037:rejected",
+        "logprob_accepted": -5.75707,
+        "logprob_rejected": -5.50707,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101045:2045:rejected",
+        "logprob_accepted": -6.121617,
+        "logprob_rejected": -5.559117,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101054:2054:accepted",
+        "logprob_accepted": -5.801387,
+        "logprob_rejected": -5.676387,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101062:2062:rejected",
+        "logprob_accepted": -6.075243,
+        "logprob_rejected": -5.762743,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101073:2073:rejected",
+        "logprob_accepted": -5.969111,
+        "logprob_rejected": -5.656611,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101078:2078:rejected",
+        "logprob_accepted": -6.170889,
+        "logprob_rejected": -5.920889,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101091:2091:accepted",
+        "logprob_accepted": -5.733084,
+        "logprob_rejected": -5.420584,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101100:2100:accepted",
+        "logprob_accepted": -5.738157,
+        "logprob_rejected": -5.613157,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101113:2113:accepted",
+        "logprob_accepted": -5.541208,
+        "logprob_rejected": -5.416208,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101120:2120:accepted",
+        "logprob_accepted": -5.876532,
+        "logprob_rejected": -5.751532,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101131:2131:rejected",
+        "logprob_accepted": -5.999954,
+        "logprob_rejected": -5.812454,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101137:2137:accepted",
+        "logprob_accepted": -5.941807,
+        "logprob_rejected": -5.754307,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101146:2146:accepted",
+        "logprob_accepted": -6.158763,
+        "logprob_rejected": -5.971263,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101156:2156:rejected",
+        "logprob_accepted": -5.986601,
+        "logprob_rejected": -5.861601,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101161:2161:rejected",
+        "logprob_accepted": -6.232978,
+        "logprob_rejected": -5.545478,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101176:2176:rejected",
+        "logprob_accepted": -5.569134,
+        "logprob_rejected": -5.256634,
+        "predicted": "Rejected",
+        "truth": "Rejected"
+      },
+      {
+        "example_id": "training-candidate:assist:audit:req-101194:2194:accepted",
+        "logprob_accepted": -5.74169,
+        "logprob_rejected": -5.67919,
+        "predicted": "Rejected",
+        "truth": "Accepted"
+      }
+    ]
+  },
+  "base_model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "consent_manifest": "target\\training-flywheel\\export_manifest.json",
+  "consent_manifest_sha256": "6a712b715e7dec0c1b9facac824fb44e9c7771a08d9dda6d41bc4b88d55d76fb",
+  "consent_provenance": {
+    "candidate_count": 419,
+    "corpus_fingerprint": "training-corpus-v1:4a94ac94e158dc9b",
+    "corpus_id": "consented-accept-reject-v1",
+    "dataset_fingerprint": "training-adapter-v1:35266a657f6d67f4",
+    "legion_bench_comparison": {
+      "baseline_accepted_rate_bp": 6666,
+      "baseline_id": "legion-bench-v0",
+      "baseline_suite_fingerprint": "bench-suite-v1:bd2aa3a7d84d9485",
+      "corpus_fingerprint": "training-corpus-v1:4a94ac94e158dc9b",
+      "dataset_accepted_rate_bp": 4343,
+      "dataset_fingerprint": "training-adapter-v1:35266a657f6d67f4",
+      "delta_bp": -2323,
+      "regressed": true,
+      "schema_version": 1
+    },
+    "prompt_template_version": "legion-consented-decision-v1",
+    "retained_consent_states": {
+      "Granted": 212,
+      "NotRequired": 207
+    },
+    "skipped_non_terminal_count": 29,
+    "skipped_unconsented_count": 752,
+    "source_trace_count": 1200
+  },
+  "dataset": "target\\training-flywheel\\holdout.jsonl",
+  "dataset_sha256": "8a8913503f8f073001271c470ad4f331c36bc1abff0f7623fd22bdc65981742f",
+  "delta_accuracy": 0.355769,
+  "majority_class_baseline": {
+    "accuracy": 0.528846,
+    "counts": {
+      "Accepted": 49,
+      "Rejected": 55
+    },
+    "label": "Rejected"
+  },
+  "quantization": "nf4-double-bf16-compute",
+  "schema_version": 1,
+  "split": "holdout",
+  "wall_seconds": 29.133
+}

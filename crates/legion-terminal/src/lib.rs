@@ -36,6 +36,7 @@ use legion_protocol::{
     validate_terminal_kill_request, validate_terminal_launch_policy_contract,
     validate_terminal_output_chunk, validate_terminal_resize,
 };
+use legion_security::{ScanPosture, redact_secrets_in_text};
 use thiserror::Error;
 
 static TERMINAL_SESSION_COUNTER: AtomicU64 = AtomicU64::new(10_000);
@@ -368,6 +369,14 @@ pub struct TerminalRuntimeLaunchRequest {
     pub command: String,
     /// Command arguments selected by policy-owned caller.
     pub args: Vec<String>,
+    /// Directory to spawn the PTY in.
+    ///
+    /// `None` inherits the platform default, which is the *process* working
+    /// directory -- whatever directory the app was launched from. For an IDE
+    /// that is the wrong answer: a terminal opened against an open project
+    /// should start in that project, or `cargo test` runs somewhere else
+    /// entirely.
+    pub cwd: Option<std::path::PathBuf>,
     /// Explicit environment for the PTY child process.
     ///
     /// `None` = inherit the sanitised parent env (backward-compatible default for
@@ -653,14 +662,14 @@ impl<P: PtyService> TerminalRuntime<P> {
         // output limit is applied to projections, and a deadline is derived from
         // the policy timeout so it is enforced during polling.
         //
-        // NOTE: `policy.cwd_policy` is a descriptive label only. This boundary
-        // receives no concrete working-directory path (the launch request and
-        // the policy contract carry no path), so the runtime cannot enforce a
-        // cwd here. Forwarding an actual directory requires a path field added by
-        // the policy-owning caller in `legion-protocol`/`legion-app`, which is
-        // outside this crate. The PTY is therefore spawned in the platform
-        // default cwd; this is documented to avoid mistaking validation for
-        // enforcement.
+        // `policy.cwd_policy` remains a descriptive label; `request.cwd` is the
+        // concrete path. Until that field existed this boundary received no
+        // directory at all and the PTY spawned in the process working
+        // directory, so a terminal opened against a project started wherever
+        // the app happened to be launched from. The label validated something
+        // the runtime could not enforce, which the previous note said plainly
+        // rather than papering over.
+        let requested_cwd = request.cwd.clone();
         let effective_limit = request
             .policy
             .output_byte_limit
@@ -672,7 +681,7 @@ impl<P: PtyService> TerminalRuntime<P> {
             .spawn_pty(&PtyRequest {
                 command: request.command,
                 args: request.args,
-                cwd: None,
+                cwd: requested_cwd,
                 env: request.env,
             })
             .map_err(|err| TerminalRuntimeError::Backend {
@@ -1291,8 +1300,24 @@ fn missing_session_error(session_id: TerminalSessionId) -> TerminalRuntimeError 
     }
 }
 
+/// Redact credentials from terminal output and bound it to `limit` bytes.
+///
+/// Two passes run in order. [`redact_secrets`] below is the original hand-rolled
+/// pass and is kept as-is so its exact, already-proven behaviour on
+/// `Authorization:` headers and `NAME=value` assignments is preserved. The shared
+/// [`legion_security::redact_secrets_in_text`] pass then removes the credential
+/// shapes that pass has no rule for — AWS key ids, GitHub and Slack tokens, JWTs,
+/// PEM headers, URL-embedded credentials.
+///
+/// The posture is [`ScanPosture::DisplayPrecision`]: this text is rendered into a
+/// terminal pane a person is reading. The entropy heuristic is deliberately not
+/// applied here, because blanking a base64 blob or a build hash out of somebody's
+/// terminal is how a redaction marker becomes something users learn to ignore.
+/// Terminal text that is later forwarded to a model or persisted passes through
+/// an egress-posture boundary, which does apply the heuristic.
 fn redact_terminal_projection(output: &str, limit: u64) -> String {
-    let mut projected = redact_secrets(output);
+    let mut projected =
+        redact_secrets_in_text(&redact_secrets(output), ScanPosture::DisplayPrecision).text;
     let limit = limit as usize;
     if projected.len() > limit {
         let mut end = limit;
@@ -1684,6 +1709,7 @@ mod tests {
                 policy: policy(),
                 command: "bash".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("launch");
@@ -1755,6 +1781,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             }),
             Err(TerminalRuntimeError::Disabled)
@@ -1772,6 +1799,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("launch");
@@ -1790,6 +1818,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("launch");
@@ -1802,6 +1831,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1819,6 +1849,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1874,6 +1905,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1898,6 +1930,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1929,6 +1962,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1964,6 +1998,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -1995,6 +2030,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2016,6 +2052,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2066,6 +2103,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2108,6 +2146,7 @@ mod tests {
                 },
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             }),
             Err(TerminalRuntimeError::Denied { .. })
@@ -2127,6 +2166,7 @@ mod tests {
                 },
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2143,6 +2183,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2169,6 +2210,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2207,6 +2249,7 @@ mod tests {
                 policy: policy(),
                 command: "test".to_string(),
                 args: vec![],
+                cwd: None,
                 env: None,
             })
             .expect("native launch");
@@ -2252,5 +2295,38 @@ mod tests {
         // No false positives on ordinary text.
         let clean = redact_terminal_projection("hello world output", 4096);
         assert_eq!(clean, "hello world output");
+    }
+
+    /// Re-exported rather than re-implemented: four crates grew their own
+    /// copy of this generator, each with a different seed, so none was
+    /// authoritative. See `legion_security::synthetic_credentials`.
+    use legion_security::synthetic_credentials::synthetic_access_key_id;
+
+    #[test]
+    fn terminal_projection_redacts_credentials_the_marker_pass_cannot_see() {
+        // An AWS access key id matches none of the hand-rolled pass's prefixes,
+        // header forms, or assignment keywords. Before the shared ruleset was
+        // wired in it reached the terminal pane verbatim.
+        let key_id = synthetic_access_key_id();
+
+        let projected =
+            redact_terminal_projection(&format!("aws sts get-caller-identity {key_id}"), 4096);
+
+        assert!(!projected.contains(key_id.as_str()));
+        assert!(projected.contains("[redacted]"));
+        assert!(projected.starts_with("aws sts get-caller-identity "));
+    }
+
+    #[test]
+    fn terminal_projection_keeps_high_entropy_build_output_readable() {
+        // DisplayPrecision posture: the entropy heuristic must not blank a build
+        // hash out of a pane somebody is reading. Over-redaction here is what
+        // teaches users to ignore `[redacted]`.
+        let digest = "9f2c4a7b1e6d3058af1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071";
+        let line = format!("Finished release [optimized] target(s) sha256:{digest}");
+
+        let projected = redact_terminal_projection(&line, 4096);
+
+        assert_eq!(projected, line);
     }
 }

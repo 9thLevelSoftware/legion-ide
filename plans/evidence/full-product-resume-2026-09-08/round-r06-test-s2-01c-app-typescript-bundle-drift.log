@@ -1,0 +1,16 @@
+CMD: cargo test -p legion-app --test typescript_bundle_drift -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
+     Running tests\typescript_bundle_drift.rs (target\debug\deps\typescript_bundle_drift-5b7ea37b66467126.exe)
+
+running 2 tests
+test pinned_compiler_node_minimum_diverges_between_legion_lsp_and_legion_app ... ok
+test pinned_language_server_node_minimum_is_22_22_2_in_both_crates ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+END
+EXIT=0

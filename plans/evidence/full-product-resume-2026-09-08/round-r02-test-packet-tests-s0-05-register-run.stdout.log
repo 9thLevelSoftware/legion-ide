@@ -1,0 +1,7 @@
+implementation status counts:
+  absent: 43
+  implemented: 143
+  partial: 233
+acceptance status counts:
+  unassessed: 419
+EXIT=1

@@ -17,9 +17,33 @@ use legion_app::language::{
     LanguageSessionError, RustAnalyzerDiscovery, RustAnalyzerLaunchConfig, RustAnalyzerSession,
     is_stale_response,
 };
-use legion_protocol::{LanguageId, LanguageServerId, LspResultStatus, SnapshotId};
+use legion_protocol::{
+    BufferId, BufferVersion, CancellationTokenId, CausalityId, CorrelationId, FileId, LanguageId,
+    LanguageServerId, LspOperationContext, LspRequestId, LspResultStatus, SemanticPrivacyScope,
+    SnapshotId, WorkspaceId,
+};
+use uuid::Uuid;
 
 mod lsp_mock;
+
+fn fixture_context(snapshot_id: SnapshotId) -> LspOperationContext {
+    LspOperationContext {
+        request_id: LspRequestId(Uuid::now_v7()),
+        workspace_id: WorkspaceId(7),
+        file_id: FileId(11),
+        buffer_id: BufferId(13),
+        snapshot_id,
+        buffer_version: BufferVersion(1),
+        language_id: LanguageId("rust".to_string()),
+        correlation_id: CorrelationId(7),
+        causality_id: CausalityId(Uuid::now_v7()),
+        timeout_ms: 5_000,
+        cancellation_token: CancellationTokenId(Uuid::now_v7()),
+        content_hash: None,
+        privacy_scope: SemanticPrivacyScope::Workspace,
+        schema_version: 1,
+    }
+}
 
 #[test]
 fn completion_request_returns_well_formed_result() {
@@ -48,7 +72,12 @@ fn completion_request_returns_well_formed_result() {
         "position": { "line": 0, "character": 0 }
     });
     let outcome = session
-        .request_read("textDocument/completion", params, SnapshotId(0))
+        .request_read_with_context(
+            "textDocument/completion",
+            params,
+            SnapshotId(0),
+            Some(fixture_context(SnapshotId(0))),
+        )
         .expect("request_read should succeed against the mock server");
 
     // The result must be valid JSON (object, array, or null — all valid LSP completion responses).
@@ -89,7 +118,12 @@ fn request_read_issued_snapshot_matches_passed_snapshot() {
         "position": { "line": 0, "character": 0 }
     });
     let outcome = session
-        .request_read("textDocument/completion", params, request_snapshot)
+        .request_read_with_context(
+            "textDocument/completion",
+            params,
+            request_snapshot,
+            Some(fixture_context(request_snapshot)),
+        )
         .expect("request_read should succeed");
 
     assert_eq!(
@@ -128,7 +162,12 @@ fn stale_snapshot_gate_exercises_issued_snapshot_from_real_read() {
         "position": { "line": 0, "character": 0 }
     });
     let outcome = session
-        .request_read("textDocument/hover", params, issued)
+        .request_read_with_context(
+            "textDocument/hover",
+            params,
+            issued,
+            Some(fixture_context(issued)),
+        )
         .expect("request_read should succeed against the mock server");
 
     // D1: issued_snapshot now equals the snapshot we passed.
@@ -199,7 +238,12 @@ fn request_read_while_unavailable_returns_typed_error() {
         "position": { "line": 0, "character": 0 }
     });
     let err = session
-        .request_read("textDocument/completion", params, SnapshotId(0))
+        .request_read_with_context(
+            "textDocument/completion",
+            params,
+            SnapshotId(0),
+            Some(fixture_context(SnapshotId(0))),
+        )
         .expect_err("request_read must fail while session is Unavailable");
 
     assert!(
@@ -241,7 +285,7 @@ fn pull_diagnostics_full_report_parses_and_synthesizes_publish_params() {
 
     let uri = "file:///workspace/src/lib.rs";
     let pulled = session
-        .pull_diagnostics(uri)
+        .pull_diagnostics_with_context(uri, fixture_context(SnapshotId(0)))
         .expect("pull_diagnostics should succeed against the mock server");
     assert!(pulled.kind_full, "mock answers with a kind=full report");
     assert_eq!(pulled.total_count, 1);

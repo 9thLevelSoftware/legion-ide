@@ -1,5 +1,45 @@
 # Legion-Bench raw baseline and raw-vs-governed comparison (P9.F1.T4)
 
+## 2026-08-19: the raw baseline is now frozen, replayable and re-checked
+
+The item this file left open — "re-measure the local models on the repaired
+corpus" — is closed for the 14B, and the baseline is no longer a number written
+down in a document.
+
+Measured on the current 25-task corpus (20 executed, 5 holdout), suite
+fingerprint `bench-suite-v1:e6ae1f88e5dfbca4`, with **qwen2.5-coder:14b**
+through Ollama at `http://127.0.0.1:11434/v1` under `LEGION_AI_GOVERNORS=off`:
+
+| | raw | governed |
+| --- | ---: | ---: |
+| suite gate | **0 / 20** | 4 / 20 |
+| `task_success` (edited the right files, cleanly applied) | **0 / 20** | 9 / 20 |
+| tasks where the model made any tool call | **0 / 20** | 12 / 20 |
+| tool calls | **0 on every task** | 0-5 per task |
+| turns | 1 on every task | 1-5 per task |
+| cassette-set hash | `sha256:44f1711a…4d9af0352b` | `sha256:9a57f6d8…1b62cb1cd9` |
+
+The shape this file described on the superseded 13-task corpus reproduces
+exactly on the repaired one: **the raw arm is a deterministic zero**, for the
+transport reason documented below — the model emits no structured tool call, so
+an ungoverned provider sees prose and an ended turn.
+
+What is new is that both arms are now **frozen as replayable cassettes**
+(`evals/legion-bench/recorded-raw/` and `evals/legion-bench/recorded/`), hashed
+into a committed baseline, and replayed and verified on every pull request.
+A run no longer needs a model installed, and the raw baseline cannot drift
+without a red gate. Every cassette records its arm and a replay refuses a tape
+from the other one, so the ungoverned baseline cannot be measured with the
+governed loop by accident.
+
+Design, mutation proofs and limits:
+`plans/evidence/production/BENCH/recorded-execution-gate-v1.md`.
+
+Still open from the "Next" list below: more runs before any percentage is
+quoted, the 7B re-measurement, and the three-transport comparison on the 14B.
+
+---
+
 Date: 2026-08-15. Roadmap Phase 0.6 / Phase 2 exit criterion.
 Models: **qwen2.5-coder:7b** (Q4_K_M, 4.7 GB, local), **qwen2.5-coder:14b**
 (Q4_K_M, 9.0 GB, local) and **deepseek-v4-flash:0731-cloud** (Ollama Cloud),

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-rust-03",
+  "model": "qwen2.5-coder:14b",
+  "arm": "governed",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:aca9b4092ad46029",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "{\n  \"name\": \"create\",\n  \"arguments\": {\n    \"path\": \"tests/value_bool.rs\",\n    \"replacement\": \"// tests/value_bool.rs\\n\\n#[test]\\nfn test_value_as_bool() {\\n    use miniconf::Value;\\n\\n    let true_values = vec!['\\\"true\\\"', '\\\"yes\\\"', '\\\"on\\\"', '\\\"Yes\\\"', '\\\"TRUE\\\"'];\\n    for val in true_values {\\n        assert_eq!(Value::new(val).as_bool(), Some(true));\\n    }\\n\\n    let false_values = vec!['\\\"false\\\"', '\\\"no\\\"', '\\\"off\\\"', '\\\"No\\\"', '\\\"FALSE\\\"'];\\n    for val in false_values {\\n        assert_eq!(Value::new(val).as_bool(), Some(false));\\n    }\\n\\n    let unrecognized_values = vec!['\\\"maybe\\\"', '\\\"\\\"'];\\n    for val in unrecognized_values {\\n        assert_eq!(Value::new(val).as_bool(), None);\\n    }\\n}\"\n  }\n}",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119020,
+        "id": "chatcmpl-504",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 222,
+          "prompt_tokens": 711,
+          "total_tokens": 933
+        }
+      }
+    }
+  ]
+}

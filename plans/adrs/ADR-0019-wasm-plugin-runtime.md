@@ -1,14 +1,17 @@
 # ADR-0019: WASM Plugin Runtime Boundary
 
-Status: Accepted — with an open supply-chain debt against the Wasmtime clause below
+Status: Accepted — the Wasmtime clause below is superseded by ADR-0050
 Date: 2026-05-25
 
-> **Debt recorded 2026-08-05.** The "future Wasmtime/WASI engine" clause in
-> *Consequences* requires supply-chain review before the engine is added.
-> Wasmtime is already a workspace dependency of `legion-plugin` and backs
-> `WasmPluginHost`; no ADR authorizes it and `plans/dependency-policy.md` does
-> not list it. See `plans/evidence/production/W0-truth-reconciliation/W0-7-wasmtime-adr-debt.md`.
-> Backlog card `P7.F1.T1` clears this and gates the rest of P7.
+> **Debt recorded 2026-08-05, cleared 2026-08-19.** The "future Wasmtime/WASI
+> engine" clause in *Consequences* required supply-chain review before the
+> engine was added; the engine was added first (`236a492`, 2026-07-01) and the
+> review was not performed at the time. That review is now recorded in
+> `plans/adrs/ADR-0050-wasmtime-runtime-ratification.md`, which supersedes the
+> clause, ratifies `wasmtime` explicitly, and adds a standing `check-deps` gate
+> so the dependency cannot outlive its authorization.
+> See `plans/evidence/production/W0-truth-reconciliation/W0-7-wasmtime-adr-debt.md`
+> for the original finding. Backlog card `P7.F1.T1` cleared this.
 
 ## Context
 
@@ -31,3 +34,5 @@ Observability uses existing event envelope validation and metadata-only redactio
 ## Consequences
 
 The Phase 5 runtime slice can be tested without granting host authority or adding app/UI ownership edges. A future Wasmtime/WASI engine may be added only after supply-chain review and evidence proves equivalent no-ambient-authority behavior.
+
+**Superseded by ADR-0050 (2026-08-19)** for the engine question only. Wasmtime is ratified; the supply-chain review and the no-ambient-authority evidence this paragraph demanded are recorded there. WASI remains unauthorized: `wasmtime-wasi` is not a workspace dependency and admitting one requires a further ADR. Every other decision in this ADR stands unchanged.

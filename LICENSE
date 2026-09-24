@@ -1,0 +1,18 @@
+Legion IDE
+Copyright (c) 2026 9thLevelSoftware / Legion.
+
+This software and associated documentation files (the "Software") are
+proprietary. All rights reserved.
+
+The Software is not open source and is not licensed under any Open Source
+Initiative (OSI) approved license. You may not redistribute, sublicense,
+publicly distribute, or treat the Software as permissively licensed except
+under a separate written distribution agreement with the copyright holder.
+
+The Cargo workspace sets `license = "Proprietary"` and `publish = false`.
+Source in this repository is provided for internal development and review
+only.
+
+See `docs/PRIVACY.md` for the product privacy posture,
+`THIRD_PARTY_NOTICES.md` for third-party notices, and `CONTRIBUTING.md`
+for contribution terms.

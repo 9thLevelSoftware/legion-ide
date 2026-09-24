@@ -1,0 +1,18 @@
+   Compiling legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+   Compiling legion-agent v0.1.0 (D:\legion-ide-completion\crates\legion-agent)
+   Compiling legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+   Compiling legion-plugin v0.1.0 (D:\legion-ide-completion\crates\legion-plugin)
+   Compiling legion-terminal v0.1.0 (D:\legion-ide-completion\crates\legion-terminal)
+   Compiling legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 55.17s
+     Running tests\typescript_toolchain_settings.rs (target\debug\deps\typescript_toolchain_settings-c50d782526dea8fd.exe)
+
+running 4 tests
+test invalid_input_is_atomic_and_untrusted_workspace_is_rejected ... ok
+test explicit_reconfigure_reconfirms_unsupported_saved_schema ... ok
+test configure_toolchain_maps_all_typescript_family_adapters_and_persists_metadata ... ok
+test restore_keeps_draft_without_regrant_and_clear_preserves_dirty_buffer ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+EXIT=0

@@ -1,31 +1,31 @@
-//! M0 performance-harness skeleton (WS18.T1).
+//! Performance-harness report shape, in-process skeletons, and budget
+//! classification.
 //!
-//! The full WS18.T1 implementation will exercise the Legion editor, indexer,
-//! and protocol layers across the reference workloads described in
-//! `plans/legion-production-master-plan-v0.2.md` quality bars (input-to-paint p50/p95,
-//! scroll jank, startup, memory ceiling on the Legion repo, 100K-file fixture,
-//! 100MB file). The M0 acceptance is a **skeleton** that lands in CI, emits a
-//! dashboard report, and demonstrates a failing-gate. The full per-OS
-//! reference workloads remain owned by WS18.T1's follow-on work and depend on
-//! the streaming-mode (WS01.T7) and AccessKit (WS18.T2) substrates.
+//! The reference workloads named in
+//! `plans/legion-production-master-plan-v0.2.md` — input-to-paint p50/p95,
+//! scroll jank, startup, memory ceiling, the Legion repo, the 100K-file
+//! fixture, and the 100MB file — are all measured against real product code as
+//! of P8.F4.T1. They do not live here, because `xtask` may not depend on
+//! `legion-app`/`legion-editor` (`check-deps` enforces that): they live in
+//! product-crate binaries that this harness spawns, and the results come back
+//! through [`crate::perf_workloads`] (`legion-app --bin product_perf`),
+//! [`run_renderer_backed_large_file_measurement`] and
+//! [`run_renderer_backed_manual_measurement`] (`legion-desktop --manual-perf`).
 //!
-//! Scope of this module:
-//!   * Plan a deterministic skeleton: one synthetic "input-to-paint" hot
-//!     path (a small text edit loop) executed against an in-memory byte
-//!     buffer, with a configurable sample count.
-//!   * Run the plan, capture p50/p95/total as `Duration` values, classify
-//!     each measurement against a per-skeleton budget.
-//!   * Write a `perf_report.toml` describing the measurements + summary
-//!     (total/passed/failed/skipped). This file is the M0 "dashboard".
-//!   * Expose a `--fail-on-budget <N>` (env override) so a CI leg can
-//!     demonstrate the failing-gate by tightening the budget below the
-//!     measured value.
+//! What still runs in-process here:
+//!   * Two synthetic tripwires — an input-to-paint byte-walk and a line-galley
+//!     shaping-cache model — kept because they need no subprocess and no
+//!     display, and marked `synthetic_stand_in = true` in the report so nobody
+//!     mistakes them for product measurements.
+//!   * Two real-stack workloads `xtask`'s allowed dependencies can reach: a
+//!     `legion_text::TextBuffer` memory guardrail and a 50K-file search-stream
+//!     throughput scan through `legion-project`'s real search stack.
+//!   * The report shape, the budget classification, and the
+//!     `LEGION_PERF_FAIL_ON_BUDGET_MS` report-only override that hosted CI
+//!     legs use so shared-runner timing noise cannot red a PR.
 //!
-//! The skeleton does not require `legion-editor` as a dependency; the
-//! in-process hot path is a stand-in for the editor input-to-paint loop
-//! and is the only substrate the M0 CI matrix owns. Real editor / indexer
-//! / protocol benchmarks (the post-M0 WS18.T1 follow-on) will replace
-//! this stand-in without changing the report shape.
+//! `plans/evidence/perf-harness-trend/` holds the archived trend entries and
+//! the regression baseline; see [`crate::perf_trend`].
 
 use std::{
     collections::HashMap,
@@ -63,6 +63,8 @@ const SEARCH_STREAM_50K_BUDGET_MILLIS: u64 = 0;
 const LARGE_FILE_100MB_BUDGET_MILLIS: u64 = MANUAL_RENDERER_KEYPRESS_P50_BUDGET_MILLIS;
 pub const PERF_REPORT_FILE: &str = "perf_report.toml";
 pub const MANUAL_RENDERER_PERF_REPORT_FILE: &str = "manual_renderer_perf.toml";
+pub const LARGE_FILE_MANUAL_RENDERER_PERF_REPORT_FILE: &str =
+    "large_file_manual_renderer_perf.toml";
 
 /// Environment variable that, when set to a positive millisecond count,
 /// overrides the per-skeleton budget. Used by the failing-gate CI leg.
@@ -101,14 +103,14 @@ pub enum SkeletonKind {
     /// only the visible viewport rows looked up/shaped per frame.
     #[serde(rename = "line_galley_shaping_cache", alias = "linegalleyshapingcache")]
     LineGalleyShapingCache,
-    /// Real 100MB large-file measurement supplied by the `large_file_perf`
-    /// subprocess.
+    /// Real 100MB large-file measurement supplied by the
+    /// `legion-desktop --manual-perf` subprocess.
     ///
     /// Every other large-file number this harness reports is a synthetic
     /// stand-in, because `xtask` cannot depend on `legion-editor`. This one
-    /// opens an actual 100MB file through the streaming path and measures
-    /// typing in it, which is the question that decides whether large files
-    /// are usable rather than merely openable.
+    /// opens an actual 100MB file through the desktop renderer path and
+    /// measures typing and scrolling in it, which is the question that decides
+    /// whether large files are usable rather than merely openable.
     #[serde(rename = "large_file_100mb", alias = "largefile100mb")]
     LargeFile100Mb,
     /// Renderer-backed Manual editor input-to-paint measurement supplied by
@@ -125,6 +127,13 @@ pub enum SkeletonKind {
     /// latency.  Fixture is generated at runtime and cleaned up after.
     #[serde(rename = "search_stream_50k", alias = "searchstream50k")]
     SearchStream50K,
+    /// Real product workload supplied by the `legion-app --bin product_perf`
+    /// subprocess: startup, input-to-paint, scroll, memory ceiling, the Legion
+    /// repository, and the 100K-file fixture. One variant covers all six
+    /// because they share a transport and a report shape; the row's `name`
+    /// says which workload it is.
+    #[serde(rename = "product_workload", alias = "productworkload")]
+    ProductWorkload,
 }
 
 impl SkeletonKind {
@@ -136,7 +145,24 @@ impl SkeletonKind {
             Self::MemoryCeiling1MB => "memory_ceiling_1mb",
             Self::SearchStream50K => "search_stream_50k",
             Self::LargeFile100Mb => "large_file_100mb",
+            Self::ProductWorkload => "product_workload",
         }
+    }
+
+    /// Whether this kind measures a synthetic stand-in rather than a product
+    /// code path.
+    ///
+    /// The two that remain are honest about what they are: the input-to-paint
+    /// microbenchmark is a byte-walk over an in-memory buffer, and the
+    /// line-galley skeleton models a shaping cache without a font stack. Both
+    /// were stand-ins for workloads that now have real measurements
+    /// (`product_workload`, `renderer_backed_manual_input_to_paint`), and they
+    /// are kept only as cheap, host-independent tripwires.
+    pub fn is_synthetic_stand_in(self) -> bool {
+        matches!(
+            self,
+            Self::InputToPaintMicrobenchmark | Self::LineGalleyShapingCache
+        )
     }
 }
 
@@ -284,6 +310,34 @@ pub struct SkeletonMeasurement {
     pub budget_millis: u64,
     pub status: SkeletonStatus,
     pub message: String,
+    /// Whether a measurement actually happened.
+    ///
+    /// `SkeletonStatus::Skipped` cannot distinguish "the budget is
+    /// report-only" from "the measurement never ran", and those two need
+    /// different reactions: the first is a policy choice, the second is a
+    /// workload that quietly stopped existing. `verify-perf-harness` fails on
+    /// `measured = false` regardless of budget strictness, which is what keeps
+    /// a per-OS CI job from silently dropping a workload (P8.F4.T2).
+    #[serde(default = "default_measured")]
+    pub measured: bool,
+    /// Result for workloads whose metric is bytes rather than time (the memory
+    /// ceiling). Zero for time-valued rows. A separate field rather than
+    /// overloading `total_micros`, so the field name matches its unit.
+    #[serde(default)]
+    pub bytes_value: u64,
+    /// Whether this row is a synthetic stand-in rather than a product path.
+    ///
+    /// Surfaced in the report because P8.F4.T1's acceptance is about product
+    /// workloads: a reader must be able to see, without reading xtask's
+    /// source, which rows describe the real editor and which do not.
+    #[serde(default)]
+    pub synthetic_stand_in: bool,
+}
+
+/// Reports written before the `measured` field existed recorded only real
+/// measurements, so absence means "measured".
+fn default_measured() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,12 +379,32 @@ pub struct PerfReport {
     /// full OS reference workloads remain WS18.T1 follow-on. Not a product UX proof.
     #[serde(default = "default_workload_kind")]
     pub workload_kind: String,
+    /// Which OS produced this report. Archived per run so the three CI jobs'
+    /// artifacts cannot be confused for one another, and so a report that was
+    /// uploaded from the wrong job is visible rather than plausible.
+    #[serde(default = "unknown_host")]
+    pub os: String,
+    #[serde(default = "unknown_host")]
+    pub arch: String,
     pub summary: PerfSummary,
     pub skeletons: Vec<SkeletonMeasurement>,
 }
 
 fn default_workload_kind() -> String {
     "skeleton".to_string()
+}
+
+fn unknown_host() -> String {
+    "unknown".to_string()
+}
+
+/// Host OS/arch of the process writing the report.
+pub fn host_os() -> &'static str {
+    std::env::consts::OS
+}
+
+pub fn host_arch() -> &'static str {
+    std::env::consts::ARCH
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -377,6 +451,29 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
             skeleton.fixture_bytes,
             skeleton.sample_count,
         ),
+        SkeletonKind::ProductWorkload => {
+            // Product workloads are never planned from a descriptor; they come
+            // back whole from the `product_perf` subprocess. Reaching here
+            // means someone added one to the descriptor list, so say so
+            // instead of inventing a measurement.
+            return SkeletonMeasurement {
+                name: skeleton.name.clone(),
+                kind: skeleton.kind,
+                fixture_bytes: skeleton.fixture_bytes,
+                sample_count: skeleton.sample_count,
+                total_micros: 0,
+                p50_micros: 0,
+                p95_micros: 0,
+                budget_millis: skeleton.budget_millis,
+                status: SkeletonStatus::Skipped,
+                message: "product workloads are supplied by the legion-app product_perf \
+                          subprocess, not planned from a descriptor"
+                    .to_string(),
+                measured: false,
+                bytes_value: 0,
+                synthetic_stand_in: false,
+            };
+        }
         SkeletonKind::LargeFile100Mb => {
             // Supplied by the `large_file_perf` subprocess, for the same
             // reason the renderer measurement is: this harness cannot depend
@@ -394,6 +491,12 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
                 status: SkeletonStatus::Skipped,
                 message: "100MB large-file measurement is supplied by the legion-app subprocess"
                     .to_string(),
+                // A planned placeholder, not a measurement: the subprocess
+                // replaces this row before the report is written, and if it
+                // does not, `measured = false` is exactly the signal wanted.
+                measured: false,
+                bytes_value: 0,
+                synthetic_stand_in: false,
             };
         }
         SkeletonKind::RendererBackedManualInputToPaint => {
@@ -410,6 +513,9 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
                 message:
                     "renderer-backed Manual measurement is supplied by legion-desktop subprocess"
                         .to_string(),
+                measured: false,
+                bytes_value: 0,
+                synthetic_stand_in: false,
             };
         }
     };
@@ -453,6 +559,9 @@ pub fn plan_perf_harness(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
         budget_millis: skeleton.budget_millis,
         status,
         message,
+        measured: true,
+        bytes_value: 0,
+        synthetic_stand_in: skeleton.kind.is_synthetic_stand_in(),
     }
 }
 
@@ -595,6 +704,13 @@ fn run_memory_ceiling_1mb(fixture_bytes: usize) -> SkeletonMeasurement {
         budget_millis: 0,
         status,
         message,
+        measured: true,
+        // Real `legion_text::TextBuffer`, but a generated document. The
+        // product-path memory ceiling against a real file on disk is
+        // `p8.memory_ceiling`; this one survives as the cheap guardrail that
+        // does not need a subprocess.
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -660,6 +776,9 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
             budget_millis: skeleton.budget_millis,
             status: SkeletonStatus::Skipped,
             message: format!("fixture creation failed ({file_count} files): {err}"),
+            measured: false,
+            bytes_value: 0,
+            synthetic_stand_in: false,
         };
     }
 
@@ -694,6 +813,9 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
                 budget_millis: skeleton.budget_millis,
                 status: SkeletonStatus::Skipped,
                 message: format!("workspace open failed: {err}"),
+                measured: false,
+                bytes_value: 0,
+                synthetic_stand_in: false,
             };
         }
     };
@@ -713,6 +835,9 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
                 budget_millis: skeleton.budget_millis,
                 status: SkeletonStatus::Skipped,
                 message: format!("search pattern build failed: {err}"),
+                measured: false,
+                bytes_value: 0,
+                synthetic_stand_in: false,
             };
         }
     };
@@ -783,6 +908,11 @@ fn run_search_stream_50k(skeleton: &SkeletonDescriptor) -> SkeletonMeasurement {
         // LEGION_PERF_FAIL_ON_BUDGET_MS at runtime) to activate the gate.
         status: classify_skeleton_status(scan_elapsed, skeleton.budget()),
         message,
+        measured: true,
+        // Generated fixture, but the real product search stack: streaming
+        // walker, native filesystem/watcher, deny-by-default broker.
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -810,6 +940,8 @@ pub fn plan_m0_skeletons(
         measured_at_utc: current_utc_rfc3339(),
         git_sha: git_sha.to_string(),
         workload_kind: default_workload_kind(),
+        os: host_os().to_string(),
+        arch: host_arch().to_string(),
         summary,
         skeletons,
     }
@@ -828,6 +960,8 @@ pub fn plan_perf_skeletons(
         measured_at_utc: current_utc_rfc3339(),
         git_sha: git_sha.to_string(),
         workload_kind: default_workload_kind(),
+        os: host_os().to_string(),
+        arch: host_arch().to_string(),
         summary,
         skeletons: measurements,
     }
@@ -905,6 +1039,51 @@ pub fn manual_renderer_perf_measurement(report: &ManualRendererPerfToml) -> Skel
         } else {
             report.message.clone()
         },
+        // The subprocess reports "skipped" when the host has no renderer; that
+        // is a measurement that did not happen, not a report-only budget.
+        measured: report.status != "skipped",
+        bytes_value: 0,
+        synthetic_stand_in: false,
+    }
+}
+
+pub fn large_file_manual_renderer_perf_measurement(
+    report: &ManualRendererPerfToml,
+    fixture_bytes: usize,
+    budget_millis: u64,
+) -> SkeletonMeasurement {
+    let p50_micros = report.keypress_p50_micros;
+    let p95_micros = report.keypress_p95_micros.max(report.scroll_p95_micros);
+    let status = if report.status == "skipped" {
+        SkeletonStatus::Skipped
+    } else if report.status == "passed" && p50_micros <= budget_millis.saturating_mul(1_000) {
+        SkeletonStatus::Passed
+    } else {
+        SkeletonStatus::Failed
+    };
+    let message = if report.message.trim().is_empty() {
+        format!(
+            "renderer-backed 100MB file: status={} keypress_p50={}us scroll_p95={}us",
+            report.status, p50_micros, report.scroll_p95_micros
+        )
+    } else {
+        format!("renderer-backed 100MB file: {}", report.message)
+    };
+
+    SkeletonMeasurement {
+        name: "m9.large_file_100mb".to_string(),
+        kind: SkeletonKind::LargeFile100Mb,
+        fixture_bytes,
+        sample_count: report.sample_count,
+        total_micros: p50_micros.saturating_add(report.scroll_p95_micros),
+        p50_micros,
+        p95_micros,
+        budget_millis,
+        status,
+        message,
+        measured: report.status != "skipped",
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -997,19 +1176,27 @@ pub fn apply_fail_on_budget_override(skeleton: &mut SkeletonDescriptor) {
 /// ignored, leaving the descriptor budget unchanged. An explicit `0`
 /// disables the gate (report-only) just like setting the budget to `0`.
 pub fn apply_fail_on_budget_value(skeleton: &mut SkeletonDescriptor, value: &str) {
+    // GAP-09.2: renderer-backed paint rows keep their own budgets even when
+    // hosted CI sets `LEGION_PERF_FAIL_ON_BUDGET_MS=0` for synthetic m0/m1.
+    if matches!(
+        skeleton.kind,
+        SkeletonKind::RendererBackedManualInputToPaint | SkeletonKind::LargeFile100Mb
+    ) {
+        return;
+    }
     let Ok(parsed) = value.trim().parse::<u64>() else {
         return;
     };
     skeleton.budget_millis = parsed;
 }
 
-/// Applies the [`FAIL_ON_BUDGET_ENV`] override to the renderer-backed Manual
-/// measurement. Unlike the descriptor-driven skeletons (which flow through
-/// [`apply_fail_on_budget_override`] before classification), this measurement
-/// is derived from the desktop manual-perf report with its own internal
-/// budgets, so without this hook the env override silently does not apply —
-/// hosted CI running report-only (`0`) would still fail the step on a shared
-/// runner's timing noise.
+/// Applies the [`FAIL_ON_BUDGET_ENV`] override to a measurement that did not
+/// flow through a [`SkeletonDescriptor`].
+///
+/// GAP-09.2: renderer-backed paint rows (`manual.renderer_input_to_paint` and
+/// `m9.large_file_100mb`) ignore this override, matching product workloads.
+/// Hosted `LEGION_PERF_FAIL_ON_BUDGET_MS=0` stays for synthetic m0/m1 noise
+/// only. A renderer budget miss must fail the gate.
 pub fn apply_fail_on_budget_to_manual_measurement(measurement: &mut SkeletonMeasurement) {
     let Ok(value) = std::env::var(FAIL_ON_BUDGET_ENV) else {
         return;
@@ -1017,18 +1204,22 @@ pub fn apply_fail_on_budget_to_manual_measurement(measurement: &mut SkeletonMeas
     apply_fail_on_budget_value_to_manual_measurement(measurement, &value);
 }
 
-/// Value-based twin of [`apply_fail_on_budget_to_manual_measurement`] so
-/// tests can exercise the override without mutating process-global
-/// environment state. Semantics mirror [`apply_fail_on_budget_value`]:
-/// non-numeric values are ignored; `0` means report-only (a budget failure is
-/// reclassified as Skipped, measured numbers preserved); a non-zero value
-/// re-gates the measured p95 against the override budget in milliseconds.
-/// Measurements already Skipped (environment-blocked placeholders) are left
-/// untouched.
+/// Value-based twin of [`apply_fail_on_budget_to_manual_measurement`].
+///
+/// Renderer-backed kinds ignore the override. Other kinds: non-numeric values
+/// are ignored; `0` means report-only (a budget failure is reclassified as
+/// Skipped, measured numbers preserved); a non-zero value re-gates p95 against
+/// the override in milliseconds. Already-Skipped placeholders are untouched.
 pub fn apply_fail_on_budget_value_to_manual_measurement(
     measurement: &mut SkeletonMeasurement,
     value: &str,
 ) {
+    if matches!(
+        measurement.kind,
+        SkeletonKind::RendererBackedManualInputToPaint | SkeletonKind::LargeFile100Mb
+    ) {
+        return;
+    }
     let Ok(parsed) = value.trim().parse::<u64>() else {
         return;
     };
@@ -1163,6 +1354,111 @@ pub fn run_renderer_backed_manual_measurement(
     }
 }
 
+pub fn run_renderer_backed_large_file_measurement(
+    workspace_root: &Path,
+    out_dir: &Path,
+    initial_file: &Path,
+    fixture_bytes: usize,
+    budget_millis: u64,
+) -> SkeletonMeasurement {
+    let report_path = out_dir.join(LARGE_FILE_MANUAL_RENDERER_PERF_REPORT_FILE);
+    match fs::remove_file(&report_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return placeholder_large_file_manual_measurement(
+                SkeletonStatus::Failed,
+                fixture_bytes,
+                budget_millis,
+                format!(
+                    "unable to clear stale report `{}`: {err}",
+                    report_path.display()
+                ),
+            );
+        }
+    }
+
+    let sample_count = MANUAL_RENDERER_SAMPLE_COUNT.to_string();
+    let output = std::process::Command::new("cargo")
+        .current_dir(workspace_root)
+        .args([
+            "run",
+            "--release",
+            "-p",
+            "legion-desktop",
+            "--no-default-features",
+            "--features",
+            "offline",
+            "--",
+            "--manual-perf",
+            "--workspace",
+        ])
+        .arg(workspace_root)
+        .args(["--file"])
+        .arg(initial_file)
+        .args(["--perf-report"])
+        .arg(&report_path)
+        .args(["--perf-samples", &sample_count])
+        .output();
+
+    match output {
+        Err(err) => placeholder_large_file_manual_measurement(
+            SkeletonStatus::Skipped,
+            fixture_bytes,
+            budget_millis,
+            format!("unable to spawn renderer-backed desktop subprocess: {err}"),
+        ),
+        Ok(output) => match read_manual_renderer_perf_report(&report_path) {
+            Ok(report) => {
+                large_file_manual_renderer_perf_measurement(&report, fixture_bytes, budget_millis)
+            }
+            Err(read_err) => {
+                let output_text = subprocess_output_text(&output);
+                let status = if !output.status.success()
+                    && (manual_renderer_environment_blocked(&output_text)
+                        || manual_renderer_build_failed(&output_text))
+                {
+                    SkeletonStatus::Skipped
+                } else {
+                    SkeletonStatus::Failed
+                };
+                placeholder_large_file_manual_measurement(
+                    status,
+                    fixture_bytes,
+                    budget_millis,
+                    format!(
+                        "renderer-backed 100MB report unavailable: {read_err}{}",
+                        command_output_suffix(&output_text)
+                    ),
+                )
+            }
+        },
+    }
+}
+
+pub fn placeholder_large_file_manual_measurement(
+    status: SkeletonStatus,
+    fixture_bytes: usize,
+    budget_millis: u64,
+    message: String,
+) -> SkeletonMeasurement {
+    SkeletonMeasurement {
+        name: "m9.large_file_100mb".to_string(),
+        kind: SkeletonKind::LargeFile100Mb,
+        fixture_bytes,
+        sample_count: MANUAL_RENDERER_SAMPLE_COUNT,
+        total_micros: 0,
+        p50_micros: 0,
+        p95_micros: 0,
+        budget_millis,
+        status,
+        message,
+        measured: false,
+        bytes_value: 0,
+        synthetic_stand_in: false,
+    }
+}
+
 /// Build a placeholder measurement for the renderer-backed manual skeleton
 /// when the subprocess cannot run or its report cannot be read.
 pub fn placeholder_manual_measurement(
@@ -1181,6 +1477,9 @@ pub fn placeholder_manual_measurement(
         budget_millis: budgets.keypress_p95_millis.max(budgets.scroll_p95_millis),
         status,
         message,
+        measured: false,
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -1349,6 +1648,11 @@ pub fn large_file_perf_measurement(
         budget_millis: descriptor.budget_millis,
         status,
         message,
+        // A non-streaming open means the subprocess measured a different code
+        // path, so there is no large-file measurement to report.
+        measured: report.streaming,
+        bytes_value: 0,
+        synthetic_stand_in: false,
     }
 }
 
@@ -1405,6 +1709,57 @@ mod tests {
             Some(SEARCH_STREAM_50K_FILE_COUNT),
             "file_count must carry the file count"
         );
+    }
+
+    #[test]
+    fn large_file_renderer_measurement_gates_keypress_p50_and_marks_real_data() {
+        let report = ManualRendererPerfToml {
+            schema_version: 1,
+            scenario: MANUAL_RENDERER_SCENARIO.to_string(),
+            status: "passed".to_string(),
+            sample_count: 16,
+            keypress_p50_micros: 17_000,
+            keypress_p95_micros: 24_000,
+            scroll_p95_micros: 19_000,
+            keypress_p50_budget_ms: 16,
+            keypress_p95_budget_ms: 32,
+            scroll_p95_budget_ms: 32,
+            message: "renderer completed".to_string(),
+        };
+
+        let measurement =
+            large_file_manual_renderer_perf_measurement(&report, 100 * 1024 * 1024, 16);
+
+        assert_eq!(measurement.status, SkeletonStatus::Failed);
+        assert!(measurement.measured);
+        assert!(!measurement.synthetic_stand_in);
+        assert_eq!(measurement.p50_micros, 17_000);
+        assert_eq!(measurement.fixture_bytes, 100 * 1024 * 1024);
+        assert_eq!(measurement.bytes_value, 0);
+    }
+
+    #[test]
+    fn large_file_renderer_measurement_keeps_headless_result_report_only() {
+        let report = ManualRendererPerfToml {
+            schema_version: 1,
+            scenario: MANUAL_RENDERER_SCENARIO.to_string(),
+            status: "skipped".to_string(),
+            sample_count: 16,
+            keypress_p50_micros: 0,
+            keypress_p95_micros: 0,
+            scroll_p95_micros: 0,
+            keypress_p50_budget_ms: 16,
+            keypress_p95_budget_ms: 32,
+            scroll_p95_budget_ms: 32,
+            message: "renderer unavailable".to_string(),
+        };
+
+        let measurement =
+            large_file_manual_renderer_perf_measurement(&report, 100 * 1024 * 1024, 16);
+
+        assert_eq!(measurement.status, SkeletonStatus::Skipped);
+        assert!(!measurement.measured);
+        assert!(measurement.message.contains("renderer-backed 100MB file"));
     }
 
     // ── MIN-1: fuzzy_score_tuple wrapper ─────────────────────────────────────

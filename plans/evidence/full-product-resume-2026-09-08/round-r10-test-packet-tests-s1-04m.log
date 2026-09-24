@@ -1,0 +1,75 @@
+CMD: cargo test -p legion-editor --lib -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+   Compiling legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+   Compiling legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+   Compiling legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 25.59s
+     Running unittests src\lib.rs (target\debug\deps\legion_editor-7c3b8cb7e49450d3.exe)
+
+running 59 tests
+test multi_cursor::tests::duplicate_cursors_collapse_to_one ... ok
+test multi_cursor::tests::adding_below_puts_one_on_each_following_line ... ok
+test multi_cursor::tests::backspace_at_the_start_of_the_buffer_keeps_the_cursor ... ok
+test multi_cursor::tests::a_cursor_with_nowhere_to_go_adds_nothing ... ok
+test multi_cursor::tests::inserting_at_two_cursors_lands_in_both_places ... ok
+test multi_cursor::tests::backspace_at_two_cursors_removes_both_characters ... ok
+test diff::tests::full_file_replacement_produces_one_hunk ... ok
+test diff::tests::multi_line_delete_produces_one_hunk ... ok
+test diff::tests::distant_changes_produce_two_hunks ... ok
+test diff::tests::diff_hunks_to_section_projection_multi_hunk ... ok
+test multi_cursor::tests::inserting_a_newline_moves_every_later_cursor_down ... ok
+test multi_cursor::tests::multibyte_text_is_not_split ... ok
+test multi_cursor::tests::insertion_order_does_not_corrupt_later_positions ... ok
+test diff::tests::multi_line_insert_produces_one_hunk ... ok
+test diff::tests::single_line_change_produces_one_hunk ... ok
+test multi_cursor::tests::a_new_cursor_clamps_to_a_shorter_line ... ok
+test diff::tests::to_section_projection_produces_valid_section ... ok
+test multi_cursor::tests::an_empty_cursor_set_changes_nothing ... ok
+test multi_cursor::tests::backspace_joins_a_line_when_the_cursor_is_at_its_start ... ok
+test diff::tests::no_change_produces_no_hunks ... ok
+test tests::degraded_completion_returns_empty_without_full_text_materialization ... ok
+test tests::dropping_editor_engine_revokes_owned_snapshot_clones ... ok
+test tests::lexical_completion_rejects_invalid_byte_offsets_without_panic ... ok
+test tests::collaboration_participant_edit_uses_editor_transaction_authority ... ok
+test tests::coordinate_conversion_avoids_full_text_for_degraded_buffers ... ok
+test tests::compatibility_session_save_request_is_decoupled_from_disk_writes ... ok
+test tests::deterministic_log_order_with_sequential_transactions ... ok
+test multi_cursor::tests::adding_above_puts_one_on_each_preceding_line ... ok
+test tests::draining_transaction_events_is_bounded_and_non_blocking ... ok
+test tests::compatibility_session_undo_redo_invariants ... ok
+test tests::editor_port_completion_returns_bounded_lexical_items_without_mutation ... ok
+test tests::map_edit_offset_keeps_each_zero_width_insert_on_its_own_caret ... ok
+test tests::engine_multi_buffer_lifecycle ... ok
+test tests::editor_port_emits_non_zero_transaction_event_for_routed_edit ... ok
+test tests::degraded_viewport_projection_is_bounded_and_metadata_only ... ok
+test tests::editor_port_completion_rejects_stale_snapshot ... ok
+test tests::releasing_owned_snapshot_lease_revokes_all_clones ... ok
+test tests::expired_snapshot_lease_records_are_released_on_next_acquire ... ok
+test tests::current_and_pending_save_snapshots_remain_pinned_under_retention_pressure ... ok
+test tests::protocol_position_resolves_utf16_without_materializing_text ... ok
+test tests::retention_budget_evicts_oldest_unpinned_undo_snapshots ... ok
+test tests::retention_drained_prefix_releases_each_unpinned_descriptor_and_preserves_lease ... ok
+test tests::lexical_completion_scan_is_bounded_around_cursor ... ok
+test tests::owned_snapshot_lease_is_send_sync_and_reads_from_worker ... ok
+test tests::snapshot_lease_consumer_must_resynchronize_after_expiry ... ok
+test tests::revoked_flag_fails_closed_even_if_cell_still_holds_snapshot ... ok
+test tests::snapshot_lease_consumer_must_resynchronize_on_stale_snapshot_id ... ok
+test tests::snapshot_lease_line_chunk_rejects_stale_and_expired_reads ... ok
+test tests::snapshot_leases_are_descriptor_only_for_all_consumer_kinds ... ok
+test tests::owned_snapshot_lease_rejects_expiry_and_oversize_reads ... ok
+test tests::transaction_has_pre_post_snapshots_and_causality ... ok
+test tests::engine_preserves_multiple_cursors_and_selections_in_projection ... ok
+test tests::snapshot_lease_consumer_reads_valid_bounded_chunk_by_descriptor ... ok
+test tests::snapshot_lease_large_file_denies_full_text_but_allows_bounded_chunks ... ok
+test tests::protocol_position_handles_crlf_and_large_buffer ... ok
+test tests::transaction_log_keeps_snapshot_anchors_through_arbitrary_edits ... ok
+test tests::owned_snapshot_lease_keeps_old_version_after_edit_without_full_cache ... ok
+test tests::degraded_save_assembles_payload_from_chunks_without_full_text_cache ... ok
+test tests::snapshot_lease_reads_huge_line_in_bounded_absolute_chunks ... ok
+
+test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s
+
+END
+EXIT=0

@@ -10,8 +10,16 @@ interface lsp {
     register-lsp-adapter: func(contribution: lsp-adapter-contribution);
 }
 
+/// The world a Legion plugin component targets.
+///
+/// The three imports are the host's contribution-registration surface: a guest
+/// declares what it provides by calling them. `activate` is the only entrypoint
+/// the host invokes, so registration happens at a single, quota-bounded moment
+/// rather than at arbitrary times.
 world plugin-host {
     import grammars;
     import themes;
     import lsp;
+
+    export activate: func();
 }

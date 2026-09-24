@@ -230,11 +230,15 @@ fn save_all_conflict_dirty_close_save_route_saves_and_clears_prompt() {
             .expect("dirty close prompts"),
         DesktopWorkflowOutcome::CloseDirtyPrompt(buffer_id)
     );
+    // Answering the unsaved-changes prompt with Save must complete the close
+    // the user asked for. This used to stop at `Saved` and leave the tab open,
+    // so the prompt's own button did half of what it said — the file was
+    // written and the tab the user had tried to close was still there.
     assert_eq!(
         runtime
             .handle_action(DesktopAction::SaveDirtyClose { buffer_id })
             .expect("save dirty close"),
-        DesktopWorkflowOutcome::Saved
+        DesktopWorkflowOutcome::TabClosed(buffer_id)
     );
 
     let snapshot = runtime.projection_snapshot();
@@ -244,8 +248,12 @@ fn save_all_conflict_dirty_close_save_route_saves_and_clears_prompt() {
             .close_dirty_prompt
             .is_none()
     );
-    assert_eq!(tab_buffers(&runtime), vec![buffer_id]);
-    assert!(!snapshot.active_buffer_projection.dirty);
+    assert!(
+        tab_buffers(&runtime).is_empty(),
+        "the tab should be gone, got {:?}",
+        tab_buffers(&runtime)
+    );
+    // The save half still has to have happened, and to disk.
     assert_eq!(fs::read_to_string(&target).expect("saved text"), "save!");
 }
 
@@ -373,7 +381,10 @@ fn save_all_conflict_save_paths_never_route_through_proposal_apply() {
                 buffer_id: beta_buffer
             })
             .expect("save dirty close dispatches UI intent"),
-        DesktopWorkflowOutcome::Saved
+        // Saves, then closes — the point of this assertion is the route the
+        // save took, which the following check makes; the outcome names the
+        // last of the two steps.
+        DesktopWorkflowOutcome::TabClosed(beta_buffer)
     );
     assert_eq!(fs::read_to_string(&beta).expect("beta saved"), "beta!?");
     assert_no_pending_proposal_apply_from_save(&runtime);

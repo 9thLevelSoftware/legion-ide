@@ -1,0 +1,31 @@
+CMD: cargo test -p legion-lsp --test registry_contract -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+   Compiling windows v0.62.2
+   Compiling legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+   Compiling legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.68s
+     Running tests\registry_contract.rs (target\debug\deps\registry_contract-79c2a2c29b1a11b7.exe)
+
+running 15 tests
+test downloaded_artifact_entries_keep_binary_policy_metadata ... ok
+test manifest_records_workspace_version_pin_for_downloaded_artifacts ... ok
+test no_tier_two_typescript_or_javascript_entry_resolves_by_bare_path_name ... ok
+test air_gap_manifest_denies_downloads_but_keeps_system_binaries ... ok
+test pinned_typescript_descriptor_matches_the_retained_archive_identity ... ok
+test registry_rebinds_catalog_to_real_workspace_without_mutating_catalog ... ok
+test tier_two_registry_covers_the_expected_language_smoke_set ... ok
+test tier_two_typescript_entry_is_a_pinned_downloaded_artifact ... ok
+test node_version_parser_enforces_minimum_and_rejects_malformed_values ... ok
+test downloaded_resolver_rejects_unmaterialized_and_escaping_paths ... ok
+test downloaded_resolver_rejects_mismatched_materializer_receipt ... ok
+test resolver_preserves_extra_arguments_after_entrypoint ... ok
+test downloaded_pyright_resolves_to_node_and_absolute_entrypoint ... ok
+test resolver_rejects_a_version_range_or_tag_as_an_unpinned_server_version ... ok
+test resolver_rejects_a_checksum_that_is_not_a_sha256_digest ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+END
+EXIT=0

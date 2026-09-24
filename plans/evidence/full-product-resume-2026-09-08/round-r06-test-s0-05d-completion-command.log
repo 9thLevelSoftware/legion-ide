@@ -1,0 +1,46 @@
+CMD: cargo test -p xtask --test completion_command -j 1 --no-fail-fast
+CWD: D:/legion-ide-completion
+BEGIN
+   Compiling xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.02s
+     Running tests\completion_command.rs (target\debug\deps\completion_command-76b5f47d1fc0f815.exe)
+
+running 33 tests
+test missing_registers_are_operational_failure_and_command_nonzero ... ok
+test counts_implementation_and_acceptance_independently ... ok
+test evidence_fixture::missing_evidence_root_is_an_empty_development_runset ... ok
+test evidence_fixture::rejects_selected_candidate_mismatch ... ok
+test evidence_fixture::rejects_identity_receipt_without_declared_hash ... ok
+test evidence_fixture::ignores_historical_candidate_runs_after_parsing ... ok
+test evidence_fixture::rejects_unknown_run_fields_as_contextual_json_error ... ok
+test evidence_fixture::rejects_nominated_build_provenance_without_declared_hash ... ok
+test evidence_fixture::validates_explicit_testdata_fixture ... ok
+test command_rejects_empty_candidate_argument ... ok
+test evidence_fixture::rejects_failed_oracle_and_missing_recovery ... ok
+test accepted_internal_without_safety_evidence_fails_development ... ok
+test evidence_fixture::rejects_declared_receipt_symlinks_on_windows ... ok
+test evidence_fixture::rejects_symlinked_run_directories_and_run_records_on_windows ... ok
+test prerequisite_fulfillment_is_aggregated_per_package_configuration ... ok
+test evidence_fixture::rejects_missing_and_mismatched_identity_receipts ... ok
+test development_allows_unaccepted_requirement_but_release_rejects_it ... ok
+test mismatched_candidate_and_false_accepted_product_are_rejected ... ok
+test complete_testdata_passes_development_and_release ... ok
+test release_rejects_per_row_configuration_gap_and_prerequisite_variants ... ok
+test evidence_fixture::rejects_malformed_identity_and_build_receipts_as_contextual_errors ... ok
+test evidence_fixture::rejects_wrong_scenario_configuration_and_missing_reviewer ... ok
+test evidence_fixture::rejects_missing_altered_and_escape_attachments ... ok
+test internal_safety_requires_oracle_recovery_and_no_required_substitution ... ok
+test release_rejects_substituted_failed_and_versionless_prerequisites ... ok
+test release_rejects_invalidating_defect_and_closed_verification_failures ... ok
+test register_command_issue_list_matches_validate_register_structure_exactly ... ok
+test register_command_validates_structure_without_candidate_or_evidence ... ok
+test register_command_reports_structural_issue_and_exits_nonzero ... ok
+test register_command_missing_register_file_is_operational_failure ... ok
+test cli_help_and_missing_candidate_are_subprocess_checked ... ok
+test register_cli_subprocess_rejects_candidate_and_release_flags ... ok
+test cli_subprocess_accepts_populated_development_and_release_fixture ... ok
+
+test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s
+
+END
+EXIT=0

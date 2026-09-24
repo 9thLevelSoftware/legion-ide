@@ -1,0 +1,61 @@
+CMD: cargo clippy --workspace --all-targets -j 1 -- -D warnings
+CWD: D:/legion-ide-completion
+BEGIN
+    Checking legion-protocol v0.1.0 (D:\legion-ide-completion\crates\legion-protocol)
+    Checking windows v0.62.2
+    Checking legion-security v0.1.0 (D:\legion-ide-completion\crates\legion-security)
+    Checking legion-observability v0.1.0 (D:\legion-ide-completion\crates\legion-observability)
+    Checking legion-text v0.1.0 (D:\legion-ide-completion\crates\legion-text)
+    Checking legion-platform v0.1.0 (D:\legion-ide-completion\crates\legion-platform)
+    Checking legion-index v0.1.0 (D:\legion-ide-completion\crates\legion-index)
+    Checking legion-project v0.1.0 (D:\legion-ide-completion\crates\legion-project)
+    Checking legion-ai v0.1.0 (D:\legion-ide-completion\crates\legion-ai)
+    Checking legion-storage v0.1.0 (D:\legion-ide-completion\crates\legion-storage)
+    Checking legion-ai-providers v0.1.0 (D:\legion-ide-completion\crates\legion-ai-providers)
+    Checking legion-debug v0.1.0 (D:\legion-ide-completion\crates\legion-debug)
+    Checking legion-tracker v0.1.0 (D:\legion-ide-completion\crates\legion-tracker)
+    Checking legion-lsp v0.1.0 (D:\legion-ide-completion\crates\legion-lsp)
+    Checking legion-editor v0.1.0 (D:\legion-ide-completion\crates\legion-editor)
+    Checking legion-agent v0.1.0 (D:\legion-ide-completion\crates\legion-agent)
+    Checking legion-terminal v0.1.0 (D:\legion-ide-completion\crates\legion-terminal)
+    Checking legion-sandbox v0.1.0 (D:\legion-ide-completion\crates\legion-sandbox)
+    Checking legion-plugin v0.1.0 (D:\legion-ide-completion\crates\legion-plugin)
+    Checking legion-remote-transport v0.1.0 (D:\legion-ide-completion\crates\legion-remote-transport)
+    Checking legion-ui v0.1.0 (D:\legion-ide-completion\crates\legion-ui)
+    Checking legion-remote v0.1.0 (D:\legion-ide-completion\crates\legion-remote)
+    Checking legion-memory v0.1.0 (D:\legion-ide-completion\crates\legion-memory)
+    Checking legion-collaboration v0.1.0 (D:\legion-ide-completion\crates\legion-collaboration)
+    Checking legion-app v0.1.0 (D:\legion-ide-completion\crates\legion-app)
+    Checking gpu-allocator v0.28.0
+    Checking wgpu-hal v29.0.3
+warning: falling back to `f32` as the trait bound `f32: From<f64>` is not satisfied
+    --> vendor\epaint\src\tessellator.rs:2326:34
+     |
+2326 |         let stroke = Stroke::new(2.0, Color32::from_rgb(150, 255, 150));
+     |                                  ^^^ help: explicitly specify the type as `f32`: `2.0_f32`
+     |
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #154024 <https://github.com/rust-lang/rust/issues/154024>
+     = note: `-W float-literal-f32-fallback` implied by `-W future-incompatible`
+     = help: to override `-W future-incompatible` add `#[allow(float_literal_f32_fallback)]`
+
+warning: `epaint` (lib) generated 1 warning (run `cargo clippy --fix --lib -p epaint -- -D warnings` to apply 1 suggestion)
+    Checking wgpu-core-deps-windows-linux-android v29.0.3
+    Checking wgpu-core v29.0.3
+    Checking wgpu v29.0.3
+    Checking accesskit_windows v0.32.1
+    Checking egui-wgpu v0.34.2
+    Checking accesskit_winit v0.32.2
+    Checking egui-winit v0.34.2
+    Checking eframe v0.34.2
+    Checking egui_kittest v0.34.2
+    Checking legion-desktop v0.1.0 (D:\legion-ide-completion\crates\legion-desktop)
+    Checking xtask v0.1.0 (D:\legion-ide-completion\xtask)
+    Checking legion-retention v0.1.0 (D:\legion-ide-completion\crates\legion-retention)
+    Checking legion-vscode-compat v0.1.0 (D:\legion-ide-completion\crates\legion-vscode-compat)
+    Checking legion-cli v0.1.0 (D:\legion-ide-completion\crates\legion-cli)
+    Checking legion-telemetry v0.1.0 (D:\legion-ide-completion\crates\legion-telemetry)
+    Checking legion-input-driver v0.1.0 (D:\legion-ide-completion\crates\legion-input-driver)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 07s
+END
+EXIT=0

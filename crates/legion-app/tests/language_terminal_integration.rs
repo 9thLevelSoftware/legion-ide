@@ -5,8 +5,8 @@ use std::{
 
 use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{
-    BufferId, PrincipalId, ProposalLifecycleState, ProposalPayloadKind, TerminalPanelStatusKind,
-    TextCoordinate, WorkspaceTrustState,
+    BufferId, LanguageToolingOperationKind, LanguageToolingStatusKind, PrincipalId,
+    TerminalPanelStatusKind, TextCoordinate, WorkspaceTrustState,
 };
 use legion_ui::CommandDispatchIntent;
 use serde_json::json;
@@ -119,7 +119,7 @@ fn language_read_only_actions_do_not_mutate() {
 }
 
 #[test]
-fn language_edit_actions_require_proposals() {
+fn unavailable_language_edit_actions_preserve_text_without_manufacturing_proposals() {
     let workspace = TempWorkspace::new();
     let source = workspace.write("main.rs", "fn old_name() {}\n");
     let (mut app, buffer_id) = open_source_app(&workspace, &source);
@@ -130,19 +130,32 @@ fn language_edit_actions_require_proposals() {
         .to_string();
     let original_disk_text = std::fs::read_to_string(&source).expect("disk source");
 
-    for intent in [
-        CommandDispatchIntent::RequestFormattingProposal { buffer_id },
-        CommandDispatchIntent::RequestRenameProposal {
-            buffer_id,
-            position: position(3),
-            new_name: "new_name".to_string(),
-        },
-        CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id },
-        CommandDispatchIntent::RequestCodeActionProposal {
-            buffer_id,
-            action_id: "extract-function".to_string(),
-        },
-    ] {
+    let intents = [
+        (
+            CommandDispatchIntent::RequestFormattingProposal { buffer_id },
+            LanguageToolingOperationKind::FormattingProposal,
+        ),
+        (
+            CommandDispatchIntent::RequestRenameProposal {
+                buffer_id,
+                position: position(3),
+                new_name: "new_name".to_string(),
+            },
+            LanguageToolingOperationKind::RenameProposal,
+        ),
+        (
+            CommandDispatchIntent::RequestOrganizeImportsProposal { buffer_id },
+            LanguageToolingOperationKind::OrganizeImportsProposal,
+        ),
+        (
+            CommandDispatchIntent::RequestCodeActionProposal {
+                buffer_id,
+                action_id: "extract-function".to_string(),
+            },
+            LanguageToolingOperationKind::CodeActionProposal,
+        ),
+    ];
+    for (intent, expected_kind) in intents {
         let language = match app
             .dispatch_ui_intent(intent)
             .expect("proposal language dispatch")
@@ -150,23 +163,19 @@ fn language_edit_actions_require_proposals() {
             AppCommandOutcome::LanguageToolingUpdated(projection) => projection,
             other => panic!("expected language projection, got {other:?}"),
         };
-        let proposal_id = language
+        let operation = language
             .operations
             .iter()
             .rev()
-            .find_map(|operation| operation.proposal_id)
-            .expect("language proposal id");
+            .find(|operation| operation.kind == expected_kind)
+            .expect("operation for requested language action");
+        assert_eq!(operation.status, LanguageToolingStatusKind::Failed);
+        assert!(operation.proposal_id.is_none());
+        assert!(!operation.message.is_empty());
         let shell = app
             .shell_projection_snapshot("language-terminal")
             .expect("shell projection");
-        let proposal = shell
-            .proposal_ledger_projection
-            .rows
-            .iter()
-            .find(|row| row.proposal_id == proposal_id)
-            .expect("proposal ledger row");
-        assert_eq!(proposal.payload_kind, ProposalPayloadKind::WorkspaceEdit);
-        assert_eq!(proposal.lifecycle.state, ProposalLifecycleState::Previewed);
+        assert!(shell.proposal_ledger_projection.rows.is_empty());
     }
 
     assert_eq!(

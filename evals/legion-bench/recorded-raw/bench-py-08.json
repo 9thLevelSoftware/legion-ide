@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "task_id": "bench-py-08",
+  "model": "qwen2.5-coder:14b",
+  "arm": "raw",
+  "exchanges": [
+    {
+      "request_fingerprint": "req-v1:5da7c7bbb1945377",
+      "response": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "message": {
+              "content": "```json\n{\n  \"name\": \"edit-as-proposal\",\n  \"arguments\": {\n    \"path\": \"tests/test_wrap_edges.py\",\n    \"replacement\": \"import unittest\\nfrom textkit.wrap import wrap_text\\n\\nclass TestWrapText(unittest.TestCase):\\n\\n    def test_whitespace_only_input(self):\\n        self.assertEqual(wrap_text('   ', width=80), [])\\n\\n    def test_single_word_longer_than_width(self):\\n        self.assertEqual(wrap_text('longword', width=3), ['longword'])\\n\\n    def test_zero_or_negative_width(self):\\n        with self.assertRaises(ValueError):\\n            wrap_text('test', width=0)\\n        with self.assertRaises(ValueError):\\n            wrap_text('test', width=-1)\\n\",\n    \"proposal_title\": \"Add edge case tests for wrap_text\",\n    \"proposal_reason\": \"The wrap_text function in textkit.wrap.py lacks tests for documented edge cases. This proposal adds a unittest module that exercises these cases: whitespace-only input, single word longer than the width, and zero or negative width raising ValueError.\"\n  }\n}\n```",
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 1787119838,
+        "id": "chatcmpl-969",
+        "model": "qwen2.5-coder:14b",
+        "object": "chat.completion",
+        "system_fingerprint": "fp_ollama",
+        "usage": {
+          "completion_tokens": 235,
+          "prompt_tokens": 587,
+          "total_tokens": 822
+        }
+      }
+    }
+  ]
+}

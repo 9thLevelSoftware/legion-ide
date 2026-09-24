@@ -6,10 +6,10 @@ use std::{
 };
 
 use legion_app::{AppCommandOutcome, AppComposition};
-use legion_protocol::{LineWrappingPolicy, PrincipalId, WorkspaceTrustState};
+use legion_protocol::{LineWrappingPolicy, PrincipalId, TextCoordinate, WorkspaceTrustState};
 use legion_ui::{
     CommandDispatchIntent, PaletteMode, PaletteResultKind, SearchScopeProjection,
-    SettingsProjection, ThemePreferenceProjection, ToastVerbosityProjection,
+    SettingsProjection, ShellLayoutProjection, ThemePreferenceProjection, ToastVerbosityProjection,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -215,6 +215,89 @@ fn settings_intents_update_projection_and_clamp_numeric_values() {
         .shell_projection_snapshot("settings")
         .expect("projection should build");
     assert_eq!(snapshot.settings_projection, settings);
+}
+
+#[test]
+fn line_wrapping_settings_enrich_every_active_viewport_refresh() {
+    let (workspace, mut app) = open_app();
+    let first = workspace.path().join("first.txt");
+    let second = workspace.path().join("second.txt");
+    fs::write(&first, "first line with enough text to wrap\n").expect("seed first file");
+    fs::write(&second, "second line with enough text to wrap\n").expect("seed second file");
+
+    app.open_file(first.to_string_lossy())
+        .expect("open first file");
+    let first_buffer = app.active_buffer_id().expect("first buffer");
+    app.open_file(second.to_string_lossy())
+        .expect("open second file");
+    let second_buffer = app.active_buffer_id().expect("second buffer");
+
+    for (policy, wrap_column) in [
+        (LineWrappingPolicy::Viewport, None),
+        (LineWrappingPolicy::FixedColumn, Some(80)),
+        (LineWrappingPolicy::Off, None),
+    ] {
+        let settings = settings_from_outcome(
+            app.dispatch_ui_intent(CommandDispatchIntent::SetLineWrappingPolicy {
+                policy,
+                wrap_column,
+            })
+            .expect("line wrapping policy should update"),
+        );
+        assert_eq!(settings.editor.line_wrapping_policy, policy);
+        assert_eq!(settings.editor.wrap_column, wrap_column);
+        let viewport = app
+            .active_buffer_projection(&ShellLayoutProjection::plain("settings"))
+            .expect("active projection")
+            .viewport
+            .expect("active viewport");
+        assert_eq!(viewport.line_wrapping_policy, policy);
+        assert_eq!(viewport.wrap_column, wrap_column);
+    }
+
+    let settings = settings_from_outcome(
+        app.dispatch_ui_intent(CommandDispatchIntent::SetLineWrappingPolicy {
+            policy: LineWrappingPolicy::FixedColumn,
+            wrap_column: Some(120),
+        })
+        .expect("fixed-column policy should update"),
+    );
+    app.dispatch_ui_intent(CommandDispatchIntent::SetCursor {
+        buffer_id: second_buffer,
+        cursor: TextCoordinate {
+            line: 0,
+            character: 3,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+    })
+    .expect("cursor refresh should succeed");
+    let snapshot = app
+        .shell_projection_snapshot("settings")
+        .expect("projection should build");
+    assert_eq!(snapshot.settings_projection, settings);
+    let viewport = snapshot
+        .active_buffer_projection
+        .viewport
+        .expect("active viewport after cursor refresh");
+    assert_eq!(
+        viewport.line_wrapping_policy,
+        LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(viewport.wrap_column, Some(120));
+
+    app.switch_tab(first_buffer)
+        .expect("switch to first buffer");
+    let switched = app
+        .active_buffer_projection(&ShellLayoutProjection::plain("settings"))
+        .expect("switched projection")
+        .viewport
+        .expect("switched viewport");
+    assert_eq!(
+        switched.line_wrapping_policy,
+        LineWrappingPolicy::FixedColumn
+    );
+    assert_eq!(switched.wrap_column, Some(120));
 }
 
 #[test]

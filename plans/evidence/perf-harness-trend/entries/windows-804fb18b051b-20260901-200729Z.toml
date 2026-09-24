@@ -1,0 +1,201 @@
+schema_version = 1
+recorded_at_utc = "2026-09-01T20:07:29Z"
+git_sha = "804fb18b051bf194539e7bc3dd08ea5ebe069bfc"
+os = "windows"
+arch = "x86_64"
+profile = "reference"
+baseline_status = "compared"
+tolerance_percent = 60
+total = 17
+passed = 12
+failed = 1
+skipped = 4
+unmeasured = 3
+regression = []
+
+[[workload]]
+name = "m0.input_to_paint_microbenchmark"
+kind = "input_to_paint_microbenchmark"
+status = "passed"
+measured = true
+synthetic_stand_in = true
+p50_micros = 91
+p95_micros = 94
+bytes_value = 0
+budget_millis = 250
+
+[[workload]]
+name = "m1.line_galley_shaping_cache"
+kind = "line_galley_shaping_cache"
+status = "passed"
+measured = true
+synthetic_stand_in = true
+p50_micros = 27
+p95_micros = 27
+bytes_value = 0
+budget_millis = 2
+
+[[workload]]
+name = "m2.memory_ceiling_1mb"
+kind = "memory_ceiling_1mb"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "m8.search_stream_50k"
+kind = "search_stream_50k"
+status = "skipped"
+measured = true
+synthetic_stand_in = false
+p50_micros = 20956931
+p95_micros = 4338734
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "p8.startup"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 5306344
+p95_micros = 5306344
+bytes_value = 0
+budget_millis = 30000
+
+[[workload]]
+name = "p8.input_to_paint"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 1819
+p95_micros = 2202
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "p8.scroll_jank"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 117
+p95_micros = 152
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "p8.memory_ceiling"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 23898658
+budget_millis = 0
+
+[[workload]]
+name = "p8.legion_repo"
+kind = "product_workload"
+status = "failed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 161136857
+p95_micros = 161136857
+bytes_value = 0
+budget_millis = 120000
+
+[[workload]]
+name = "p8.fixture_100k_files"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 34311979
+p95_micros = 34311979
+bytes_value = 0
+budget_millis = 1800000
+
+[[workload]]
+name = "git.ui_dispatch_refresh"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 1
+p95_micros = 2
+bytes_value = 0
+budget_millis = 4
+
+[[workload]]
+name = "git.remote_push_does_not_block_dispatch"
+kind = "product_workload"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 10
+p95_micros = 23
+bytes_value = 0
+budget_millis = 4
+
+[[workload]]
+name = "git.jobs_per_refresh_burst"
+kind = "product_workload"
+status = "skipped"
+measured = false
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "git.spawn_count_per_snapshot"
+kind = "product_workload"
+status = "skipped"
+measured = false
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "git.status_legion_repo"
+kind = "product_workload"
+status = "skipped"
+measured = false
+synthetic_stand_in = false
+p50_micros = 0
+p95_micros = 0
+bytes_value = 0
+budget_millis = 0
+
+[[workload]]
+name = "manual.renderer_input_to_paint"
+kind = "renderer_backed_manual_input_to_paint"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 4693
+p95_micros = 14966
+bytes_value = 0
+budget_millis = 32
+
+[[workload]]
+name = "m9.large_file_100mb"
+kind = "large_file_100mb"
+status = "passed"
+measured = true
+synthetic_stand_in = false
+p50_micros = 4000
+p95_micros = 18762
+bytes_value = 0
+budget_millis = 16

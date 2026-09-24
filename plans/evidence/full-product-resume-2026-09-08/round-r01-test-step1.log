@@ -1,0 +1,25 @@
+== round r01 step 1: revert rejected packets (no cargo) ==
+2026-09-08T13:42:56Z
+branch: codex/full-product-resume  head: 2b736065edc612d047583cc9fa846fc2179389a0
+-- pre-revert diffstat for rejected packet paths --
+warning: in the working copy of 'crates/legion-platform/tests/bounded_process.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'xtask/src/completion_command.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'xtask/tests/completion_command.rs', LF will be replaced by CRLF the next time Git touches it
+ crates/legion-platform/src/lib.rs               | 351 ++++++++++++++++++++--
+ crates/legion-platform/tests/bounded_process.rs | 380 +++++++++++++++++++++++-
+ xtask/src/completion_command.rs                 |  63 ++++
+ xtask/src/main.rs                               |  17 ++
+ xtask/tests/completion_command.rs               | 248 +++++++++++++++-
+ 5 files changed, 1021 insertions(+), 38 deletions(-)
+-- untracked new files among rejected paths --
+crates/legion-platform/src/bounded_stdin.rs: ABSENT (never created; nothing to delete)
+-- git checkout -- <tracked rejected files> --
+checkout rc=0
+-- post-revert status for rejected packet paths (empty == clean) --
+[end of rejected-path status]
+-- full worktree status after step 1 --
+ M crates/legion-app/src/language/mod.rs
+ M crates/legion-app/src/lib.rs
+?? crates/legion-app/src/language/proposal_kinds.rs
+?? crates/legion-app/src/language/toolchain_settings.rs
+EXIT=0

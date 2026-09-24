@@ -7,7 +7,9 @@ use std::{
 
 use legion_desktop::{
     platform::{
-        DesktopPlatformAdapterChecks, NativePlatformObservation, build_platform_smoke_snapshot,
+        DesktopPlatformAdapterChecks, NativePlatformObservation, WindowsUiaProbeObservation,
+        build_platform_smoke_snapshot, committed_windows_uia_probe_script,
+        parse_windows_uia_probe_output, probe_windows_uia_tree,
     },
     view::ProjectionView,
     workflow::{DesktopEframeApp, DesktopLaunchConfig, DesktopRuntime},
@@ -801,12 +803,14 @@ fn focus_order_follows_the_projected_accessibility_node_sequence() {
                 canonical_path: CanonicalPath("Cargo.toml".to_string()),
                 name: "Cargo.toml".to_string(),
                 children: vec![FileId(2)],
+                is_directory: true,
             },
             ExplorerNodeProjection {
                 file_id: FileId(2),
                 canonical_path: CanonicalPath("src/lib.rs".to_string()),
                 name: "lib.rs".to_string(),
                 children: Vec::new(),
+                is_directory: false,
             },
         ],
         selection: Some(ExplorerSelectionProjection { file_id: FileId(1) }),
@@ -1202,9 +1206,288 @@ fn live_regions_surface_status_message_counts_in_the_accessibility_projection() 
         .expect("status live region should be projected");
 
     assert_eq!(status_node.label, "2 status messages");
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+#[test]
+fn committed_windows_uia_probe_output_parses_the_captured_walk() {
+    let script = committed_windows_uia_probe_script()
+        .expect("scripts/a11y-uia-walk.ps1 must be locatable from the crate");
     assert!(
-        smoke
-            .accessibility_tree_smoke
-            .contains("metadata-only projection accessibility nodes 2; OS tree not observed")
+        script.ends_with(std::path::Path::new("scripts/a11y-uia-walk.ps1")),
+        "probe path should resolve to the committed script, got {script:?}"
     );
+
+    let evidence = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../plans/evidence/production/PR-UI-001/2026-08-16-windows-uia-tree.txt");
+    let stdout = fs::read_to_string(&evidence).expect("committed Windows UIA walk should exist");
+    let observation =
+        parse_windows_uia_probe_output(&stdout).expect("captured walk printed UIA_WALK_OK");
+    assert_eq!(observation.descendant_count, 138);
+
+    assert!(parse_windows_uia_probe_output("PROCESS_NOT_FOUND: legion-desktop").is_none());
+    assert!(parse_windows_uia_probe_output("UIA_LOAD_FAILED: missing assemblies").is_none());
+    assert!(parse_windows_uia_probe_output("NO_TOPLEVEL_WINDOW_FOR_PROCESS").is_none());
+}
+
+#[test]
+fn accessibility_tree_status_reports_injected_windows_uia_observation() {
+    let mut snapshot = Shell::empty("Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation {
+            os_accessibility_tree: Some(WindowsUiaProbeObservation {
+                descendant_count: 138,
+            }),
+            ..NativePlatformObservation::default()
+        },
+    );
+
+    assert_eq!(
+        smoke.accessibility_tree_smoke,
+        "metadata-only projection accessibility nodes 2; Windows UIA observed 138 descendants"
+    );
+    assert!(!smoke.accessibility_tree_smoke.contains("macOS"));
+    assert!(!smoke.accessibility_tree_smoke.contains("Linux"));
+}
+
+#[test]
+fn accessibility_tree_status_matches_the_live_windows_uia_probe() {
+    let mut snapshot = Shell::empty("Live Windows UIA").projection_snapshot();
+    snapshot.status_messages = vec![StatusMessageProjection {
+        severity: StatusSeverity::Info,
+        message: "Status live region".to_string(),
+    }];
+
+    let smoke = build_platform_smoke_snapshot(
+        &snapshot,
+        DesktopPlatformAdapterChecks::default(),
+        NativePlatformObservation::default(),
+    );
+
+    assert_os_tree_status_matches_probe(&smoke.accessibility_tree_smoke, 2);
+}
+
+fn assert_os_tree_status_matches_probe(status: &str, node_count: usize) {
+    assert!(
+        status.starts_with(&format!(
+            "metadata-only projection accessibility nodes {node_count}; "
+        )),
+        "unexpected accessibility tree status: {status}"
+    );
+    assert!(
+        !status.contains("macOS")
+            && !status.contains("Linux")
+            && !status.contains("AT-SPI")
+            && !status.contains("AXUIElement")
+            && !status.contains("VoiceOver")
+            && !status.contains("Orca"),
+        "must not claim a macOS or Linux probe: {status}"
+    );
+    if let Some(rest) = status.rsplit_once("Windows UIA observed ") {
+        let count = rest
+            .1
+            .strip_suffix(" descendants")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                panic!("Windows UIA status must include a descendant count: {status}")
+            });
+        let observed = probe_windows_uia_tree()
+            .expect("status claimed a Windows UIA walk, so the committed probe must succeed");
+        assert_eq!(observed.descendant_count, count);
+        assert!(!status.contains("OS tree not observed"));
+    } else {
+        assert!(
+            status.contains("OS tree not observed"),
+            "absent Windows UIA walk must stay an honest miss, got {status}"
+        );
+    }
+}
+
+#[test]
+fn pr15_accessibility_evidence_keeps_unobserved_platforms_explicit() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let probe = root.join("scripts/a11y-platform-probe.sh");
+    let evidence = root.join("plans/evidence/accessibility/PR-15-manual-keyboard-path.md");
+
+    let probe_text = fs::read_to_string(probe).expect("PR-15 probe contract");
+    assert!(probe_text.contains("a11y-uia-walk.ps1"));
+    assert!(probe_text.contains("a11y-ax-walk.sh"));
+    assert!(probe_text.contains("a11y-atspi-walk.sh"));
+    let ax = fs::read_to_string(root.join("scripts/a11y-ax-walk.sh")).expect("AX probe");
+    let atspi = fs::read_to_string(root.join("scripts/a11y-atspi-walk.sh")).expect("AT-SPI probe");
+    assert!(ax.contains("observation=unobserved"));
+    assert!(atspi.contains("observation=unobserved"));
+    assert!(ax.contains("AX_WALK_OK"));
+    assert!(atspi.contains("ATSPI_WALK_OK"));
+    assert!(ax.contains("not a VoiceOver"));
+    assert!(atspi.contains("not an Orca"));
+
+    let evidence_text = fs::read_to_string(evidence).expect("PR-15 evidence packet");
+    assert!(evidence_text.contains("| macOS | `scripts/a11y-ax-walk.sh` |"));
+    assert!(evidence_text.contains("| Linux | `scripts/a11y-atspi-walk.sh` |"));
+    assert!(evidence_text.contains("Not VoiceOver."));
+    assert!(evidence_text.contains("Not Orca."));
+    let ax_dump =
+        fs::read_to_string(root.join("plans/evidence/production/WS-P0/gap-05-3-macos-ax-dump.txt"))
+            .expect("hosted macOS AX dump");
+    assert!(ax_dump.contains("AX_WALK_OK"));
+    assert!(ax_dump.contains("Legion IDE Smoke"));
+    let atspi_miss = fs::read_to_string(
+        root.join("plans/evidence/production/WS-P0/gap-05-4-linux-atspi-miss.txt"),
+    )
+    .expect("hosted Linux AT-SPI miss");
+    assert!(atspi_miss.contains("PROCESS_NOT_FOUND"));
+    assert!(!evidence_text.contains("| macOS | No committed OS-tree probe | Unobserved. |"));
+    assert!(!evidence_text.contains("| Linux | No committed OS-tree probe | Unobserved. |"));
+    assert!(evidence_text.contains("Manual keyboard-only path"));
+    assert!(evidence_text.contains("### Certified (renderer keymap or command palette)"));
+    assert!(evidence_text.contains("### Residual (explicitly cut from default keymap)"));
+    for route in [
+        "Ctrl/Cmd+Shift+F",
+        "F12",
+        "Ctrl/Cmd+Shift+G",
+        "Git: Stage Focused Hunk",
+        "Git: Commit Staged Changes",
+        "f12_on_the_open_editor_requests_go_to_definition",
+        "ctrl_shift_f_opens_workspace_search_palette",
+        "ctrl_shift_g_stages_the_focused_hunk",
+        "command_palette_keyboard_commits_staged_changes",
+    ] {
+        assert!(
+            evidence_text.contains(route),
+            "evidence should name the certified route `{route}`"
+        );
+    }
+    for route in [
+        ":search-workspace <query>",
+        ":definition <byte-offset>",
+        ":git-stage-hunk <hunk-id>",
+        ":term-launch <command>",
+        ":git-nav-next-hunk",
+    ] {
+        assert!(
+            evidence_text.contains(route),
+            "evidence should name the residual route `{route}`"
+        );
+    }
+    assert!(evidence_text.contains("Use the published palette/keymap to"));
+    assert!(evidence_text.contains("`Git: Stage Focused Hunk` from its published"));
+    assert!(!evidence_text.contains("not a renderer-backed keyboard path"));
+    assert!(!evidence_text.contains("remains pending"));
+}
+
+#[test]
+fn gap05_2_windows_narrator_transcript_names_at_and_live_window() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let probe = fs::read_to_string(root.join("scripts/a11y-narrator-transcript.ps1"))
+        .expect("Narrator transcript probe");
+    assert!(probe.contains("Speech Recap"));
+    assert!(probe.contains("GAP-05.2"));
+    assert!(!probe.contains("UIA_WALK_OK"));
+    assert!(
+        probe.contains("LEGION_NARRATOR_SENTINEL_"),
+        "probe must sentinel-clear the clipboard before each copy chord"
+    );
+    assert!(
+        probe.contains("exit 7"),
+        "NARRATOR_NOT_RUNNING must use exit 7, not share exit 6 with no-speech"
+    );
+    assert!(
+        probe.contains("Test-LegionProductSpeech"),
+        "probe must reject stale or non-Legion clipboard text"
+    );
+
+    let transcript = fs::read_to_string(
+        root.join("plans/evidence/accessibility/2026-09-02-windows-narrator-transcript.txt"),
+    )
+    .expect("committed Narrator transcript");
+    let header_keys = [
+        "AT=",
+        "AT_VERSION=",
+        "OS=",
+        "ARCH=",
+        "GIT_SHA=",
+        "CAPTURED_AT_UTC=",
+        "WINDOW_TITLE=",
+        "PROCESS=",
+        "SPEECH_RECAP_WINDOW=",
+        "PROBE=",
+        "UTTERANCE_COUNT=",
+    ];
+    for key in header_keys {
+        assert!(
+            probe.contains(key),
+            "probe must emit header `{key}` so -OutFile matches the committed transcript"
+        );
+        assert!(
+            transcript.contains(key),
+            "committed transcript missing probe header `{key}`"
+        );
+    }
+    let at_version = transcript
+        .lines()
+        .find(|line| line.starts_with("AT_VERSION="))
+        .expect("AT_VERSION header");
+    assert!(
+        !at_version.contains("WinBuild"),
+        "AT_VERSION must be Narrator.exe FileVersion from the probe, not a hand-edited ProductVersion"
+    );
+    let utterance_count = transcript
+        .lines()
+        .find(|line| line.starts_with("UTTERANCE_COUNT="))
+        .and_then(|line| line.strip_prefix("UTTERANCE_COUNT="))
+        .and_then(|value| value.parse::<usize>().ok())
+        .expect("UTTERANCE_COUNT header");
+    let body_lines = transcript
+        .lines()
+        .skip_while(|line| *line != "TRANSCRIPT_BEGIN")
+        .skip(1)
+        .take_while(|line| *line != "TRANSCRIPT_END")
+        .count();
+    assert_eq!(
+        utterance_count, body_lines,
+        "UTTERANCE_COUNT must match the committed transcript body"
+    );
+    assert!(transcript.contains("AT=Windows Narrator"));
+    assert!(transcript.contains("WINDOW_TITLE=Legion IDE Smoke"));
+    for needle in [
+        "Manual, button",
+        "Assist, button",
+        "Delegate, button",
+        "PROBLEMS (0), button",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "committed transcript missing {needle}"
+        );
+    }
+    assert!(
+        !transcript.contains("UIA_WALK_OK"),
+        "a UIA tree dump is not a screen-reader session"
+    );
+    assert!(
+        !transcript.contains("ControlType.Button"),
+        "UIA control-type dumps are not Narrator speech"
+    );
+
+    let evidence = fs::read_to_string(
+        root.join("plans/evidence/production/WS-P0/gap-05-2-windows-narrator.md"),
+    )
+    .expect("GAP-05.2 evidence");
+    assert!(evidence.contains("Windows Narrator"));
+    assert!(evidence.contains("2bbbfb392757a87a8400bec498ae703629db0b1a"));
+    assert!(evidence.contains("Not a UIA tree dump"));
 }
