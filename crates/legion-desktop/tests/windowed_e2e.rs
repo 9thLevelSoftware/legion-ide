@@ -60,6 +60,7 @@ fn windowed_e2e_report_toml_is_metadata_only_and_names_the_window() {
     assert!(toml.contains("task = \"GAP-01.1\""));
     assert!(toml.contains("not_golden_path_5 = true"));
     assert!(toml.contains("not_beta_smoke = true"));
+    assert!(toml.contains("not_native_input = true"));
     assert!(toml.contains("window_created = true"));
     assert!(toml.contains("window_backend = \"eframe::run_native\""));
     assert!(!toml.contains("WINDOWED_E2E_EDIT"));
