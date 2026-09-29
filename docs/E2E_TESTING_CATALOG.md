@@ -30,7 +30,7 @@ A case is only as strong as the level you actually ran:
 4. **Windowed GUI** — `eframe::run_native`, not `--beta-smoke`, not AppComposition binaries  
 5. Installed signed artifact on a clean OS  
 
-Headless golden paths (GP-1–4) are level 3. `xtask windowed-gui-e2e` / `--windowed-e2e` is level 4 for **open / edit / save only**. Hosted 3-OS windowed GUI (`legion-windowed-gui.yml`) is level 4 for that same loop. Nothing in this repo is currently level 5 (signed clean-VM install).
+Headless golden paths (GP-1–4) are level 3. `xtask windowed-gui-e2e` / `--windowed-e2e` is level-4 smoke for **open / edit / save only**, via direct `InsertText` / `SaveActive`, not native-input. Hosted 3-OS windowed GUI (`legion-windowed-gui.yml`) is that same direct-dispatch smoke. OS-input proof is `xtask native-product-acceptance` (ADR-0056); that harness is blocked when the driver, package, session, or IME oracle is missing. This catalog does not claim a passed native run. Nothing in this repo is currently level 5 (signed clean-VM install).
 
 ### 0.3 Suggested verdict row
 
@@ -52,7 +52,8 @@ notes:
 | Launch | Command | Window? | What it is |
 | --- | --- | --- | --- |
 | Product window | `cargo run -p legion-desktop -- <workspace>` | Yes (`run_native`) | Idle native IDE. This is the cake. |
-| Windowed E2E | `cargo run -p xtask -- windowed-gui-e2e` or `legion-desktop --windowed-e2e` | Yes, then exits | Automated open/insert/save. Not a session. |
+| Windowed E2E | `cargo run -p xtask -- windowed-gui-e2e` or `legion-desktop --windowed-e2e` | Yes, then exits | Direct `InsertText` / `SaveActive` open/insert/save smoke. Not native-input. Not a session. |
+| Native input | `cargo run -p xtask -- native-product-acceptance` | Packaged window, if unblocked | ADR-0056 OS-input harness. Blocked when the driver, package, session, or IME oracle is missing. Not a passed run in this catalog. |
 | Renderer smoke | `legion-desktop --smoke --duration-ms N --evidence path` | Yes, timed | Native window + smoke assertions. |
 | Beta smoke | `legion-desktop --beta-smoke` | No real product loop | Headless kittest-style harness. **Not** windowed GUI. |
 | CLI proof | `cargo run -p legion-app -- <path>` | No | Trusted workspace + `:w` / `:q` only. Not the renderer. |
@@ -108,12 +109,12 @@ Source of truth: `docs/MODES.md`. Mode switch pills: `M` Manual, `A` Assist, `D`
 | --- | --- | --- |
 | E2E-EDIT-01 | `cargo run -p legion-desktop -- <workspace>` creates a native window titled like `Legion IDE` (or smoke title only when `--smoke`). | CURRENT (`run_native`). Score this first. |
 | E2E-EDIT-02 | Opening a file shows its text in the editor canvas (not a headless rope). | PARTIAL: renderer canvas exists; many proofs are kittest/GP. Windowed E2E opens a fixture file. |
-| E2E-EDIT-03 | Typing inserts at the caret through editor authority. Backspace/Delete/Enter mutate the buffer. | CURRENT (desktop input tests). Score in the live window. |
+| E2E-EDIT-03 | Typing inserts at the caret through editor authority. Backspace/Delete/Enter mutate the buffer. | CURRENT (desktop input tests). Not native-input; those tests are not the idle product window. Score in the live window. |
 | E2E-EDIT-04 | Multi-cursor: Ctrl+Alt+↑ / Ctrl+Alt+↓ add carets; Esc collapses to one caret when extras exist. | CURRENT (keymap). |
 | E2E-EDIT-05 | Select all, copy, cut, paste via OS clipboard. | PARTIAL: copy/cut wired; clipboard smoke tests exist. Score paste/IME in the live window. |
 | E2E-EDIT-06 | IME composition does not corrupt the buffer. | PARTIAL (ime_smoke). |
 | E2E-EDIT-07 | Undo / redo: `:u` / `:redo` and the product undo stack. | CURRENT in composition; score in window. |
-| E2E-EDIT-08 | Save active: Ctrl+S / palette `Save Active Buffer` / `:w`. Proposal-mediated. Dirty flag clears only on accepted save. | CURRENT. Windowed E2E covers insert+save on a fixture. |
+| E2E-EDIT-08 | Save active: Ctrl+S / palette `Save Active Buffer` / `:w`. Proposal-mediated. Dirty flag clears only on accepted save. | CURRENT (`save_row_2` / keymap). Not native-input; `--windowed-e2e` is not Ctrl+S proof. Score in the live window. |
 | E2E-EDIT-09 | Save all: Ctrl+Shift+S / `Save All` / `:wa`. Per-item reject keeps dirty text. | CURRENT (save_all_conflict tests). |
 | E2E-EDIT-10 | External overwrite between open and save yields a conflict, not a silent clobber. | CURRENT (workspace_vfs_integration). |
 | E2E-EDIT-11 | Close tab: Ctrl+W / `:close`. Unsaved tab prompts; cancel keeps the tab. | CURRENT (snapshots `unsaved-changes-prompt-*`). |
@@ -506,7 +507,7 @@ Score these only after the daily-driver window works. They are not a substitute 
 | E2E-REL-05 | Fresh-VM SmartScreen / Gatekeeper / Linux trust **without** click-through. | EXPECTED-UNBUILT (GAP-02.3). |
 | E2E-REL-06 | Hosted signed update feed; replace; restart; interrupt; rollback; N−1. | EXPECTED-UNBUILT (GAP-03). Update-drill is local ephemeral. |
 | E2E-REL-07 | Separate signed Manual/offline SKU + OS packet-capture zero-egress. | EXPECTED-UNBUILT (GAP-06). Offline **compile** exists (`cargo check -p legion-desktop --no-default-features --features offline`). Do not treat SKU packaging PRs as the product. |
-| E2E-REL-08 | Windowed GUI 3-OS CI (`legion-windowed-gui.yml`) open/edit/save. | CURRENT as independent job; four green runs + owner sign-off recorded; **not** a PR required check. |
+| E2E-REL-08 | Windowed GUI 3-OS CI (`legion-windowed-gui.yml`) open/edit/save via direct `InsertText` / `SaveActive`. | CURRENT as independent smoke; four green runs + owner sign-off recorded; **not** a PR required check; **not** native-input. |
 
 ---
 

@@ -36,7 +36,7 @@ Until then, local `cargo run -p xtask -- golden-path-{1,2,3,4}` and the weekly s
 
 `.github/workflows/legion-windowed-gui.yml` runs `cargo run -p xtask -- windowed-gui-e2e` on ubuntu, windows, and macos (`workflow_dispatch` and weekly Mondays 08:00 UTC). Linux wraps the step in `xvfb-run` so `eframe::run_native` still creates a window. The GUI step is hard-fail: no `continue-on-error`, no `|| true`.
 
-This is not `--beta-smoke` and not AppComposition `golden-path-5`. It is **independent**: failures do **not** block PR merges. The four-green-run clock plus owner sign-off is recorded in `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-clock-signoff.md`. Completing that clock is not the same as adding a required check; windowed-gui is not on `protect-main` and is not folded into `legion-gates.yml`.
+This is not `--beta-smoke` and not AppComposition `golden-path-5`. The journey is in-process `InsertText` / `SaveActive` after `eframe::run_native` creates a window, not OS keyboard input. Native-input proof is `xtask native-product-acceptance` (ADR-0056); see [Native installer release](#native-installer-release-manual) for the staging instrument. That harness is blocked when the driver, package, session, or IME oracle is missing; this section does not claim a passed native run. It is **independent**: failures do **not** block PR merges. The four-green-run clock plus owner sign-off is recorded in `plans/evidence/production/WS-P0/gap-01-2-windowed-gui-clock-signoff.md`. Completing that clock is not the same as adding a required check; windowed-gui is not on `protect-main` and is not folded into `legion-gates.yml`.
 
 ## Release-blocker queue (QUAL.11)
 
