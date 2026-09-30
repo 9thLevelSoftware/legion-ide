@@ -1057,7 +1057,9 @@ fn background_delegated_task_consumes_acp_host_into_proposal_mediation() {
     )
     .expect("background delegated ACP flow should start");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Hosted Windows runners start PowerShell while the rest of the workspace
+    // suite is running. A 5s spin missed that cold start twice in CI.
+    let deadline = Instant::now() + Duration::from_secs(30);
     let outcome = loop {
         if let Some(outcome) = app
             .poll_delegated_task()
@@ -1069,7 +1071,7 @@ fn background_delegated_task_consumes_acp_host_into_proposal_mediation() {
             Instant::now() < deadline,
             "background ACP flow did not finish"
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(50));
     };
     let AppDelegatedTaskOutcome::Completed { proposals, .. } = outcome else {
         panic!("expected a completed background run, got {outcome:?}");
@@ -1111,7 +1113,7 @@ fn background_delegated_task_projects_acp_host_failure() {
     )
     .expect("background delegated ACP failure flow should start");
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let error = loop {
         match app.poll_delegated_task() {
             Err(error) => break error,
@@ -1122,7 +1124,7 @@ fn background_delegated_task_projects_acp_host_failure() {
             Instant::now() < deadline,
             "background ACP failure did not surface"
         );
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(50));
     };
     assert!(
         error

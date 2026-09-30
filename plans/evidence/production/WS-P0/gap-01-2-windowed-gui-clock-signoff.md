@@ -26,7 +26,7 @@ Criterion 1 asks for four consecutive green scheduled (or fully equivalent dispa
 - **Four distinct SHAs**, unlike smoke runs 3 and 4 which repeated one commit.
 - **All four fall inside about nine hours on 2026-09-02.** Stability-over-time is a weaker signal than four scheduled weeks.
 
-The greens are real: a native window, open/edit/save, on three OSes. The count is a weaker stability claim than the criterion's authors probably intended.
+The greens are real: a native window plus in-process `InsertText` / `SaveActive` smoke on three OSes, not native-input and not Ctrl+S proof. The count is a weaker stability claim than the criterion's authors probably intended.
 
 ## Criterion 2: rust-analyzer provisioning
 
