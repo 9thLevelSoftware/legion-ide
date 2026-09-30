@@ -91,7 +91,6 @@ skip = [
     { crate = "toml_datetime@0.6.11" },
     { crate = "toml_datetime@0.7.5+spec-1.1.0" },
     { crate = "toml_edit@0.22.27" },
-    { crate = "wasm-encoder@0.251.0" },
     { crate = "windows-sys@0.45.0" },
     { crate = "windows-sys@0.52.0" },
     { crate = "windows-sys@0.59.0" },

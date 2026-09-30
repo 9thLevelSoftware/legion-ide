@@ -134,6 +134,7 @@ impl WindowedGuiE2eReport {
         out.push_str("harness = \"windowed-gui-e2e\"\n");
         out.push_str("not_golden_path_5 = true\n");
         out.push_str("not_beta_smoke = true\n");
+        out.push_str("not_native_input = true\n");
         out.push_str(&format!(
             "binary_path = {}\n",
             toml_string(&self.binary_path)
