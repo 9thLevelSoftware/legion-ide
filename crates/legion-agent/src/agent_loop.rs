@@ -76,6 +76,41 @@ mod forbidden_walk_tests {
     }
 
     #[test]
+    fn recursive_grep_and_glob_alias_root_preserves_forbidden_descendants() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real");
+        let scope_private = real.join("scope-private");
+        let config_private = real.join("config-private");
+        std::fs::create_dir_all(&scope_private).unwrap();
+        std::fs::create_dir_all(&config_private).unwrap();
+        std::fs::write(real.join("control.txt"), "CANARY control").unwrap();
+        std::fs::write(scope_private.join("scope.txt"), "CANARY scope secret").unwrap();
+        std::fs::write(config_private.join("config.txt"), "CANARY config secret").unwrap();
+        let _link = DirectoryLink::new(root.path().join("alias"), &real);
+        let mut config = config(
+            root.path(),
+            vec![CanonicalPath(scope_private.to_string_lossy().into_owned())],
+        );
+        config.forbidden_paths = vec!["real/config-private".to_string()];
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "path": "alias"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "path": "alias"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "control.txt:1: CANARY control");
+        assert_eq!(glob, "control.txt");
+    }
+
+    #[test]
     fn glob_reports_selected_directory_removed_after_containment_check() {
         let root = TempDir::new().unwrap();
         let selected = root.path().join("selected");
@@ -89,9 +124,8 @@ mod forbidden_walk_tests {
             &mut || std::fs::remove_dir_all(&selected).unwrap(),
         );
 
-        let feedback = result
-            .err()
-            .expect("an unreadable selected directory must not be reported as no files");
+        let feedback =
+            result.expect_err("an unreadable selected directory must not be reported as no files");
         assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
     }
 
@@ -110,8 +144,7 @@ mod forbidden_walk_tests {
         );
 
         let feedback = result
-            .err()
-            .expect("an unreadable selected directory must not be reported as no matches");
+            .expect_err("an unreadable selected directory must not be reported as no matches");
         assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
     }
 
@@ -136,9 +169,8 @@ mod forbidden_walk_tests {
         let readable = execute_grep(&input, &config, &mut || {}).unwrap();
 
         assert_eq!(readable, "allowed.txt:1: CANARY local");
-        let feedback = blocked
-            .err()
-            .expect("an unreadable text file must not be reported as no matches");
+        let feedback =
+            blocked.expect_err("an unreadable text file must not be reported as no matches");
         assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
     }
 
@@ -800,15 +832,16 @@ fn execute_grep(
 
     let search_root = if let Some(p) = sub_path {
         let resolved = resolve_tool_path(p, worktree_root);
-        crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
-            LegionToolCallFeedback::new(
-                LegionToolKind::Grep,
-                LegionToolCallFeedbackKind::ScopeDenied,
-                format!("path containment check failed: {e}"),
-                Some(p.to_string()),
-            )
-        })?;
-        resolved
+        let relative =
+            crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
+                LegionToolCallFeedback::new(
+                    LegionToolKind::Grep,
+                    LegionToolCallFeedbackKind::ScopeDenied,
+                    format!("path containment check failed: {e}"),
+                    Some(p.to_string()),
+                )
+            })?;
+        worktree_root.join(relative)
     } else {
         worktree_root.to_path_buf()
     };
@@ -954,15 +987,16 @@ fn execute_glob(
 
     let search_root = if let Some(p) = sub_path {
         let resolved = resolve_tool_path(p, worktree_root);
-        crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
-            LegionToolCallFeedback::new(
-                LegionToolKind::Glob,
-                LegionToolCallFeedbackKind::ScopeDenied,
-                format!("path containment check failed: {e}"),
-                Some(p.to_string()),
-            )
-        })?;
-        resolved
+        let relative =
+            crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
+                LegionToolCallFeedback::new(
+                    LegionToolKind::Glob,
+                    LegionToolCallFeedbackKind::ScopeDenied,
+                    format!("path containment check failed: {e}"),
+                    Some(p.to_string()),
+                )
+            })?;
+        worktree_root.join(relative)
     } else {
         worktree_root.to_path_buf()
     };
@@ -1275,7 +1309,10 @@ fn execute_edit_as_proposal(
             // been touched by the time this returns either way.
             reached_the_machine();
             let resolved = resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?;
-            (std::borrow::Cow::Owned(resolved.content), Some(resolved.base))
+            (
+                std::borrow::Cow::Owned(resolved.content),
+                Some(resolved.base),
+            )
         }
         // Present but the wrong shape. Falling through to the fragment path
         // would tell the model to "provide replacement or old_str/new_str"
@@ -1375,8 +1412,9 @@ fn execute_edit_as_proposal(
         std::collections::hash_map::Entry::Vacant(entry) => {
             entry.insert(PendingEditDraft {
                 content: replacement.into_owned(),
-                base: expected_base
-                    .unwrap_or_else(|| PendingEditBase::from_preconditions(&proposal.preconditions)),
+                base: expected_base.unwrap_or_else(|| {
+                    PendingEditBase::from_preconditions(&proposal.preconditions)
+                }),
             });
         }
     }
