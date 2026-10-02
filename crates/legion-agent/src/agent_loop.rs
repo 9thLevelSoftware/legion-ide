@@ -76,6 +76,26 @@ mod forbidden_walk_tests {
     }
 
     #[test]
+    fn glob_reports_selected_directory_removed_after_containment_check() {
+        let root = TempDir::new().unwrap();
+        let selected = root.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("allowed.txt"), "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+
+        let result = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "path": "selected"}),
+            &config,
+            &mut || std::fs::remove_dir_all(&selected).unwrap(),
+        );
+
+        let feedback = result
+            .err()
+            .expect("an unreadable selected directory must not be reported as no files");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
+    #[test]
     fn grep_reports_selected_directory_removed_after_containment_check() {
         let root = TempDir::new().unwrap();
         let selected = root.path().join("selected");
@@ -960,7 +980,15 @@ fn execute_glob(
         config,
         &mut results,
         limit,
-    );
+    )
+    .map_err(|error| {
+        LegionToolCallFeedback::new(
+            LegionToolKind::Glob,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            format!("glob filesystem read failed: {error}"),
+            Some(search_root.to_string_lossy().into_owned()),
+        )
+    })?;
 
     if results.is_empty() {
         return Ok("No matching files found.".to_string());
@@ -977,30 +1005,27 @@ fn glob_walk(
     config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
-) {
+) -> std::io::Result<()> {
     if results.len() >= limit {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
         if results.len() >= limit {
-            return;
+            return Ok(());
         }
+        let entry = entry?;
         let path = entry.path();
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type()?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         if file_type.is_dir() {
             if name.starts_with('.') {
                 continue;
             }
-            glob_walk(base, &path, matcher, config, results, limit);
+            glob_walk(base, &path, matcher, config, results, limit)?;
         } else if file_type.is_file() {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             if matcher.is_match(rel) || matcher.is_match(name) {
@@ -1008,6 +1033,7 @@ fn glob_walk(
             }
         }
     }
+    Ok(())
 }
 
 fn execute_outline(
