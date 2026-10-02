@@ -861,7 +861,7 @@ impl DelegatedTaskProposalGenerator {
 
         // Stat/read the base target so we can both populate a concurrency guard
         // and decide whether this is a create (no base) or an edit (base exists).
-        let base_state = BaseTargetState::read(input.target_path);
+        let base_state = BaseTargetState::read(input.target_path)?;
 
         let create_payload = || {
             ProposalPayload::CreateFile(legion_protocol::CreateFileProposal {
@@ -915,50 +915,84 @@ struct BaseTargetState {
     len: u64,
     /// Last-modified timestamp when the platform exposes one.
     modified_at: Option<TimestampMillis>,
-    /// Stable FNV-1a digest of the base bytes when readable.
-    content_hash: Option<u64>,
+    /// Stable FNV-1a digest of the base bytes.
+    content_hash: u64,
 }
 
 impl BaseTargetState {
-    /// Reads the base target at `path`. Returns `None` when the target does not
-    /// exist or is not a regular file (a genuine create). Any read error after a
-    /// successful stat still yields a state (with `content_hash == None`) so the
-    /// generator treats an existing file as an overwrite rather than
-    /// misclassifying it as a create.
-    fn read(path: &Path) -> Option<Self> {
-        let metadata = std::fs::metadata(path).ok()?;
+    /// Reads a regular base file, returning absence only for a missing target.
+    /// Inspection, open, and read failures reject proposal generation.
+    fn read(path: &Path) -> Result<Option<Self>, AgentError> {
+        use std::io::Read;
+
+        let invalid_base = |reason| {
+            AgentError::InvalidMetadata(AssistedAiContractError::InvalidProposalMetadata { reason })
+        };
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                return Err(invalid_base(
+                    "Proposal base target is not a regular file".to_string(),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(invalid_base(format!(
+                    "Cannot inspect proposal base target: {error}"
+                )));
+            }
+        }
+        let mut file = std::fs::File::open(path)
+            .map_err(|error| invalid_base(format!("Cannot open proposal base target: {error}")))?;
+        let metadata = file
+            .metadata()
+            .map_err(|error| invalid_base(format!("Cannot inspect proposal base file: {error}")))?;
         if !metadata.is_file() {
-            return None;
+            return Err(invalid_base(
+                "Proposal base target is not a regular file".to_string(),
+            ));
         }
         let modified_at = metadata
             .modified()
             .ok()
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|elapsed| TimestampMillis(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)));
-        let content_hash = std::fs::read(path)
-            .ok()
-            .map(|bytes| stable_hash_128(&bytes) as u64);
-        Some(Self {
-            len: metadata.len(),
+        let mut hash = FNV_OFFSET_BASIS;
+        let mut len = 0;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = match file.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => count,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(invalid_base(format!(
+                        "Cannot read proposal base file: {error}"
+                    )));
+                }
+            };
+            hash = stable_hash_128_update(hash, &buffer[..count]);
+            len += count as u64;
+        }
+        Ok(Some(Self {
+            len,
             modified_at,
-            content_hash,
-        })
+            content_hash: hash as u64,
+        }))
     }
 
-    /// Derives a concurrency guard from this base snapshot. The length and
-    /// modified timestamp always populate; the fingerprint and content version
-    /// populate only when the base bytes were readable.
+    /// Derives a concurrency guard from the fully read base snapshot.
     fn preconditions(&self) -> ProposalVersionPreconditions {
         ProposalVersionPreconditions {
             file_version: None,
             buffer_version: None,
             snapshot_id: None,
             generation: None,
-            file_content_version: self.content_hash.map(legion_protocol::FileContentVersion),
+            file_content_version: Some(legion_protocol::FileContentVersion(self.content_hash)),
             workspace_generation: None,
-            expected_fingerprint: self.content_hash.map(|hash| FileFingerprint {
+            expected_fingerprint: Some(FileFingerprint {
                 algorithm: "fnv1a-64-v1".to_string(),
-                value: format!("{hash:016x}"),
+                value: format!("{:016x}", self.content_hash),
             }),
             expected_file_length: Some(self.len),
             expected_modified_at: self.modified_at,
@@ -981,6 +1015,8 @@ fn empty_preconditions() -> ProposalVersionPreconditions {
     }
 }
 
+const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+
 /// Deterministic, cross-version-stable 128-bit FNV-1a hash.
 ///
 /// Unlike `std::collections::hash_map::DefaultHasher`, FNV-1a is a fixed
@@ -989,11 +1025,11 @@ fn empty_preconditions() -> ProposalVersionPreconditions {
 /// (`\u{1f}`) between domain prefix and payload prevents prefix-collision
 /// ambiguity between distinct id namespaces.
 pub(crate) fn stable_hash_128(bytes: &[u8]) -> u128 {
-    // FNV-1a (128-bit) constants.
-    const FNV_OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
-    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+    stable_hash_128_update(FNV_OFFSET_BASIS, bytes)
+}
 
-    let mut hash = FNV_OFFSET_BASIS;
+fn stable_hash_128_update(mut hash: u128, bytes: &[u8]) -> u128 {
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
     for &byte in bytes {
         hash ^= byte as u128;
         hash = hash.wrapping_mul(FNV_PRIME);

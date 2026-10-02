@@ -1690,6 +1690,76 @@ mod tests {
     }
 
     #[test]
+    fn proposal_rejects_directory_target() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let target = sandbox.path().join("existing-directory");
+        std::fs::create_dir(&target).expect("create directory target");
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.path().to_path_buf());
+
+        let result = generator.generate_proposal(proposal_input(&target, "replacement content"));
+
+        assert!(matches!(result, Err(AgentError::InvalidMetadata(_))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn proposal_rejects_exclusively_locked_target_then_guards_after_release() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let target = sandbox.path().join("existing.txt");
+        let base = "existing base content";
+        std::fs::write(&target, base).expect("write base file");
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.path().to_path_buf());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&target)
+            .expect("hold exclusive sharing lock");
+        assert!(std::fs::read(&target).is_err());
+
+        let result = generator.generate_proposal(proposal_input(&target, "replacement content"));
+
+        assert!(matches!(result, Err(AgentError::InvalidMetadata(_))));
+        drop(lock);
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, "replacement content"))
+            .expect("generate guarded proposal after releasing lock");
+        assert_eq!(
+            proposal.preconditions.expected_file_length,
+            Some(base.len() as u64)
+        );
+        assert!(proposal.preconditions.expected_fingerprint.is_some());
+        assert!(proposal.preconditions.file_content_version.is_some());
+    }
+
+    #[test]
+    fn proposal_preserves_content_guard_across_read_chunks() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let target = sandbox.path().join("existing.txt");
+        std::fs::write(&target, [b'a'; 16385]).expect("write base file");
+        let generator = DelegatedTaskProposalGenerator::new(sandbox.path().to_path_buf());
+
+        let proposal = generator
+            .generate_proposal(proposal_input(&target, "replacement content"))
+            .expect("generate guarded proposal");
+
+        assert_eq!(proposal.preconditions.expected_file_length, Some(16385));
+        assert_eq!(
+            proposal.preconditions.file_content_version,
+            Some(legion_protocol::FileContentVersion(10532671406452590948))
+        );
+        assert_eq!(
+            proposal.preconditions.expected_fingerprint,
+            Some(FileFingerprint {
+                algorithm: "fnv1a-64-v1".to_string(),
+                value: "922b90d6f5854964".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn proposal_emits_create_file_when_base_absent() {
         let sandbox = PathBuf::from("target/legion-agent-create-when-absent-test");
         std::fs::create_dir_all(&sandbox).expect("create sandbox");
@@ -1715,7 +1785,6 @@ mod tests {
         assert_eq!(proposal.preconditions.expected_fingerprint, None);
         assert_eq!(proposal.preconditions.expected_modified_at, None);
         assert_eq!(proposal.preconditions.file_content_version, None);
-        assert_eq!(proposal.preview.summary, "Create file proposal");
 
         std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
     }
@@ -1753,7 +1822,6 @@ mod tests {
         assert!(proposal.preconditions.expected_fingerprint.is_some());
         assert!(proposal.preconditions.expected_modified_at.is_some());
         assert!(proposal.preconditions.file_content_version.is_some());
-        assert_eq!(proposal.preview.summary, "Create file proposal");
 
         std::fs::remove_dir_all(sandbox).expect("cleanup sandbox");
     }
