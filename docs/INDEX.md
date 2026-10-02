@@ -32,7 +32,16 @@ This index is the canonical entry point for the Legion IDE documentation set und
 - `LEGION_RENAME.md` — history of the Devil → Legion rename, including the rationale for allowing old Devil-era markers to remain in archived evidence and the rules for current user-facing docs.
 - `legal/smallcode-attribution.md` — per-file provenance for behaviors and test vectors ported from SmallCode (MIT); pairs with `../THIRD_PARTY_NOTICES.md` and ADR-0049.
 
-## Supporting material outside `docs/`
+## Completion program design
+
+- `superpowers/specs/2026-09-04-product-completion-design.md` — owner-approved full-vision completion design: workflow-first stages, complete Rust/TypeScript-JavaScript/Python workflows, separate implementation and product acceptance, native-input qualification, and final release criteria.
+- `superpowers/plans/2026-09-04-full-product-completion.md` — master dependency-ordered implementation plan for the approved full-vision completion program.
+- `superpowers/plans/2026-09-04-completion-traceability.md` — complete mapping of all 163 kanban tasks and 42 feature families to semantic program stages; historical `done` status is not product acceptance.
+- `superpowers/plans/2026-09-04-manual-language-completion.md` — Manual IDE and Rust/TypeScript-JavaScript/Python language workflow package plan.
+- `superpowers/plans/2026-09-04-ai-team-completion.md` — Assist, Delegate, Legion Workflow, extensions, remote, collaboration, and enterprise integration package plan.
+- `superpowers/plans/2026-09-04-production-qualification.md` — cross-cutting XQ-01..08 platform, security, release, accessibility, performance, support, and final qualification plan; implementation runs across S0-S5 and S6 performs final qualification.
+
+## Supporting material outside `docs/` (planning and evidence)
 
 - `../LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
 - `../THIRD_PARTY_NOTICES.md` — third-party notices shipped with native packages.
