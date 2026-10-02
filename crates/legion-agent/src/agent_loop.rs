@@ -75,6 +75,53 @@ mod forbidden_walk_tests {
         }
     }
 
+    #[test]
+    fn grep_reports_selected_directory_removed_after_containment_check() {
+        let root = TempDir::new().unwrap();
+        let selected = root.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("allowed.txt"), "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+
+        let result = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "path": "selected"}),
+            &config,
+            &mut || std::fs::remove_dir_all(&selected).unwrap(),
+        );
+
+        let feedback = result
+            .err()
+            .expect("an unreadable selected directory must not be reported as no matches");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn grep_reports_exclusively_locked_text_file_and_matches_after_release() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("allowed.txt");
+        std::fs::write(&path, "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+        let input = serde_json::json!({"pattern": "CANARY"});
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        let blocked = execute_grep(&input, &config, &mut || {});
+        drop(lock);
+        let readable = execute_grep(&input, &config, &mut || {}).unwrap();
+
+        assert_eq!(readable, "allowed.txt:1: CANARY local");
+        let feedback = blocked
+            .err()
+            .expect("an unreadable text file must not be reported as no matches");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
     struct DirectoryLink(PathBuf);
 
     impl DirectoryLink {
@@ -760,7 +807,15 @@ fn execute_grep(
         config,
         &mut results,
         limit,
-    );
+    )
+    .map_err(|error| {
+        LegionToolCallFeedback::new(
+            LegionToolKind::Grep,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            format!("grep filesystem read failed: {error}"),
+            Some(search_root.to_string_lossy().into_owned()),
+        )
+    })?;
 
     if results.is_empty() {
         return Ok("No matches found.".to_string());
@@ -778,31 +833,28 @@ fn grep_walk(
     config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
-) {
+) -> std::io::Result<()> {
     if results.len() >= limit {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
         if results.len() >= limit {
-            return;
+            return Ok(());
         }
+        let entry = entry?;
         let path = entry.path();
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
+        let file_type = entry.file_type()?;
         if file_type.is_dir() {
             // Skip hidden dirs
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') {
                 continue;
             }
-            grep_walk(base, &path, re, glob_matcher, config, results, limit);
+            grep_walk(base, &path, re, glob_matcher, config, results, limit)?;
         } else if file_type.is_file() {
             // Apply file glob filter
             if let Some(matcher) = glob_matcher {
@@ -812,35 +864,35 @@ fn grep_walk(
                 }
             }
             // Skip binary files (check first bytes)
-            if looks_binary(&path) {
+            if looks_binary(&path)? {
                 continue;
             }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path.strip_prefix(base).unwrap_or(&path);
-                for (i, line) in content.lines().enumerate() {
-                    if results.len() >= limit {
-                        return;
-                    }
-                    if re.is_match(line) {
-                        results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
-                    }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(error) => return Err(error),
+            };
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            for (i, line) in content.lines().enumerate() {
+                if results.len() >= limit {
+                    return Ok(());
+                }
+                if re.is_match(line) {
+                    results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Heuristic binary file check — skip if the first 512 bytes contain a NUL.
-fn looks_binary(path: &Path) -> bool {
+fn looks_binary(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut f = std::fs::File::open(path)?;
     let mut buf = [0u8; 512];
-    let Ok(n) = f.read(&mut buf) else {
-        return false;
-    };
-    buf[..n].contains(&0u8)
+    let n = f.read(&mut buf)?;
+    Ok(buf[..n].contains(&0u8))
 }
 
 fn execute_glob(
