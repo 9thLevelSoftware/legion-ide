@@ -1095,6 +1095,13 @@ fn execute_edit_as_proposal(
                 .get(&resolved_edit_path)
                 .map(|staged| staged.base),
         ),
+        None | Some(serde_json::Value::Null) => {
+            // Reads the file on disk to place the fragment, so the machine has
+            // been touched by the time this returns either way.
+            reached_the_machine();
+            let resolved = resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?;
+            (std::borrow::Cow::Owned(resolved.content), Some(resolved.base))
+        }
         // Present but the wrong shape. Falling through to the fragment path
         // would tell the model to "provide replacement or old_str/new_str"
         // when it *did* provide `replacement` — contradictory feedback that
@@ -1107,13 +1114,6 @@ fn execute_edit_as_proposal(
                     .to_string(),
                 Some(path_str.to_string()),
             ));
-        }
-        None => {
-            // Reads the file on disk to place the fragment, so the machine has
-            // been touched by the time this returns either way.
-            reached_the_machine();
-            let resolved = resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?;
-            (std::borrow::Cow::Owned(resolved.content), Some(resolved.base))
         }
     };
     // The operation is about to happen, so the record is written now. Not
@@ -1215,6 +1215,45 @@ fn execute_edit_as_proposal(
 mod fragment_proposal_tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn nullable_replacement_with_fragment_stages_guarded_edit_without_writing_disk() {
+        if !legion_ai::governance::small_model_governors_enabled() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let original = "marker = keep\nvalue = old\nexternal = unchanged\n";
+        let intended = "marker = keep\nvalue = intended\nexternal = unchanged\n";
+        std::fs::write(&path, original).unwrap();
+        let mut pending_edits = PendingEditContent::new();
+        let result = execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": null,
+                "old_str": "value = old",
+                "new_str": "value = intended"
+            }),
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let proposal = result
+            .expect("nullable replacement must allow an anchored fragment edit")
+            .proposal
+            .expect("a fragment edit must be staged for review");
+        assert_eq!(
+            PendingEditBase::from_preconditions(&proposal.preconditions),
+            PendingEditBase::from_content(original)
+        );
+        let draft = pending_edits.get(&path).unwrap();
+        assert_eq!(draft.content, intended);
+        assert_eq!(draft.base, PendingEditBase::from_content(original));
+    }
 
     #[test]
     fn fragment_edit_refuses_source_changed_before_proposal_generation() {
