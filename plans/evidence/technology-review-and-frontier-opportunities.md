@@ -100,7 +100,7 @@ The autoresearch harness emits the existing integer average task score, with pas
 
 **This is a baseline for existing workflow behavior, not a score for novelty or for the proposed graph/proof features.** Fixed tapes limit generalization: request drift can make a tape no longer representative, and public fixture contents invite overfitting. Future feature experiments need their own independent impact, freshness, proof and semantic-equivalence workloads before comparative claims are justified. A higher replay score alone cannot select a frontier technology or establish a competitive moat.
 
-This report contains research findings and proposed acceptance criteria, not implemented frontier features. No product behavior was optimized.
+The frontier recommendations above remain research findings and proposed acceptance criteria, not implemented features. Harness setup changed no product behavior; subsequent correctness experiments are recorded below.
 
 ## 6. Exercised baseline evidence
 
@@ -120,3 +120,14 @@ Both executed 20 tasks and excluded five holdouts. Sixteen reference tasks faile
 Observed toolchain: Windows Cargo 1.98.1, Git 2.55.0.windows.3, Python 3.12.10 and Node 24.19.0. On this workstation `bash` starts WSL; the launcher bridges to native Windows Python and paths so the workload uses the installed Windows tools. Ordinary Bash environments retain the normal Python path. Harness prerequisites are Bash, Python >=3.11, Git, Cargo with cached dependencies, and Node for existing JavaScript fixtures. The child runner currently explicitly builds with four jobs, overriding the inherited one-job Cargo setting; no frozen runner code was changed.
 
 Passing an argument to the fixed-workload launcher was exercised and rejected with exit 2 and no metric output. The initial WSL/Linux-Python prerequisite failure was fixed in the launcher; no tooling installation was needed. Benchmark outputs stay under ignored `target/autoresearch-bench/`; temporary fixture checkouts are managed by the existing runner. Documentation hygiene passed.
+
+## 7. Autoresearch correctness iterations
+
+The recorded score remains a workflow proxy. Score-neutral changes are retained only when an independent behavioral reproduction demonstrates a real correctness or containment defect and every previously passing task/verification remains successful with no increased per-task cassette drift. They are not reported as benchmark optimization or frontier-feature delivery.
+
+| Run | Candidate | Recorded score / passed / verification / drift | Exercised proof and disposition |
+| --- | --- | --- | --- |
+| 1 | Unchanged tracked baseline | 59 / 4 / 5 / 5 | Reproduced setup metrics; baseline recorded. |
+| 2 | Bind fragment drafts to their original source fingerprint and length; stage only accepted proposals | 59 / 4 / 5 / 5 | Deterministic external-write regression failed before the fix and passed afterward. Three snapshot/accepted-draft/expected-absence regressions and five existing fragment integration tests passed. Individual recorded acceptance and drift did not regress. Kept as score-neutral authority repair. |
+
+Run 2 uses a compact numeric original-base guard with the existing FNV content-version convention. It refuses a draft if proposal generation captures a different on-disk base, preserves previously accepted draft content after refusal, and detects external creation of a previously absent draft target. It adds no direct workspace writes, source inference, new provider request shape, dependency, or public API.

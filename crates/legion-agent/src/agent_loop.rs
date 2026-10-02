@@ -164,7 +164,45 @@ pub struct DelegatedTaskLoopConfig {
 /// otherwise the second proposal silently omits the first edit, and the two
 /// carry preconditions for the same original file, so applying one makes the
 /// other stale.
-type PendingEditContent = std::collections::HashMap<PathBuf, String>;
+type PendingEditContent = std::collections::HashMap<PathBuf, PendingEditDraft>;
+
+struct PendingEditDraft {
+    content: String,
+    // Keep the original disk guard even when later edits change the draft.
+    base: PendingEditBase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingEditBase {
+    // Both fields absent means the target must remain absent.
+    content_hash: Option<u64>,
+    length: Option<u64>,
+}
+
+impl PendingEditBase {
+    fn from_content(content: &str) -> Self {
+        Self {
+            content_hash: Some(crate::worktree::stable_hash_128(content.as_bytes()) as u64),
+            length: Some(content.len() as u64),
+        }
+    }
+
+    fn from_preconditions(preconditions: &legion_protocol::ProposalVersionPreconditions) -> Self {
+        Self {
+            content_hash: preconditions.file_content_version.map(|version| version.0),
+            length: preconditions.expected_file_length,
+        }
+    }
+
+    fn matches(&self, preconditions: &legion_protocol::ProposalVersionPreconditions) -> bool {
+        *self == Self::from_preconditions(preconditions)
+    }
+}
+
+struct ResolvedFragmentEdit {
+    content: String,
+    base: PendingEditBase,
+}
 
 /// Output returned by a single tool executor call.
 pub struct ToolExecutionOutput {
@@ -925,7 +963,7 @@ fn resolve_fragment_edit(
     input: &serde_json::Value,
     resolved_edit_path: &Path,
     pending_edits: &PendingEditContent,
-) -> Result<String, LegionToolCallFeedback> {
+) -> Result<ResolvedFragmentEdit, LegionToolCallFeedback> {
     let invalid = |message: String| {
         LegionToolCallFeedback::new(
             LegionToolKind::EditAsProposal,
@@ -949,17 +987,24 @@ fn resolve_fragment_edit(
 
     // Resolve against content this run already staged for the file, falling
     // back to the worktree for the first edit to it.
-    let file_content = match pending_edits.get(resolved_edit_path) {
-        Some(staged) => staged.clone(),
+    let (file_content, base) = match pending_edits.get(resolved_edit_path) {
+        Some(staged) => (
+            std::borrow::Cow::Borrowed(staged.content.as_str()),
+            staged.base,
+        ),
         // An edit against a file that is not there cannot be a fragment edit;
         // the model most likely meant to create it and should say so with
         // `replacement`.
-        None => std::fs::read_to_string(resolved_edit_path).map_err(|err| {
-            invalid(format!(
-                "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
-                 `replacement` with its full content instead."
-            ))
-        })?,
+        None => {
+            let content = std::fs::read_to_string(resolved_edit_path).map_err(|err| {
+                invalid(format!(
+                    "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
+                     `replacement` with its full content instead."
+                ))
+            })?;
+            let base = PendingEditBase::from_content(&content);
+            (std::borrow::Cow::Owned(content), base)
+        }
     };
 
     if !has_anchor {
@@ -988,16 +1033,16 @@ fn resolve_fragment_edit(
                         .to_string(),
                 )
             })?;
-        return Ok(legion_ai::patch::splice_replacement(
-            &file_content,
-            start,
-            end,
-            new_str,
-        ));
+        return Ok(ResolvedFragmentEdit {
+            content: legion_ai::patch::splice_replacement(&file_content, start, end, new_str),
+            base,
+        });
     }
 
     match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
-        legion_ai::patch::PatchResolution::Applied { content, .. } => Ok(content),
+        legion_ai::patch::PatchResolution::Applied { content, .. } => {
+            Ok(ResolvedFragmentEdit { content, base })
+        }
         legion_ai::patch::PatchResolution::NoMatch(diagnostic) => Err(invalid(diagnostic.message)),
         legion_ai::patch::PatchResolution::Ambiguous { occurrences } => Err(invalid(format!(
             "`old_str` matches {occurrences} places in the file, so the target is ambiguous. \
@@ -1043,8 +1088,13 @@ fn execute_edit_as_proposal(
     // destructive if treated as whole content. Fragments are resolved against
     // the file on disk so the edit lands exactly where the model meant, or is
     // refused with a diagnostic it can retry from (ADR-0049).
-    let replacement = match input.get("replacement") {
-        Some(serde_json::Value::String(whole_file)) => whole_file.clone(),
+    let (replacement, expected_base) = match input.get("replacement") {
+        Some(serde_json::Value::String(whole_file)) => (
+            std::borrow::Cow::Borrowed(whole_file.as_str()),
+            pending_edits
+                .get(&resolved_edit_path)
+                .map(|staged| staged.base),
+        ),
         // Present but the wrong shape. Falling through to the fragment path
         // would tell the model to "provide replacement or old_str/new_str"
         // when it *did* provide `replacement` — contradictory feedback that
@@ -1062,7 +1112,8 @@ fn execute_edit_as_proposal(
             // Reads the file on disk to place the fragment, so the machine has
             // been touched by the time this returns either way.
             reached_the_machine();
-            resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?
+            let resolved = resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?;
+            (std::borrow::Cow::Owned(resolved.content), Some(resolved.base))
         }
     };
     // The operation is about to happen, so the record is written now. Not
@@ -1070,11 +1121,6 @@ fn execute_edit_as_proposal(
     // never returns, and an execution nobody can distinguish from a refusal is
     // exactly what this event exists to prevent.
     reached_the_machine();
-
-    // Stage the result so a later edit to the same file composes with this one
-    // instead of resolving against stale content.
-    pending_edits.insert(resolved_edit_path.clone(), replacement.clone());
-    let replacement = replacement.as_str();
 
     // Build the proposal using DelegatedTaskProposalGenerator — zero disk writes.
     let generator = DelegatedTaskProposalGenerator::new(worktree_root.to_path_buf());
@@ -1095,7 +1141,7 @@ fn execute_edit_as_proposal(
 
     let proposal_input = DelegatedTaskProposalInput {
         target_path: &resolved_edit_path,
-        modified_content: replacement,
+        modified_content: replacement.as_ref(),
         output_id: Uuid::new_v4().to_string(),
         request_id: loop_correlation_id.to_string(),
         provider_id: "agent.loop".to_string(),
@@ -1117,6 +1163,15 @@ fn execute_edit_as_proposal(
             Some(path_str.to_string()),
         )
     })?;
+    if expected_base.is_some_and(|base| !base.matches(&proposal.preconditions)) {
+        return Err(LegionToolCallFeedback::new(
+            LegionToolKind::EditAsProposal,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            "the file changed after the edit's source was captured; refusing a stale proposal"
+                .to_string(),
+            Some(path_str.to_string()),
+        ));
+    }
 
     // Build a textual summary for the model — no disk write.
     let payload_variant = match &proposal.payload {
@@ -1138,10 +1193,173 @@ fn execute_edit_as_proposal(
         payload_variant,
         replacement.len(),
     );
+    match pending_edits.entry(resolved_edit_path) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().content = replacement.into_owned();
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(PendingEditDraft {
+                content: replacement.into_owned(),
+                base: expected_base
+                    .unwrap_or_else(|| PendingEditBase::from_preconditions(&proposal.preconditions)),
+            });
+        }
+    }
     Ok(ToolExecutionOutput {
         content,
         proposal: Some(proposal),
     })
+}
+
+#[cfg(test)]
+mod fragment_proposal_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn fragment_edit_refuses_source_changed_before_proposal_generation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let version_a = "marker = keep\nvalue = old\nexternal = A\n";
+        let version_b = "marker = keep\nvalue = old\nexternal = B\n";
+        std::fs::write(&path, version_a).unwrap();
+        let input = serde_json::json!({
+            "path": "settings.txt",
+            "old_str": "value = old",
+            "new_str": "value = intended"
+        });
+        let mut pending_edits = PendingEditContent::new();
+        let mut dispatches = 0;
+        let result = execute_edit_as_proposal(
+            &input,
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {
+                dispatches += 1;
+                if dispatches == 2 {
+                    std::fs::write(&path, version_b).unwrap();
+                }
+            },
+        );
+
+        let expected_disk = if legion_ai::governance::small_model_governors_enabled() {
+            version_b
+        } else {
+            version_a
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected_disk);
+        assert!(
+            result.is_err(),
+            "a fragment resolved against an obsolete source must not produce a proposal"
+        );
+        assert!(
+            pending_edits.is_empty(),
+            "a refused fragment must not stage its obsolete replacement"
+        );
+    }
+
+    #[test]
+    fn subsequent_edit_refuses_external_change_and_preserves_accepted_draft() {
+        let version_a = "marker = keep\nvalue = old\nexternal = A\n";
+        let version_b = "marker = keep\nvalue = old\nexternal = B\n";
+        let first_draft = "marker = keep\nvalue = first\nexternal = A\n";
+        let second_draft = "marker = keep\nvalue = second\nexternal = A\n";
+        for input in [
+            serde_json::json!({
+                "path": "settings.txt",
+                "old_str": "value = first",
+                "new_str": "value = second"
+            }),
+            serde_json::json!({
+                "path": "settings.txt",
+                "replacement": second_draft
+            }),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("settings.txt");
+            std::fs::write(&path, version_a).unwrap();
+            let mut pending_edits = PendingEditContent::new();
+            let accepted = execute_edit_as_proposal(
+                &serde_json::json!({
+                    "path": "settings.txt",
+                    "replacement": first_draft
+                }),
+                dir.path(),
+                1,
+                Uuid::new_v4(),
+                &mut pending_edits,
+                &mut || {},
+            )
+            .unwrap();
+            let original_base =
+                PendingEditBase::from_preconditions(&accepted.proposal.unwrap().preconditions);
+            std::fs::write(&path, version_b).unwrap();
+
+            let rejected = execute_edit_as_proposal(
+                &input,
+                dir.path(),
+                2,
+                Uuid::new_v4(),
+                &mut pending_edits,
+                &mut || {},
+            );
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), version_b);
+            assert!(
+                rejected.is_err(),
+                "a subsequent edit must not rebase an accepted draft onto external changes: {input}"
+            );
+            let retained = pending_edits.get(&path).unwrap();
+            assert_eq!(retained.content, first_draft);
+            assert_eq!(retained.base, original_base);
+        }
+    }
+
+    #[test]
+    fn new_file_draft_refuses_external_creation_and_preserves_expected_absence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let first_draft = "marker = keep\nvalue = first\n";
+        let mut pending_edits = PendingEditContent::new();
+        execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": first_draft
+            }),
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        )
+        .unwrap();
+        assert!(!path.exists());
+        std::fs::write(&path, first_draft).unwrap();
+
+        let rejected = execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": "marker = keep\nvalue = second\n"
+            }),
+            dir.path(),
+            2,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first_draft);
+        assert!(
+            rejected.is_err(),
+            "an externally created file must not become the base of an accepted new-file draft"
+        );
+        let retained = pending_edits.get(&path).unwrap();
+        assert_eq!(retained.content, first_draft);
+        assert!(retained.base.content_hash.is_none());
+        assert!(retained.base.length.is_none());
+    }
 }
 
 fn execute_terminal_command(
