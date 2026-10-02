@@ -75,6 +75,97 @@ mod forbidden_walk_tests {
         }
     }
 
+    struct DirectoryLink(PathBuf);
+
+    impl DirectoryLink {
+        fn new(link: PathBuf, target: &Path) -> Self {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd.exe")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(&link)
+                    .arg(target)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "junction creation failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Self(link)
+        }
+    }
+
+    impl Drop for DirectoryLink {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            let result = std::fs::remove_dir(&self.0);
+            #[cfg(unix)]
+            let result = std::fs::remove_file(&self.0);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_do_not_follow_external_directory_links() {
+        let root = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        std::fs::write(root.path().join("allowed.txt"), "CANARY local").unwrap();
+        std::fs::write(external.path().join("token.txt"), "CANARY external").unwrap();
+        let _link = DirectoryLink::new(root.path().join("escape"), external.path());
+        let config = config(root.path(), vec![]);
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "allowed.txt:1: CANARY local");
+        assert_eq!(glob, "allowed.txt");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("token.txt")).unwrap(),
+            "CANARY external"
+        );
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_do_not_follow_directory_cycles() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("allowed.txt"), "CANARY local").unwrap();
+        let _link = DirectoryLink::new(root.path().join("loop"), root.path());
+        let config = config(root.path(), vec![]);
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "allowed.txt:1: CANARY local");
+        assert_eq!(glob, "allowed.txt");
+    }
+
     #[test]
     fn recursive_grep_and_glob_omit_forbidden_descendants() {
         let dir = TempDir::new().unwrap();
@@ -702,14 +793,17 @@ fn grep_walk(
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
             // Skip hidden dirs
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') {
                 continue;
             }
             grep_walk(base, &path, re, glob_matcher, config, results, limit);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             // Apply file glob filter
             if let Some(matcher) = glob_matcher {
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -846,13 +940,16 @@ fn glob_walk(
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
+        if file_type.is_dir() {
             if name.starts_with('.') {
                 continue;
             }
             glob_walk(base, &path, matcher, config, results, limit);
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             if matcher.is_match(rel) || matcher.is_match(name) {
                 results.push(rel.to_string_lossy().into_owned());
