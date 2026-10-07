@@ -1,0 +1,390 @@
+{
+  "schema_version": 1,
+  "audit_id": "2026-10-release-readiness",
+  "audited_at": "2026-10-07",
+  "candidate": {
+    "branch": "autoresearch/review-the-technology-and-features-of-this-tool-20261002",
+    "head": "0a27cebd939395f27b3a3d586ecb7f92b7622433",
+    "merge_base_with_main": "1a9264ebced087192f1ef980609181fcf942ad33",
+    "ahead_of_main": 10,
+    "behind_main": 6
+  },
+  "verdict": "NO-GO",
+  "verdict_summary": "Do not call this tip general availability or an invitation-only preview. Substrate gates that do not require signing mostly pass on this Linux VM. The tip is missing main's host-qualified file-remote fix and current advisory pins, cargo deny and clippy are red on Rust 1.99, and signing, update, Manual SKU, and macOS/Linux screen-reader proof are still open.",
+  "counts": {
+    "P0": 6,
+    "P1": 9,
+    "P2": 10,
+    "P3": 2
+  },
+  "findings": [
+    {
+      "id": "RR-2026-001",
+      "prior_id": "GAP-02",
+      "severity": "P0",
+      "area": "release",
+      "feature": "OS code signing and notarization",
+      "status": "still-open",
+      "evidence": "cargo run -p xtask -- release-pipeline --dry-run wrote five descriptors whose signer_status is dry-run/no-production-signer and whose sha256 is pending (target/release-pipeline/verify_report.toml, verified_at_utc 2026-10-07T23:14:27Z). .github/workflows/legion-release.yml still publishes unsigned-beta. plans/p0-installed-product-sequence-v0.1.md records GAP-02.1 issues #211 #212 #213 as not closed.",
+      "repro": "cargo run -p xtask -- release-pipeline --dry-run && cargo run -p xtask -- verify-release-pipeline",
+      "acceptance_check": "A dispatch of the release workflow produces signer_status for a real OS signer (Authenticode, codesign+notarytool, Linux package signature) and a fresh-VM trust journal per OS. Ed25519 manifest signing alone does not close this.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-002",
+      "prior_id": "GAP-03",
+      "severity": "P0",
+      "area": "release",
+      "feature": "Update check, swap, and rollback",
+      "status": "still-open",
+      "evidence": "crates/legion-app/src/updater.rs documents that only LocalDirManifestSource exists and that an HTTP manifest source is deferred. No desktop caller of Updater::check_for_update was found. update-drill exited 0 against a local fixture (update-drill_EXIT:0) and does not install, restart, or roll back a packaged binary.",
+      "repro": "rg -n check_for_update crates/legion-desktop/src; cargo run -p xtask -- update-drill",
+      "acceptance_check": "AppComposition can fetch a signed manifest without the drill binary, swap the installer, restart, and restore N-1. Manual mode must not poll that feed.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-003",
+      "prior_id": null,
+      "severity": "P0",
+      "area": "supply-chain",
+      "feature": "cargo deny advisories",
+      "status": "new",
+      "evidence": "cargo deny check on this tip exited 1. advisories FAILED, bans ok, licenses ok, sources ok. RUSTSEC-2026-0285 rustls 0.23.40 (fix >=0.23.45). RUSTSEC-2026-0316 wasmtime 46.0.3 (fix >=48.0.3). RUSTSEC-2026-0327 wasmtime 46.0.3 stack buffer overflow in component async-lifted callbacks (fix >=48.0.4). wasmtime is depended on by legion-plugin, which legion-app and legion-desktop link. origin/main pins wasmtime 48.0.3 and rustls 0.23.45, which clears 0285 and 0316 and still misses 0327.",
+      "repro": "cargo deny check",
+      "acceptance_check": "cargo deny check exits 0 with wasmtime >=48.0.4 and rustls >=0.23.45, without a new ignore entry for these three ids.",
+      "wave": "W1"
+    },
+    {
+      "id": "RR-2026-004",
+      "prior_id": null,
+      "severity": "P0",
+      "area": "security",
+      "feature": "Git remote air-gap for host-qualified file URLs",
+      "status": "open-on-this-tip",
+      "evidence": "crates/legion-security/src/policy.rs classify_git_remote_url treats every file:// URL as GitRemoteTarget::Local (lines 364-367) and the comment says only scp-style and conventional URLs can leave the machine. origin/main commit e0a1277 (fix(security): gate host-qualified file remotes, #220) is not in this branch. A file://attacker.example/share URL can name a network share and currently skips allowlist and air-gap checks.",
+      "repro": "git merge-base HEAD origin/main; git log HEAD..origin/main --oneline; read classify_git_remote_url",
+      "acceptance_check": "classify_git_remote_url(\"file://attacker.example/share/repo.git\") is GitRemoteTarget::Host, and decide_git_remote_operation denies it under the default air-gap policy. The test air_gap_denies_a_host_qualified_file_remote from e0a1277 passes on the candidate.",
+      "wave": "W0"
+    },
+    {
+      "id": "RR-2026-005",
+      "prior_id": "GAP-06",
+      "severity": "P0",
+      "area": "privacy",
+      "feature": "Manual zero-egress installed SKU",
+      "status": "still-open",
+      "evidence": "Manual mode is the default AppProductMode and require_assist_mode rejects AI dispatch outside Assist/Delegate/Workflows. WorkbenchTelemetryConsent defaults enabled=false, crash_reports_enabled=false, raw_source_allowed=false. ReqwestTelemetryExportClient defaults enabled=false and is not constructed from legion-app. A strace of target/debug/legion-app :q recorded no non-Unix connect/sendto/sendmmsg. That is a process probe, not GAP-06.2. crates/legion-desktop/Cargo.toml default = [\"ai\"] and legion-ai-providers is an unconditional dependency, so the default desktop build is not an offline SKU. No clean-VM packet capture is in this audit.",
+      "repro": "strace -f -e trace=connect,sendto,sendmmsg target/debug/legion-app (cwd under target/verify-legion-ide, command :q). Read desktop Cargo.toml features.",
+      "acceptance_check": "A --no-default-features --features offline package has no provider HTTP stack in its dependency closure, and a clean-VM capture of open/edit/save/search shows no DNS/TCP/UDP to non-loopback hosts.",
+      "wave": "W4"
+    },
+    {
+      "id": "RR-2026-006",
+      "prior_id": "GAP-05",
+      "severity": "P0",
+      "area": "accessibility",
+      "feature": "macOS VoiceOver and Linux Orca",
+      "status": "still-open",
+      "evidence": "plans/evidence/accessibility/README.md: Windows Narrator transcript exists (2026-09-02). macOS has an AX dump, not VoiceOver. Linux AT-SPI hosted xvfb did not see AccessKit (gap-05-4-linux-atspi-miss.txt). No Orca transcript. PR-UI-001 stays substrate validated. This VM cannot run VoiceOver or a real Orca session.",
+      "repro": "Read plans/evidence/accessibility/README.md and plans/p0-installed-product-sequence-v0.1.md GAP-05.3 and GAP-05.4.",
+      "acceptance_check": "Committed VoiceOver notes plus a repeatable macOS AX probe, and a committed Orca transcript plus an AT-SPI dump that sees the product window.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-007",
+      "prior_id": null,
+      "severity": "P1",
+      "area": "tooling",
+      "feature": "clippy -D warnings on stable 1.99",
+      "status": "new",
+      "evidence": "cargo clippy --workspace --all-targets -- -D warnings exited 101. error: redundant field names in struct initialization at crates/legion-debug/src/live_session.rs:196 (LiveDapSessionError::Io { #[from] source: DapFrameError }). rustc 1.99.0 (b940084d7 2026-09-28), which is what .github/workflows/legion-gates.yml installs via dtolnay/rust-toolchain@stable. The same struct is on origin/main.",
+      "repro": "cargo clippy --workspace --all-targets -j 2 -- -D warnings",
+      "acceptance_check": "That clippy command exits 0 on the stable toolchain CI uses.",
+      "wave": "W1"
+    },
+    {
+      "id": "RR-2026-008",
+      "prior_id": "GAP-08",
+      "severity": "P1",
+      "area": "docs",
+      "feature": "Provider traffic contents",
+      "status": "doc-drift",
+      "evidence": "CODEBASE.md lines 18-19 say AI provider traffic carries fingerprints and byte counts, never raw source text. crates/legion-app/src/assist_proposal.rs sends assist_buffer_excerpt to the selected backend, and send_delegate_chat does the same. PRIVACY.md correctly says an opted-in provider receives the configured route. The architecture snapshot overclaims.",
+      "repro": "Read CODEBASE.md section 1 and assist_proposal.rs buffer_excerpt handoff.",
+      "acceptance_check": "CODEBASE.md states that opted-in Assist/Delegate sends a bounded buffer excerpt to the selected provider, and that retention/export stay metadata-only unless raw consent is on.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-009",
+      "prior_id": null,
+      "severity": "P1",
+      "area": "integration",
+      "feature": "Branch fitness to merge and to release",
+      "status": "new",
+      "evidence": "git rev-list --left-right --count origin/main...HEAD is 6 10, not 2 behind. Merge-base 1a9264e. Ten commits are autoresearch harness plus agent containment/authority repairs. Six main commits are absent, including e0a1277 (file remotes), b2a0140 (wasmtime 48.0.3 and RUSTSEC-2026-0316), and 99ab134 (windowed E2E is not native input). git merge-tree shows one content conflict, in docs/superpowers/plans/2026-09-04-production-qualification.md. Product code paths do not overlap the security fix, so a merge into main keeps #220.",
+      "repro": "git rev-list --left-right --count origin/main...HEAD; git merge-tree $(git merge-base HEAD origin/main) HEAD origin/main",
+      "acceptance_check": "The branch merges into main with the production-qualification conflict resolved without dropping #220, the wasmtime/rustls pins, or the native-input wording. This tip is not released by itself.",
+      "wave": "W0"
+    },
+    {
+      "id": "RR-2026-010",
+      "prior_id": "GAP-08",
+      "severity": "P1",
+      "area": "docs",
+      "feature": "Ledger and user-guide drift",
+      "status": "doc-drift",
+      "evidence": "plans/product-readiness-ledger.md PR-17 still says the search-on-UI-thread residual remains until a search worker is in the tree. crates/legion-app/src/lib.rs holds search_worker: SearchWorker and docs/USER_GUIDE.md already says the scan runs on an app-owned worker. USER_GUIDE local-history section says metadata is stored in memory; crates/legion-storage/src/local_history.rs persists manifest.json. USER_GUIDE still says write-side apply is gated by kanban P3.F1.T2; the ledger says that task has been done since M9.",
+      "repro": "rg SearchWorker crates/legion-app/src; rg manifest.json crates/legion-storage/src/local_history.rs; read the USER_GUIDE local-history and language write-side paragraphs.",
+      "acceptance_check": "Ledger, USER_GUIDE, and code agree on search threading, local-history persistence, and whether P3.F1.T2 is done. No readiness row is promoted by the wording fix.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-011",
+      "prior_id": null,
+      "severity": "P1",
+      "area": "scm",
+      "feature": "Non-interactive git commit vs global gpgsign",
+      "status": "new",
+      "evidence": "Full workspace tests failed git_commit_validates_message_and_commits_staged_hunks with CommandFailed stderr timed out after 5005ms on commit --no-verify. commit_git_changes sets core.hooksPath= and does not set commit.gpgsign=false (crates/legion-project/src/lib.rs around line 1656). This VM's gitconfig sets commit.gpgsign=true. The same test passed in 0.20s with GIT_CONFIG_GLOBAL pointed at an empty file and GIT_CONFIG_NOSYSTEM=1.",
+      "repro": "With commit.gpgsign=true and a slow signer: cargo test -p legion-project --test git_workflow git_commit_validates_message_and_commits_staged_hunks",
+      "acceptance_check": "A commit either disables signing for the IDE action, or waits on the user's signer with a visible state and a budget that does not fail a normal signed commit at 5 seconds.",
+      "wave": "W3"
+    },
+    {
+      "id": "RR-2026-012",
+      "prior_id": null,
+      "severity": "P1",
+      "area": "ui",
+      "feature": "Shortcut labels vs the keymap",
+      "status": "doc-drift",
+      "evidence": "default_keymap binds command+S to SaveActive and command+shift+S to SaveAll (crates/legion-ui/src/ui.rs lines 1432-1438). The palette labels Save Active Buffer as ⌘S and Save All as Ctrl+Shift+S (crates/legion-app/src/lib.rs palette_command_specs). docs/KEYBOARD_REFERENCE.md also lists a desktop projection row Save all open files as Ctrl+S, which matches the fixture in crates/legion-desktop/tests/projection_rendering.rs and not the keymap. Dispatch treats the keymap ctrl flag as egui's command modifier (Ctrl on Linux/Windows, Cmd on macOS).",
+      "repro": "Read default_keymap, palette_command_specs, and KEYBOARD_REFERENCE.md.",
+      "acceptance_check": "Palette labels and KEYBOARD_REFERENCE.md name Save Active as the platform command modifier plus S, and Save All as that modifier plus Shift+S, on Linux, Windows, and macOS.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-013",
+      "prior_id": "GAP-02",
+      "severity": "P1",
+      "area": "release",
+      "feature": "verify-release-pipeline dry-run success",
+      "status": "still-open",
+      "evidence": "verify-release-pipeline exited 0 with summary total=5 passed=0 failed=0 unchecked=5. Every descriptor verifier_status is dry-run/unchecked. A green standing gate is not installer verification.",
+      "repro": "cargo run -p xtask -- verify-release-pipeline; read target/release-pipeline/verify_report.toml",
+      "acceptance_check": "The command fails when the channel is stable and any descriptor is unchecked, or the gate is renamed so a dry-run success cannot be cited as artifact verification.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-014",
+      "prior_id": "GAP-C2",
+      "severity": "P1",
+      "area": "security",
+      "feature": "Windows sandbox filesystem and network",
+      "status": "still-open",
+      "evidence": "docs/SECURITY.md still states the Windows job object kills the process tree and does not enforce filesystem or network isolation, and that escape probes observe outside-root writes succeeding. Not re-executed here (Linux VM).",
+      "repro": "Read the SECURITY.md per-platform matrix. On Windows, cargo test -p legion-sandbox --test escape_attempts.",
+      "acceptance_check": "Either Windows reports filesystem and network enforcement that escape probes cannot break, or the product UI continues to show the honest caveat and no release claim says Windows isolation matches Linux Landlock.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-015",
+      "prior_id": null,
+      "severity": "P1",
+      "area": "packaging",
+      "feature": "Linux runtime library libxkbcommon-x11",
+      "status": "new",
+      "evidence": "The first windowed-gui-e2e exited 1: Library libxkbcommon-x11.so could not be loaded. target/windowed-gui/report.toml had window_created=false. .github/scripts/apt-install.sh --gui installs libxkbcommon-dev but not libxkbcommon-x11-0. .github/workflows/legion-windowed-gui.yml installs libxkbcommon-x11-0 separately. After apt-get install libxkbcommon-x11-0, the same xtask command exited 0 with window_created=true, open/edit/save passed. libEGL also warned that DRI3 was unavailable; the window still came up under Xvfb. The Linux deb produced by the rerun (sha256 da2baecfc883dc52bb2dbb77b05517e4ae483621fa471d8167137eb70464f75a) has no Depends field in its control file.",
+      "repro": "On a machine without libxkbcommon-x11-0: xvfb-run -a cargo run -p xtask -- windowed-gui-e2e",
+      "acceptance_check": "The Linux deb Depends on libxkbcommon-x11-0 (or bundles it), and windowed-gui-e2e passes on a clean Ubuntu image that has not installed the -dev packages by hand.",
+      "wave": "W4"
+    },
+    {
+      "id": "RR-2026-016",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "scm",
+      "feature": "Git insteadOf rewriting remote classification",
+      "status": "new",
+      "evidence": "With this VM's global insteadOf rules, push_to_a_network_remote_is_denied_by_the_air_gapped_default_policy failed: left https://github.com, right ssh://github.com. The push was still denied (the assertion that failed was only the scheme label). The configured remote was git@github.com:legion/example.git. Isolated GIT_CONFIG_GLOBAL rerun: 11 passed. Userinfo from the rewrite did not appear in the test log.",
+      "repro": "git config --global --get-regexp url; cargo test -p legion-app --test git_remote_policy_workflow push_to_a_network_remote_is_denied_by_the_air_gapped_default_policy",
+      "acceptance_check": "The integration test sets a private GIT_CONFIG_GLOBAL so ambient insteadOf cannot change the expected scheme, and the audit row records the URL git will actually contact.",
+      "wave": "W3"
+    },
+    {
+      "id": "RR-2026-017",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "search",
+      "feature": "Workspace search walk errors",
+      "status": "new",
+      "evidence": "The autoresearch commits on this branch make agent grep/glob fail closed on I/O errors. Workspace search in crates/legion-project/src/lib.rs search_workspace_stream still increments omitted_file_count and returns Ok(report) when the ignore walker yields an error. WalkBuilder is not configured with follow_links(true), so symlink following stays off.",
+      "repro": "Read search_workspace_stream error arm around the WalkBuilder loop.",
+      "acceptance_check": "A walk error is visible as a failed or partial search status, not only as an omitted count on a successful report.",
+      "wave": "W3"
+    },
+    {
+      "id": "RR-2026-018",
+      "prior_id": "GAP-08",
+      "severity": "P2",
+      "area": "tooling",
+      "feature": "Phase-gate script count",
+      "status": "doc-drift",
+      "evidence": "scripts/run-phase-gates.sh header says it runs the documented 20-gate sequence and prints [n/20], then invokes 21 commands ending in update-drill. README.md lists 21 standing gates.",
+      "repro": "Read scripts/run-phase-gates.sh",
+      "acceptance_check": "The script header, the progress denominator, and README.md name the same gate count.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-019",
+      "prior_id": "GAP-06",
+      "severity": "P2",
+      "area": "privacy",
+      "feature": "Beta smoke is not a Manual egress proof",
+      "status": "still-open",
+      "evidence": "run_beta_workflow_inner calls runtime.set_product_mode(AppProductMode::Assist) before browse/edit/save. An untraced --beta-smoke exited 0 in about 6 seconds and wrote status: passed, with unsupported_surfaces including Hosted provider activation. strace -f of the same binary did not exit after the child exited (strace hang) and is not a packet capture.",
+      "repro": "target/debug/legion-desktop --beta-smoke --workspace <dir> --beta-workspace <dir>/target/beta-ws --duration-ms 1500",
+      "acceptance_check": "Manual egress evidence is a Manual-mode process, not the Assist beta workflow.",
+      "wave": "W4"
+    },
+    {
+      "id": "RR-2026-020",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "testing",
+      "feature": "Ignored tests in the default suite",
+      "status": "observed",
+      "evidence": "cargo test --workspace --all-targets --no-fail-fast summed to 4061 passed, 2 failed, 25 ignored. The ignored count includes tests that are only run by xtask rust-analyzer-smoke (--ignored), which later passed (3 tests).",
+      "repro": "Parse test result lines from the workspace test log.",
+      "acceptance_check": "The operator runbook lists which ignored tests are required gates and which stay opt-in.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-021",
+      "prior_id": "RCA-2026-08-13",
+      "severity": "P2",
+      "area": "release",
+      "feature": "Native release E2E RCA residuals",
+      "status": "partially-closed",
+      "evidence": "docs/RELEASE_E2E_RCA.md recorded deb/dmg smoke workspaces under RUNNER_TEMP, outside target/, and a missing Debian Maintainer. scripts/verify-native-package.sh now places the beta workspace under target/release-smoke, and packaging/Packager.toml sets authors so cargo-packager can emit Maintainer. A Linux deb was produced on the rerun: target/native-package/output/legion-desktop-linux-x64-deb.deb, 19775668 bytes, sha256 da2baecfc883dc52bb2dbb77b05517e4ae483621fa471d8167137eb70464f75a, Maintainer Legion <dasblueeyeddevil@gmail.com>, signer_status unsigned-beta/no-os-code-signing, workspace_version 0.1.0, release_version 0.0.1, git_sha 0a27ceb. The control file has no Depends. The first package invocation exited 1 because a concurrent --dry-run rewrote target/native-package/Packager.toml (see RR-2026-027); that exit is not the product result. The Windows MSI COM type-mismatch and the macOS DMG smoke were not re-run.",
+      "repro": "Read docs/RELEASE_E2E_RCA.md against scripts/verify-native-package.sh and packaging/Packager.toml.",
+      "acceptance_check": "A current release-workflow run on all three OS verifiers exits 0, including Maintainer on the deb and a target-contained beta workspace on each format.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-022",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "packaging",
+      "feature": "Version and changelog",
+      "status": "doc-drift",
+      "evidence": "Workspace package version is 0.1.0. packaging/Packager.toml version is 0.0.0 and scripts/package-native.sh accepts only 0.0.N with N>=1. CHANGELOG.md Unreleased has a single observability signature note. README.md correctly says the product is not GA.",
+      "repro": "Read Cargo.toml [workspace.package], packaging/Packager.toml, scripts/package-native.sh version regex, CHANGELOG.md.",
+      "acceptance_check": "One version number is used by the workspace, the package script, and the changelog section for the build that is shipped.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-023",
+      "prior_id": "GAP-09",
+      "severity": "P2",
+      "area": "performance",
+      "feature": "Linux perf baseline and 3-OS paint",
+      "status": "partial",
+      "evidence": "perf-harness exited 0 on this Linux host. manual.renderer_input_to_paint p50 3785us p95 3892us budget 32ms passed. m9.large_file_100mb p50 3309us p95 3433us budget 16ms passed. verify-perf-harness: total 17, passed 13, failed 0, skipped 4, and baseline=missing_for_os so the regression gate did not run. This is one machine, not the 3-OS paint bar in PR-UI-002.",
+      "repro": "cargo run -p xtask -- perf-harness && cargo run -p xtask -- verify-perf-harness",
+      "acceptance_check": "A linux reference block exists in plans/evidence/perf-harness-trend/baseline.toml, and macOS and Windows have their own measured renderer rows.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-024",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "privacy",
+      "feature": "Hosted telemetry surface vs wiring",
+      "status": "residual",
+      "evidence": "product_mode_allows_runtime_surface allows HostedTelemetry for Assist, Delegate, and Legion Workflows, and denies it for Manual. The HTTP exporter defaults to disabled and legion-app does not construct ReqwestTelemetryExportClient. The mode taxonomy is wider than the wired product path.",
+      "repro": "Read product_mode_allows_runtime_surface and ReqwestTelemetryExportConfig::default.",
+      "acceptance_check": "Either Assist does not allow HostedTelemetry until an explicit consent path constructs the exporter, or the privacy docs name that taxonomy bit and the default-off client together.",
+      "wave": "W4"
+    },
+    {
+      "id": "RR-2026-025",
+      "prior_id": null,
+      "severity": "P3",
+      "area": "packaging",
+      "feature": "Debian maintainer identity",
+      "status": "needs-human",
+      "evidence": "packaging/Packager.toml authors is Legion <dasblueeyeddevil@gmail.com>. The August 2026 RCA plan said not to invent a public maintainer. The field is non-empty, which unblocks the verifier, and it is a personal address.",
+      "repro": "Read packaging/Packager.toml authors.",
+      "acceptance_check": "The owner approves the public Maintainer string that ships in the deb.",
+      "wave": "W5"
+    },
+    {
+      "id": "RR-2026-026",
+      "prior_id": null,
+      "severity": "P3",
+      "area": "docs",
+      "feature": "CODEBASE.md snapshot claims",
+      "status": "doc-drift",
+      "evidence": "CODEBASE.md says Generated 2026-08-11 and Zero todo!(), zero unimplemented!(). It is a snapshot, not a gate. claim-audit still exited 0, so this sentence is not enforced.",
+      "repro": "Read the CODEBASE.md header.",
+      "acceptance_check": "The header is dated and scoped as a snapshot, or the zero-todo sentence is removed.",
+      "wave": "W2"
+    },
+    {
+      "id": "RR-2026-027",
+      "prior_id": null,
+      "severity": "P2",
+      "area": "packaging",
+      "feature": "Shared packager config during dry-run",
+      "status": "new",
+      "evidence": "scripts/package-native.sh calls render_config before the dry-run return, writing target/native-package/Packager.toml with out-dir packager-<format>-$$. A dry-run started while a real deb build was still compiling replaced that file. cargo-packager then wrote legion-desktop_0.0.1_amd64.deb under the dry-run PID directory, and the live script reported expected exactly one .deb in packager-deb-107228; found 0 (DEB_EXIT:1). The isolated rerun, with no concurrent dry-run, exited 0.",
+      "repro": "Start scripts/package-native.sh --version 0.0.1 --format deb, then while cargo build is running start the same command with --dry-run.",
+      "acceptance_check": "A dry-run does not rewrite the Packager.toml a live invocation is about to pass to cargo-packager, and two overlapping invocations do not share one out-dir.",
+      "wave": "W4"
+    }
+  ],
+  "waves": [
+    {
+      "id": "W0",
+      "title": "Merge this tip into main; do not release the tip",
+      "findings": ["RR-2026-009", "RR-2026-004"],
+      "depends_on": [],
+      "notes": "Resolve the single conflict in docs/superpowers/plans/2026-09-04-production-qualification.md. Keep main's file-remote gate, rustls 0.23.45, wasmtime bump, and native-input wording."
+    },
+    {
+      "id": "W1",
+      "title": "Make deny and clippy green on stable",
+      "findings": ["RR-2026-003", "RR-2026-007"],
+      "depends_on": ["W0"],
+      "notes": "wasmtime >=48.0.4 and rustls >=0.23.45. One-line clippy fix in LiveDapSessionError. Re-run only cargo deny check and cargo clippy."
+    },
+    {
+      "id": "W2",
+      "title": "Documentation truth, no behavior change",
+      "findings": ["RR-2026-008", "RR-2026-010", "RR-2026-012", "RR-2026-013", "RR-2026-018", "RR-2026-020", "RR-2026-022", "RR-2026-026"],
+      "depends_on": ["W0"],
+      "notes": "Do not promote ledger rows."
+    },
+    {
+      "id": "W3",
+      "title": "Git commit budget and search error status",
+      "findings": ["RR-2026-011", "RR-2026-016", "RR-2026-017"],
+      "depends_on": ["W0"],
+      "notes": "Tests must not depend on the developer's global gitconfig."
+    },
+    {
+      "id": "W4",
+      "title": "Manual SKU, runtime package deps, telemetry taxonomy",
+      "findings": ["RR-2026-005", "RR-2026-015", "RR-2026-019", "RR-2026-024", "RR-2026-027"],
+      "depends_on": ["W1"],
+      "notes": "Offline desktop must not link the provider HTTP stack. Deb Depends must include libxkbcommon-x11-0. Dry-run must not rewrite the Packager.toml a live package command is using."
+    },
+    {
+      "id": "W5",
+      "title": "Human trust chain and other-OS proof",
+      "findings": ["RR-2026-001", "RR-2026-002", "RR-2026-006", "RR-2026-014", "RR-2026-021", "RR-2026-023", "RR-2026-025"],
+      "depends_on": ["W4"],
+      "notes": "Certificates, clean-VM capture, VoiceOver, Orca, MSI, DMG, and a Linux perf baseline. No private keys in the tree."
+    }
+  ]
+}
