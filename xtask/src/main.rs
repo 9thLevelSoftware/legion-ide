@@ -623,7 +623,11 @@ enum Commands {
         #[arg(long)]
         from_artifacts: Option<String>,
     },
-    /// Verify previously-written release pipeline descriptors.
+    /// Check previously written release-pipeline descriptors.
+    ///
+    /// A dry-run success (`passed = 0`, `unchecked > 0`,
+    /// `verifier_status = dry-run/unchecked`) is descriptor metadata only.
+    /// It is not installer, signature, or OS-verifier proof.
     VerifyReleasePipeline {
         /// Path to release pipeline TOML configuration. Must match the
         /// `--config` used for `release-pipeline` so the plan is

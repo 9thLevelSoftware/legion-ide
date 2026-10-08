@@ -19,6 +19,25 @@ cargo deny check
 
 If any command fails, save exact output under `plans/evidence/legion-e2e/` before fixing. Documentation hygiene allowlists live in `docs/hygiene-allowlist.toml`; keep entries narrow and historical-only.
 
+## Ignored tests
+
+`cargo test --workspace` skips `#[ignore]` tests. They are not silent failures.
+
+Required when their named gate runs, and skipped by the default suite:
+
+| Tests | How to run |
+| --- | --- |
+| `legion-app` `rust_analyzer_workflow`, `legion-lsp` `rust_analyzer_smoke`, `legion-lsp` `stdio_transport_contract` live smoke | `cargo run -p xtask -- rust-analyzer-smoke` |
+| `legion-app` `hostile_eval_live` | `cargo run -p xtask -- hostile-eval-live` (opt-in live server; not a standing PR gate) |
+
+Opt-in only. They are not standing gates:
+
+- Live provider: `anthropic_messages_client_live_smoke_round_trip` (needs a credential).
+- Scale and timing diagnostics: `legion-text` `large_scale_100mb` and `edit_position_scaling`; `legion-editor` `performance_suite`, `viewport_depth_scaling`, `completion_depth_scaling`; `legion-project` `indexed_workspace_search_benchmark_large_fixture` and `workspace_scale`.
+- Native language fixtures: `python_app_startup`, `typescript_app_startup`, `node_runtime_approval`, `local_artifact_import`.
+- Long reproduction: `two_ra_stress`.
+- Fixture writer: `legion-observability` training test marked as writing repository fixtures.
+
 ## Golden-path smoke promotion criteria (Tier 0)
 
 `.github/workflows/legion-smoke.yml` runs GP-1/2/3/4 + update-drill on a weekly schedule and `workflow_dispatch`. It is intentionally **independent**: failures do **not** block PR merges via `legion-gates.yml`.
@@ -163,7 +182,7 @@ chmod +x ./legion-desktop-linux-x64-appimage.AppImage
 ./legion-desktop-linux-x64-appimage.AppImage --appimage-extract-and-run --beta-smoke --duration-ms 1500
 ```
 
-`cargo run -p xtask -- verify-release-pipeline` validates the descriptor metadata only. In dry-run mode it may report `dry-run/unchecked`; it does not build installers or execute their OS-specific verification commands. The workflow does not add signing credentials, certificates, notarization material, or other private keys, and it does not rewrite `Cargo.toml`; the packaging scripts receive the computed numeric release version explicitly.
+`cargo run -p xtask -- verify-release-pipeline` checks descriptor metadata only. Exit 0 with `passed = 0` and `unchecked > 0` (`verifier_status = dry-run/unchecked`) is not installer verification. Dry-run does not build installers or execute their OS-specific verification commands. The workflow does not add signing credentials, certificates, notarization material, or other private keys, and it does not rewrite `Cargo.toml`; the packaging scripts receive the computed numeric release version explicitly.
 
 ### Release signer references
 

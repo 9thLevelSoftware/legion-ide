@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Runs the documented 20-gate repository sequence from AGENTS.md.
+# Runs the documented 21-gate repository sequence from the README.
 
 set -eu
 
@@ -13,7 +13,7 @@ gate() {
   index="$1"
   name="$2"
   shift 2
-  printf '[%s/20] %s\n' "$index" "$name"
+  printf '[%s/21] %s\n' "$index" "$name"
   "$@"
 }
 
@@ -24,7 +24,7 @@ gate 4 'egui TextEdit boundary gate' cargo run -p xtask -- no-egui-textedit
 gate 5 'Kanban backlog gate' cargo run -p xtask -- verify-kanban-backlog
 gate 6 'Readiness consistency gate' cargo run -p xtask -- verify-readiness-consistency
 gate 7 'Release pipeline dry-run gate' cargo run -p xtask -- release-pipeline --dry-run
-gate 8 'Release pipeline verification gate' cargo run -p xtask -- verify-release-pipeline
+gate 8 'Release pipeline dry-run descriptor gate' cargo run -p xtask -- verify-release-pipeline
 gate 9 'Formatting gate' cargo fmt --all --check
 gate 10 'Workspace check gate' cargo check --workspace --all-targets
 gate 11 'Workspace test gate' cargo test --workspace --all-targets

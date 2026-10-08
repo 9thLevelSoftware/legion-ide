@@ -1,7 +1,7 @@
 # Legion IDE — Architecture Analysis
 
-> Generated 2026-08-11 · 857 source files · 30 crates · ~203k LOC Rust
-> All 6 finish phases complete. Zero `todo!()`, zero `unimplemented!()`.
+> Snapshot dated 2026-08-11 (857 source files, 30 crates, ~203k LOC in that snapshot).
+> The file counts and the zero-`todo!()` / zero-`unimplemented!()` sentence are not a standing gate. `claim-audit` does not enforce them.
 
 ## 1. System Overview
 
@@ -15,8 +15,9 @@ targeting Windows, macOS, and Linux via egui 0.34.2.
   `ShellProjectionSnapshot` and emits `CommandDispatchIntent` back.
 - **Proposal-mediated writes** — every file mutation flows through a
   proposal/risk-assessment pipeline before touching disk.
-- **Metadata-only egress** — AI provider traffic carries fingerprints and byte
-  counts, never raw source text.
+- **Opt-in provider excerpts** — Manual mode does not call a provider. Opted-in
+  Assist and Delegate send a bounded buffer excerpt to the selected provider.
+  Retention and export stay metadata-only unless raw consent is on.
 - **Fail-closed security** — unknown capabilities are denied; sandboxes report
   honest enforcement gaps.
 - **Port/adapter uniformity** — every domain boundary is a single-method

@@ -55,7 +55,7 @@ cargo run -p xtask -- no-egui-textedit
 cargo run -p xtask -- verify-kanban-backlog
 cargo run -p xtask -- verify-readiness-consistency
 cargo run -p xtask -- release-pipeline --dry-run
-cargo run -p xtask -- verify-release-pipeline
+cargo run -p xtask -- verify-release-pipeline   # dry-run descriptors only; unchecked is not artifact proof
 cargo fmt --all --check
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets --no-fail-fast
