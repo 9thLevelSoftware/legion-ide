@@ -67,12 +67,12 @@ pub enum LspRuntimeError {
         message: String,
     },
     /// JSON serialization or deserialization failed.
-    #[error("LSP JSON serialization failed: {source}")]
-    Json {
+    #[error("LSP JSON serialization failed: {0}")]
+    Json(
         /// serde_json source error.
         #[from]
-        source: serde_json::Error,
-    },
+        serde_json::Error,
+    ),
     /// A response arrived for an unknown or already-resolved JSON-RPC id.
     #[error("unknown LSP JSON-RPC response id {json_rpc_id}")]
     UnknownResponseId {

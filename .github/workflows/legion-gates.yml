@@ -83,7 +83,7 @@ jobs:
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
         timeout-minutes: 45
-        run: .github/scripts/apt-install.sh --gui mesa-vulkan-drivers
+        run: bash .github/scripts/apt-install.sh --gui mesa-vulkan-drivers
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

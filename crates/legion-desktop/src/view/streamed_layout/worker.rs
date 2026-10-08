@@ -177,6 +177,9 @@ impl StreamedWorkerScheduler {
             return Err(StreamedWorkerSubmitError::AdmissionFull);
         }
         let slot = (0..=MAX_ADMITTED_JOBS).find_map(|_| {
+            // `try_update` replaced this name in Rust 1.95. The workspace
+            // rust-version is 1.92, so the older name stays until that floor moves.
+            #[allow(deprecated)]
             let candidate = self
                 .next_slot
                 .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {

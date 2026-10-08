@@ -33,11 +33,13 @@ pub struct DelegatedTaskBudgetUsage {
 
 impl DelegatedTaskBudgetUsage {
     /// Display-safe status label for the budget row.
+    ///
+    /// Retry exhaustion requires an explicit audit event: `retries_used` is
+    /// cumulative, and rejection records do not identify retryable failures.
     pub fn status_label(&self) -> &'static str {
         if self.exhausted
             || self.model_turns_used >= self.model_turn_limit
             || self.tool_calls_used >= self.tool_call_limit
-            || self.retries_used >= self.retry_limit
             || self.output_bytes_used >= self.output_byte_limit
             || (self.wall_clock_ms_limit > 0
                 && self
@@ -153,6 +155,30 @@ mod tests {
     }
 
     #[test]
+    fn separated_successful_tool_result_keeps_rejections_within_retry_budget() {
+        let budget = DelegatedTaskLoopBudget {
+            max_consecutive_retries: 2,
+            ..DelegatedTaskLoopBudget::default()
+        };
+        let mut successful_result = step(DelegatedTaskLoopStepKind::ToolCallResult, 2);
+        successful_result.allowed = Some(true);
+        let usage = derive_delegated_task_budget_usage(
+            &budget,
+            &[
+                step(DelegatedTaskLoopStepKind::ToolCallRejected, 1),
+                successful_result,
+                step(DelegatedTaskLoopStepKind::ToolCallRejected, 3),
+            ],
+            0,
+            None,
+        );
+
+        assert_eq!(usage.retries_used, 2);
+        assert!(!usage.exhausted);
+        assert_eq!(usage.status_label(), "within-budget");
+    }
+
+    #[test]
     fn budget_exhaustion_step_marks_usage_exhausted() {
         let usage = derive_delegated_task_budget_usage(
             &DelegatedTaskLoopBudget::default(),
@@ -162,26 +188,6 @@ mod tests {
         );
 
         assert!(usage.exhausted);
-        assert_eq!(usage.status_label(), "exhausted");
-    }
-
-    #[test]
-    fn retry_limit_marks_usage_exhausted_without_explicit_budget_step() {
-        let budget = DelegatedTaskLoopBudget {
-            max_consecutive_retries: 2,
-            ..DelegatedTaskLoopBudget::default()
-        };
-        let usage = derive_delegated_task_budget_usage(
-            &budget,
-            &[
-                step(DelegatedTaskLoopStepKind::ToolCallRejected, 1),
-                step(DelegatedTaskLoopStepKind::ToolCallRejected, 2),
-            ],
-            0,
-            None,
-        );
-
-        assert_eq!(usage.retries_used, 2);
         assert_eq!(usage.status_label(), "exhausted");
     }
 }

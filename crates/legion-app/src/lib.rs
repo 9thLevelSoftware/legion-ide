@@ -6285,6 +6285,9 @@ struct CorrelationGenerator {
 
 impl CorrelationGenerator {
     fn next(&self) -> CorrelationId {
+        // `try_update` replaced this name in Rust 1.95. The workspace rust-version
+        // is 1.92, so the older name stays until that floor moves.
+        #[allow(deprecated)]
         let value = self
             .next
             .fetch_update(

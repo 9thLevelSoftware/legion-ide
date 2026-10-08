@@ -76,6 +76,196 @@ mod forbidden_walk_tests {
     }
 
     #[test]
+    fn recursive_grep_and_glob_alias_root_preserves_forbidden_descendants() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real");
+        let scope_private = real.join("scope-private");
+        let config_private = real.join("config-private");
+        std::fs::create_dir_all(&scope_private).unwrap();
+        std::fs::create_dir_all(&config_private).unwrap();
+        std::fs::write(real.join("control.txt"), "CANARY control").unwrap();
+        std::fs::write(scope_private.join("scope.txt"), "CANARY scope secret").unwrap();
+        std::fs::write(config_private.join("config.txt"), "CANARY config secret").unwrap();
+        let _link = DirectoryLink::new(root.path().join("alias"), &real);
+        let mut config = config(
+            root.path(),
+            vec![CanonicalPath(scope_private.to_string_lossy().into_owned())],
+        );
+        config.forbidden_paths = vec!["real/config-private".to_string()];
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "path": "alias"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "path": "alias"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "control.txt:1: CANARY control");
+        assert_eq!(glob, "control.txt");
+    }
+
+    #[test]
+    fn glob_reports_selected_directory_removed_after_containment_check() {
+        let root = TempDir::new().unwrap();
+        let selected = root.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("allowed.txt"), "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+
+        let result = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "path": "selected"}),
+            &config,
+            &mut || std::fs::remove_dir_all(&selected).unwrap(),
+        );
+
+        let feedback =
+            result.expect_err("an unreadable selected directory must not be reported as no files");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
+    #[test]
+    fn grep_reports_selected_directory_removed_after_containment_check() {
+        let root = TempDir::new().unwrap();
+        let selected = root.path().join("selected");
+        std::fs::create_dir(&selected).unwrap();
+        std::fs::write(selected.join("allowed.txt"), "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+
+        let result = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "path": "selected"}),
+            &config,
+            &mut || std::fs::remove_dir_all(&selected).unwrap(),
+        );
+
+        let feedback = result
+            .expect_err("an unreadable selected directory must not be reported as no matches");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn grep_reports_exclusively_locked_text_file_and_matches_after_release() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = TempDir::new().unwrap();
+        let path = root.path().join("allowed.txt");
+        std::fs::write(&path, "CANARY local").unwrap();
+        let config = config(root.path(), vec![]);
+        let input = serde_json::json!({"pattern": "CANARY"});
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        let blocked = execute_grep(&input, &config, &mut || {});
+        drop(lock);
+        let readable = execute_grep(&input, &config, &mut || {}).unwrap();
+
+        assert_eq!(readable, "allowed.txt:1: CANARY local");
+        let feedback =
+            blocked.expect_err("an unreadable text file must not be reported as no matches");
+        assert_eq!(feedback.kind, LegionToolCallFeedbackKind::RuntimeFailure);
+    }
+
+    struct DirectoryLink(PathBuf);
+
+    impl DirectoryLink {
+        fn new(link: PathBuf, target: &Path) -> Self {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            #[cfg(windows)]
+            {
+                let output = std::process::Command::new("cmd.exe")
+                    .arg("/C")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(&link)
+                    .arg(target)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "junction creation failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Self(link)
+        }
+    }
+
+    impl Drop for DirectoryLink {
+        fn drop(&mut self) {
+            #[cfg(windows)]
+            let result = std::fs::remove_dir(&self.0);
+            #[cfg(unix)]
+            let result = std::fs::remove_file(&self.0);
+            result.unwrap();
+        }
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_do_not_follow_external_directory_links() {
+        let root = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        std::fs::write(root.path().join("allowed.txt"), "CANARY local").unwrap();
+        std::fs::write(external.path().join("token.txt"), "CANARY external").unwrap();
+        let _link = DirectoryLink::new(root.path().join("escape"), external.path());
+        let config = config(root.path(), vec![]);
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "allowed.txt:1: CANARY local");
+        assert_eq!(glob, "allowed.txt");
+        assert_eq!(
+            std::fs::read_to_string(external.path().join("token.txt")).unwrap(),
+            "CANARY external"
+        );
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_do_not_follow_directory_cycles() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("allowed.txt"), "CANARY local").unwrap();
+        let _link = DirectoryLink::new(root.path().join("loop"), root.path());
+        let config = config(root.path(), vec![]);
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "**/*.txt", "limit": 4}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+
+        assert_eq!(grep, "allowed.txt:1: CANARY local");
+        assert_eq!(glob, "allowed.txt");
+    }
+
+    #[test]
     fn recursive_grep_and_glob_omit_forbidden_descendants() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("scope-secret")).unwrap();
@@ -164,7 +354,45 @@ pub struct DelegatedTaskLoopConfig {
 /// otherwise the second proposal silently omits the first edit, and the two
 /// carry preconditions for the same original file, so applying one makes the
 /// other stale.
-type PendingEditContent = std::collections::HashMap<PathBuf, String>;
+type PendingEditContent = std::collections::HashMap<PathBuf, PendingEditDraft>;
+
+struct PendingEditDraft {
+    content: String,
+    // Keep the original disk guard even when later edits change the draft.
+    base: PendingEditBase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingEditBase {
+    // Both fields absent means the target must remain absent.
+    content_hash: Option<u64>,
+    length: Option<u64>,
+}
+
+impl PendingEditBase {
+    fn from_content(content: &str) -> Self {
+        Self {
+            content_hash: Some(crate::worktree::stable_hash_128(content.as_bytes()) as u64),
+            length: Some(content.len() as u64),
+        }
+    }
+
+    fn from_preconditions(preconditions: &legion_protocol::ProposalVersionPreconditions) -> Self {
+        Self {
+            content_hash: preconditions.file_content_version.map(|version| version.0),
+            length: preconditions.expected_file_length,
+        }
+    }
+
+    fn matches(&self, preconditions: &legion_protocol::ProposalVersionPreconditions) -> bool {
+        *self == Self::from_preconditions(preconditions)
+    }
+}
+
+struct ResolvedFragmentEdit {
+    content: String,
+    base: PendingEditBase,
+}
 
 /// Output returned by a single tool executor call.
 pub struct ToolExecutionOutput {
@@ -604,15 +832,16 @@ fn execute_grep(
 
     let search_root = if let Some(p) = sub_path {
         let resolved = resolve_tool_path(p, worktree_root);
-        crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
-            LegionToolCallFeedback::new(
-                LegionToolKind::Grep,
-                LegionToolCallFeedbackKind::ScopeDenied,
-                format!("path containment check failed: {e}"),
-                Some(p.to_string()),
-            )
-        })?;
-        resolved
+        let relative =
+            crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
+                LegionToolCallFeedback::new(
+                    LegionToolKind::Grep,
+                    LegionToolCallFeedbackKind::ScopeDenied,
+                    format!("path containment check failed: {e}"),
+                    Some(p.to_string()),
+                )
+            })?;
+        worktree_root.join(relative)
     } else {
         worktree_root.to_path_buf()
     };
@@ -631,7 +860,15 @@ fn execute_grep(
         config,
         &mut results,
         limit,
-    );
+    )
+    .map_err(|error| {
+        LegionToolCallFeedback::new(
+            LegionToolKind::Grep,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            format!("grep filesystem read failed: {error}"),
+            Some(search_root.to_string_lossy().into_owned()),
+        )
+    })?;
 
     if results.is_empty() {
         return Ok("No matches found.".to_string());
@@ -649,29 +886,29 @@ fn grep_walk(
     config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
-) {
+) -> std::io::Result<()> {
     if results.len() >= limit {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
         if results.len() >= limit {
-            return;
+            return Ok(());
         }
+        let entry = entry?;
         let path = entry.path();
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
-        if path.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
             // Skip hidden dirs
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') {
                 continue;
             }
-            grep_walk(base, &path, re, glob_matcher, config, results, limit);
-        } else if path.is_file() {
+            grep_walk(base, &path, re, glob_matcher, config, results, limit)?;
+        } else if file_type.is_file() {
             // Apply file glob filter
             if let Some(matcher) = glob_matcher {
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -680,35 +917,35 @@ fn grep_walk(
                 }
             }
             // Skip binary files (check first bytes)
-            if looks_binary(&path) {
+            if looks_binary(&path)? {
                 continue;
             }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                let rel = path.strip_prefix(base).unwrap_or(&path);
-                for (i, line) in content.lines().enumerate() {
-                    if results.len() >= limit {
-                        return;
-                    }
-                    if re.is_match(line) {
-                        results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
-                    }
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
+                Err(error) => return Err(error),
+            };
+            let rel = path.strip_prefix(base).unwrap_or(&path);
+            for (i, line) in content.lines().enumerate() {
+                if results.len() >= limit {
+                    return Ok(());
+                }
+                if re.is_match(line) {
+                    results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Heuristic binary file check — skip if the first 512 bytes contain a NUL.
-fn looks_binary(path: &Path) -> bool {
+fn looks_binary(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
+    let mut f = std::fs::File::open(path)?;
     let mut buf = [0u8; 512];
-    let Ok(n) = f.read(&mut buf) else {
-        return false;
-    };
-    buf[..n].contains(&0u8)
+    let n = f.read(&mut buf)?;
+    Ok(buf[..n].contains(&0u8))
 }
 
 fn execute_glob(
@@ -750,15 +987,16 @@ fn execute_glob(
 
     let search_root = if let Some(p) = sub_path {
         let resolved = resolve_tool_path(p, worktree_root);
-        crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
-            LegionToolCallFeedback::new(
-                LegionToolKind::Glob,
-                LegionToolCallFeedbackKind::ScopeDenied,
-                format!("path containment check failed: {e}"),
-                Some(p.to_string()),
-            )
-        })?;
-        resolved
+        let relative =
+            crate::worktree::validate_containment(worktree_root, &resolved).map_err(|e| {
+                LegionToolCallFeedback::new(
+                    LegionToolKind::Glob,
+                    LegionToolCallFeedbackKind::ScopeDenied,
+                    format!("path containment check failed: {e}"),
+                    Some(p.to_string()),
+                )
+            })?;
+        worktree_root.join(relative)
     } else {
         worktree_root.to_path_buf()
     };
@@ -776,7 +1014,15 @@ fn execute_glob(
         config,
         &mut results,
         limit,
-    );
+    )
+    .map_err(|error| {
+        LegionToolCallFeedback::new(
+            LegionToolKind::Glob,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            format!("glob filesystem read failed: {error}"),
+            Some(search_root.to_string_lossy().into_owned()),
+        )
+    })?;
 
     if results.is_empty() {
         return Ok("No matching files found.".to_string());
@@ -793,34 +1039,35 @@ fn glob_walk(
     config: &DelegatedTaskLoopConfig,
     results: &mut Vec<String>,
     limit: usize,
-) {
+) -> std::io::Result<()> {
     if results.len() >= limit {
-        return;
+        return Ok(());
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
         if results.len() >= limit {
-            return;
+            return Ok(());
         }
+        let entry = entry?;
         let path = entry.path();
         if worktree_path_is_forbidden(config, &path) {
             continue;
         }
+        let file_type = entry.file_type()?;
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if path.is_dir() {
+        if file_type.is_dir() {
             if name.starts_with('.') {
                 continue;
             }
-            glob_walk(base, &path, matcher, config, results, limit);
-        } else if path.is_file() {
+            glob_walk(base, &path, matcher, config, results, limit)?;
+        } else if file_type.is_file() {
             let rel = path.strip_prefix(base).unwrap_or(&path);
             if matcher.is_match(rel) || matcher.is_match(name) {
                 results.push(rel.to_string_lossy().into_owned());
             }
         }
     }
+    Ok(())
 }
 
 fn execute_outline(
@@ -925,7 +1172,7 @@ fn resolve_fragment_edit(
     input: &serde_json::Value,
     resolved_edit_path: &Path,
     pending_edits: &PendingEditContent,
-) -> Result<String, LegionToolCallFeedback> {
+) -> Result<ResolvedFragmentEdit, LegionToolCallFeedback> {
     let invalid = |message: String| {
         LegionToolCallFeedback::new(
             LegionToolKind::EditAsProposal,
@@ -949,17 +1196,24 @@ fn resolve_fragment_edit(
 
     // Resolve against content this run already staged for the file, falling
     // back to the worktree for the first edit to it.
-    let file_content = match pending_edits.get(resolved_edit_path) {
-        Some(staged) => staged.clone(),
+    let (file_content, base) = match pending_edits.get(resolved_edit_path) {
+        Some(staged) => (
+            std::borrow::Cow::Borrowed(staged.content.as_str()),
+            staged.base,
+        ),
         // An edit against a file that is not there cannot be a fragment edit;
         // the model most likely meant to create it and should say so with
         // `replacement`.
-        None => std::fs::read_to_string(resolved_edit_path).map_err(|err| {
-            invalid(format!(
-                "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
-                 `replacement` with its full content instead."
-            ))
-        })?,
+        None => {
+            let content = std::fs::read_to_string(resolved_edit_path).map_err(|err| {
+                invalid(format!(
+                    "cannot read the file to locate `old_str`: {err}. To create a new file, pass \
+                     `replacement` with its full content instead."
+                ))
+            })?;
+            let base = PendingEditBase::from_content(&content);
+            (std::borrow::Cow::Owned(content), base)
+        }
     };
 
     if !has_anchor {
@@ -988,16 +1242,16 @@ fn resolve_fragment_edit(
                         .to_string(),
                 )
             })?;
-        return Ok(legion_ai::patch::splice_replacement(
-            &file_content,
-            start,
-            end,
-            new_str,
-        ));
+        return Ok(ResolvedFragmentEdit {
+            content: legion_ai::patch::splice_replacement(&file_content, start, end, new_str),
+            base,
+        });
     }
 
     match legion_ai::patch::apply_edit_from_arguments(&file_content, input) {
-        legion_ai::patch::PatchResolution::Applied { content, .. } => Ok(content),
+        legion_ai::patch::PatchResolution::Applied { content, .. } => {
+            Ok(ResolvedFragmentEdit { content, base })
+        }
         legion_ai::patch::PatchResolution::NoMatch(diagnostic) => Err(invalid(diagnostic.message)),
         legion_ai::patch::PatchResolution::Ambiguous { occurrences } => Err(invalid(format!(
             "`old_str` matches {occurrences} places in the file, so the target is ambiguous. \
@@ -1043,8 +1297,23 @@ fn execute_edit_as_proposal(
     // destructive if treated as whole content. Fragments are resolved against
     // the file on disk so the edit lands exactly where the model meant, or is
     // refused with a diagnostic it can retry from (ADR-0049).
-    let replacement = match input.get("replacement") {
-        Some(serde_json::Value::String(whole_file)) => whole_file.clone(),
+    let (replacement, expected_base) = match input.get("replacement") {
+        Some(serde_json::Value::String(whole_file)) => (
+            std::borrow::Cow::Borrowed(whole_file.as_str()),
+            pending_edits
+                .get(&resolved_edit_path)
+                .map(|staged| staged.base),
+        ),
+        None | Some(serde_json::Value::Null) => {
+            // Reads the file on disk to place the fragment, so the machine has
+            // been touched by the time this returns either way.
+            reached_the_machine();
+            let resolved = resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?;
+            (
+                std::borrow::Cow::Owned(resolved.content),
+                Some(resolved.base),
+            )
+        }
         // Present but the wrong shape. Falling through to the fragment path
         // would tell the model to "provide replacement or old_str/new_str"
         // when it *did* provide `replacement` — contradictory feedback that
@@ -1058,23 +1327,12 @@ fn execute_edit_as_proposal(
                 Some(path_str.to_string()),
             ));
         }
-        None => {
-            // Reads the file on disk to place the fragment, so the machine has
-            // been touched by the time this returns either way.
-            reached_the_machine();
-            resolve_fragment_edit(input, &resolved_edit_path, pending_edits)?
-        }
     };
     // The operation is about to happen, so the record is written now. Not
     // afterwards: a host that hangs, panics or takes the process down with it
     // never returns, and an execution nobody can distinguish from a refusal is
     // exactly what this event exists to prevent.
     reached_the_machine();
-
-    // Stage the result so a later edit to the same file composes with this one
-    // instead of resolving against stale content.
-    pending_edits.insert(resolved_edit_path.clone(), replacement.clone());
-    let replacement = replacement.as_str();
 
     // Build the proposal using DelegatedTaskProposalGenerator — zero disk writes.
     let generator = DelegatedTaskProposalGenerator::new(worktree_root.to_path_buf());
@@ -1095,7 +1353,7 @@ fn execute_edit_as_proposal(
 
     let proposal_input = DelegatedTaskProposalInput {
         target_path: &resolved_edit_path,
-        modified_content: replacement,
+        modified_content: replacement.as_ref(),
         output_id: Uuid::new_v4().to_string(),
         request_id: loop_correlation_id.to_string(),
         provider_id: "agent.loop".to_string(),
@@ -1117,6 +1375,15 @@ fn execute_edit_as_proposal(
             Some(path_str.to_string()),
         )
     })?;
+    if expected_base.is_some_and(|base| !base.matches(&proposal.preconditions)) {
+        return Err(LegionToolCallFeedback::new(
+            LegionToolKind::EditAsProposal,
+            LegionToolCallFeedbackKind::RuntimeFailure,
+            "the file changed after the edit's source was captured; refusing a stale proposal"
+                .to_string(),
+            Some(path_str.to_string()),
+        ));
+    }
 
     // Build a textual summary for the model — no disk write.
     let payload_variant = match &proposal.payload {
@@ -1138,10 +1405,213 @@ fn execute_edit_as_proposal(
         payload_variant,
         replacement.len(),
     );
+    match pending_edits.entry(resolved_edit_path) {
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().content = replacement.into_owned();
+        }
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(PendingEditDraft {
+                content: replacement.into_owned(),
+                base: expected_base.unwrap_or_else(|| {
+                    PendingEditBase::from_preconditions(&proposal.preconditions)
+                }),
+            });
+        }
+    }
     Ok(ToolExecutionOutput {
         content,
         proposal: Some(proposal),
     })
+}
+
+#[cfg(test)]
+mod fragment_proposal_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn nullable_replacement_with_fragment_stages_guarded_edit_without_writing_disk() {
+        if !legion_ai::governance::small_model_governors_enabled() {
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let original = "marker = keep\nvalue = old\nexternal = unchanged\n";
+        let intended = "marker = keep\nvalue = intended\nexternal = unchanged\n";
+        std::fs::write(&path, original).unwrap();
+        let mut pending_edits = PendingEditContent::new();
+        let result = execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": null,
+                "old_str": "value = old",
+                "new_str": "value = intended"
+            }),
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        let proposal = result
+            .expect("nullable replacement must allow an anchored fragment edit")
+            .proposal
+            .expect("a fragment edit must be staged for review");
+        assert_eq!(
+            PendingEditBase::from_preconditions(&proposal.preconditions),
+            PendingEditBase::from_content(original)
+        );
+        let draft = pending_edits.get(&path).unwrap();
+        assert_eq!(draft.content, intended);
+        assert_eq!(draft.base, PendingEditBase::from_content(original));
+    }
+
+    #[test]
+    fn fragment_edit_refuses_source_changed_before_proposal_generation() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let version_a = "marker = keep\nvalue = old\nexternal = A\n";
+        let version_b = "marker = keep\nvalue = old\nexternal = B\n";
+        std::fs::write(&path, version_a).unwrap();
+        let input = serde_json::json!({
+            "path": "settings.txt",
+            "old_str": "value = old",
+            "new_str": "value = intended"
+        });
+        let mut pending_edits = PendingEditContent::new();
+        let mut dispatches = 0;
+        let result = execute_edit_as_proposal(
+            &input,
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {
+                dispatches += 1;
+                if dispatches == 2 {
+                    std::fs::write(&path, version_b).unwrap();
+                }
+            },
+        );
+
+        let expected_disk = if legion_ai::governance::small_model_governors_enabled() {
+            version_b
+        } else {
+            version_a
+        };
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected_disk);
+        assert!(
+            result.is_err(),
+            "a fragment resolved against an obsolete source must not produce a proposal"
+        );
+        assert!(
+            pending_edits.is_empty(),
+            "a refused fragment must not stage its obsolete replacement"
+        );
+    }
+
+    #[test]
+    fn subsequent_edit_refuses_external_change_and_preserves_accepted_draft() {
+        let version_a = "marker = keep\nvalue = old\nexternal = A\n";
+        let version_b = "marker = keep\nvalue = old\nexternal = B\n";
+        let first_draft = "marker = keep\nvalue = first\nexternal = A\n";
+        let second_draft = "marker = keep\nvalue = second\nexternal = A\n";
+        for input in [
+            serde_json::json!({
+                "path": "settings.txt",
+                "old_str": "value = first",
+                "new_str": "value = second"
+            }),
+            serde_json::json!({
+                "path": "settings.txt",
+                "replacement": second_draft
+            }),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("settings.txt");
+            std::fs::write(&path, version_a).unwrap();
+            let mut pending_edits = PendingEditContent::new();
+            let accepted = execute_edit_as_proposal(
+                &serde_json::json!({
+                    "path": "settings.txt",
+                    "replacement": first_draft
+                }),
+                dir.path(),
+                1,
+                Uuid::new_v4(),
+                &mut pending_edits,
+                &mut || {},
+            )
+            .unwrap();
+            let original_base =
+                PendingEditBase::from_preconditions(&accepted.proposal.unwrap().preconditions);
+            std::fs::write(&path, version_b).unwrap();
+
+            let rejected = execute_edit_as_proposal(
+                &input,
+                dir.path(),
+                2,
+                Uuid::new_v4(),
+                &mut pending_edits,
+                &mut || {},
+            );
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), version_b);
+            assert!(
+                rejected.is_err(),
+                "a subsequent edit must not rebase an accepted draft onto external changes: {input}"
+            );
+            let retained = pending_edits.get(&path).unwrap();
+            assert_eq!(retained.content, first_draft);
+            assert_eq!(retained.base, original_base);
+        }
+    }
+
+    #[test]
+    fn new_file_draft_refuses_external_creation_and_preserves_expected_absence() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.txt");
+        let first_draft = "marker = keep\nvalue = first\n";
+        let mut pending_edits = PendingEditContent::new();
+        execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": first_draft
+            }),
+            dir.path(),
+            1,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        )
+        .unwrap();
+        assert!(!path.exists());
+        std::fs::write(&path, first_draft).unwrap();
+
+        let rejected = execute_edit_as_proposal(
+            &serde_json::json!({
+                "path": "settings.txt",
+                "replacement": "marker = keep\nvalue = second\n"
+            }),
+            dir.path(),
+            2,
+            Uuid::new_v4(),
+            &mut pending_edits,
+            &mut || {},
+        );
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first_draft);
+        assert!(
+            rejected.is_err(),
+            "an externally created file must not become the base of an accepted new-file draft"
+        );
+        let retained = pending_edits.get(&path).unwrap();
+        assert_eq!(retained.content, first_draft);
+        assert!(retained.base.content_hash.is_none());
+        assert!(retained.base.length.is_none());
+    }
 }
 
 fn execute_terminal_command(
