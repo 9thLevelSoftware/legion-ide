@@ -1,12 +1,16 @@
 //! Auto-updater client for Legion IDE (ADR-0042).
 //!
-//! # HTTP manifest source deferral
+//! # Manifest sources
 //!
-//! Only [`LocalDirManifestSource`] is implemented. An HTTP-backed manifest
-//! source is explicitly deferred — no update server currently exists, and
-//! implementing one would require a separate ADR and an egress policy review.
-//! The [`ManifestSource`] trait is the stable extension point when that work
-//! lands.
+//! [`LocalDirManifestSource`] reads a directory. `HttpManifestSource`
+//! (feature `updater-http`) reads a signed HTTP manifest. The production feed
+//! URL and Ed25519 verifying key are owner-provided process configuration
+//! ([`UpdateFeedConfig`]); neither is compiled into the binary.
+//!
+//! Product checks go through [`Updater::poll`] or
+//! `Updater::fetch_stage_swap_and_launch`. Manual mode returns before any
+//! fetch. [`Updater::check_for_update`] stays mode-agnostic so the local
+//! update drill can exercise verification without a feed.
 //!
 //! # Security invariants
 //!
@@ -14,9 +18,13 @@
 //!   A tampered manifest cannot reach the parser.
 //! * Unsigned manifests are rejected unless
 //!   [`UpdatePolicy::allow_unsigned_beta`] is `true`.
+//! * A candidate that is not strictly newer is [`UpdateCheck::NoUpdate`].
+//!   Downgrades are not installed.
 //! * Key material is never logged or persisted.
 //! * File operations use copy-then-rename (never in-place overwrite) for
 //!   Windows safety.
+//! * Applying an update copies the installed package to an N-1 slot, swaps in
+//!   the staged package, launches it, and restores N-1 when launch fails.
 
 use std::{
     cmp::Ordering,
@@ -86,6 +94,15 @@ pub enum UpdateError {
     /// TOML serialization/deserialization error.
     #[error("TOML error: {0}")]
     Toml(String),
+
+    /// The update feed request failed, or owner feed configuration is invalid.
+    #[error("update feed error: {0}")]
+    Feed(String),
+
+    /// An artifact path is absolute, contains `..`, or is otherwise not a
+    /// relative package path.
+    #[error("refusing artifact path `{0}`")]
+    UnsafePath(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -94,8 +111,8 @@ pub enum UpdateError {
 
 /// A source of raw manifest bytes and an optional detached Ed25519 signature.
 ///
-/// The single concrete implementation is [`LocalDirManifestSource`]. An HTTP
-/// implementation is explicitly deferred (see module-level docs).
+/// [`LocalDirManifestSource`] reads a directory. `HttpManifestSource` reads
+/// a signed HTTP feed when the `updater-http` feature is enabled.
 pub trait ManifestSource {
     /// Fetch the manifest.
     ///
@@ -113,8 +130,8 @@ pub trait ManifestSource {
 /// Reads `release-manifest.v1.toml` and, when present,
 /// `release-manifest.v1.toml.sig` from a local directory.
 ///
-/// **This is the only [`ManifestSource`] implementation.** HTTP-based manifest
-/// fetch is explicitly deferred to a future ADR.
+/// Directory feed used by the local update drill. The configured HTTP feed is
+/// [`HttpManifestSource`].
 pub struct LocalDirManifestSource {
     /// Directory that contains the manifest (and optional `.sig`) file.
     pub dir: PathBuf,
@@ -404,9 +421,8 @@ impl Updater {
     /// Records the new version as `current_version` and the previously-current
     /// version as `previous_version`.
     ///
-    /// **Binary swap and process restart are explicitly out of scope** (per
-    /// ADR-0042 D5). This method records intent; the OS installer or a future
-    /// restart-manager packet completes the swap.
+    /// This records the journal only. [`Updater::swap_keep_previous_and_launch`]
+    /// performs the package swap, launch, and N-1 rollback.
     pub fn apply_update(
         &self,
         staged: &StagedUpdate,
@@ -475,6 +491,211 @@ impl Updater {
 impl Default for Updater {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Result of [`Updater::poll`].
+#[derive(Debug)]
+pub enum UpdatePoll {
+    /// Manual mode does not contact the feed.
+    SkippedManual,
+    /// The feed was fetched and checked.
+    Checked(UpdateCheck),
+}
+
+/// Result of swapping in a staged package and launching it.
+#[derive(Debug)]
+pub struct InstalledPackage {
+    /// Journal after the swap, or after N-1 rollback when launch failed.
+    pub journal: UpdateJournal,
+    /// Exit code of the launched package. `None` when the process could not be spawned.
+    pub launch_exit_code: Option<i32>,
+    /// `true` when launch failed and the N-1 package was restored.
+    pub rolled_back: bool,
+}
+
+/// Owner-provided update feed. No production URL or key is compiled in.
+///
+/// * `LEGION_UPDATE_MANIFEST_URL` — manifest URL ending in
+///   `release-manifest.v1.toml`. OWNER-PROVIDED. Unset means no feed.
+/// * `LEGION_UPDATE_VERIFYING_KEY_HEX` — 32-byte Ed25519 verifying key, hex
+///   encoded. OWNER-PROVIDED. Unset means no key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateFeedConfig {
+    /// Manifest URL from process configuration.
+    pub manifest_url: Option<String>,
+    /// 32-byte verifying key from process configuration.
+    pub verifying_key: Option<Vec<u8>>,
+}
+
+impl UpdateFeedConfig {
+    /// Environment variable for the owner-provided manifest URL.
+    pub const MANIFEST_URL_ENV: &'static str = "LEGION_UPDATE_MANIFEST_URL";
+    /// Environment variable for the owner-provided verifying key, hex encoded.
+    pub const VERIFYING_KEY_HEX_ENV: &'static str = "LEGION_UPDATE_VERIFYING_KEY_HEX";
+
+    /// Read owner feed configuration from the process environment.
+    pub fn from_env() -> Result<Self, UpdateError> {
+        let url = match std::env::var(Self::MANIFEST_URL_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(UpdateError::Feed(format!(
+                    "{} is not unicode",
+                    Self::MANIFEST_URL_ENV
+                )));
+            }
+        };
+        let key = match std::env::var(Self::VERIFYING_KEY_HEX_ENV) {
+            Ok(value) => Some(value),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(UpdateError::Feed(format!(
+                    "{} is not unicode",
+                    Self::VERIFYING_KEY_HEX_ENV
+                )));
+            }
+        };
+        Self::parse(url.as_deref(), key.as_deref())
+    }
+
+    /// Parse owner feed configuration from explicit strings.
+    ///
+    /// Empty strings are treated as unset. This does not contact the network.
+    pub fn parse(
+        manifest_url: Option<&str>,
+        verifying_key_hex: Option<&str>,
+    ) -> Result<Self, UpdateError> {
+        let manifest_url = match manifest_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(url) => {
+                validate_manifest_url(url)?;
+                Some(url.to_string())
+            }
+            None => None,
+        };
+        let verifying_key = match verifying_key_hex
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(hex_key) => {
+                let bytes = hex::decode(hex_key)
+                    .map_err(|err| UpdateError::Feed(format!("verifying key hex: {err}")))?;
+                if bytes.len() != 32 {
+                    return Err(UpdateError::Feed(format!(
+                        "verifying key must be 32 bytes, got {}",
+                        bytes.len()
+                    )));
+                }
+                Some(bytes)
+            }
+            None => None,
+        };
+        Ok(Self {
+            manifest_url,
+            verifying_key,
+        })
+    }
+}
+
+/// Upper bound for one manifest, signature, or package object.
+pub const MAX_FEED_OBJECT_BYTES: u64 = 512 * 1024 * 1024;
+
+impl Updater {
+    /// Check for an update unless the product is in Manual mode.
+    ///
+    /// Manual returns [`UpdatePoll::SkippedManual`] before `source` is called.
+    pub fn poll(
+        &self,
+        mode: crate::AppProductMode,
+        source: &dyn ManifestSource,
+        policy: &UpdatePolicy,
+        verifying_key: Option<&[u8]>,
+    ) -> Result<UpdatePoll, UpdateError> {
+        if mode == crate::AppProductMode::Manual {
+            return Ok(UpdatePoll::SkippedManual);
+        }
+        self.check_for_update(source, policy, verifying_key)
+            .map(UpdatePoll::Checked)
+    }
+
+    /// Copy the installed package to `previous_path` (N-1), swap in the named
+    /// staged artifact, write the journal, and launch `current_path`.
+    ///
+    /// A non-zero exit or a spawn failure restores N-1 and toggles the journal
+    /// back. The restored journal is returned with `rolled_back` set.
+    pub fn swap_keep_previous_and_launch(
+        &self,
+        staged: &StagedUpdate,
+        artifact_name: &str,
+        current_path: &Path,
+        previous_path: &Path,
+        journal_path: &Path,
+        now_utc: &str,
+    ) -> Result<InstalledPackage, UpdateError> {
+        if current_path == previous_path {
+            return Err(UpdateError::UnsafePath(
+                "current and previous package paths are the same".to_string(),
+            ));
+        }
+        if !current_path.is_file() {
+            return Err(UpdateError::ArtifactNotFound {
+                path: current_path.display().to_string(),
+            });
+        }
+        let artifact = staged
+            .manifest
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == artifact_name)
+            .ok_or_else(|| UpdateError::ArtifactNotFound {
+                path: artifact_name.to_string(),
+            })?;
+        validate_artifact_path(&artifact.artifact_path)?;
+        let staged_path = staged.staged_dir.join(&artifact.artifact_path);
+        if !staged_path.is_file() {
+            return Err(UpdateError::ArtifactNotFound {
+                path: staged_path.display().to_string(),
+            });
+        }
+
+        copy_file_replacing(current_path, previous_path)?;
+        copy_file_replacing(&staged_path, current_path)?;
+        if let Err(err) = self.apply_update(staged, journal_path, now_utc) {
+            let _ = copy_file_replacing(previous_path, current_path);
+            return Err(err);
+        }
+
+        match launch_and_wait(current_path) {
+            Ok(status) if status.success() => {
+                let journal = read_journal(journal_path)?;
+                Ok(InstalledPackage {
+                    journal,
+                    launch_exit_code: status.code(),
+                    rolled_back: false,
+                })
+            }
+            Ok(status) => {
+                copy_file_replacing(previous_path, current_path)?;
+                let journal = self.rollback(journal_path, now_utc)?;
+                Ok(InstalledPackage {
+                    journal,
+                    launch_exit_code: status.code(),
+                    rolled_back: true,
+                })
+            }
+            Err(_err) => {
+                copy_file_replacing(previous_path, current_path)?;
+                let journal = self.rollback(journal_path, now_utc)?;
+                Ok(InstalledPackage {
+                    journal,
+                    launch_exit_code: None,
+                    rolled_back: true,
+                })
+            }
+        }
     }
 }
 
@@ -596,4 +817,391 @@ fn write_journal(path: &Path, journal: &UpdateJournal) -> Result<(), UpdateError
     fs::write(&tmp, toml_text.as_bytes())?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+fn read_journal(path: &Path) -> Result<UpdateJournal, UpdateError> {
+    let text = fs::read_to_string(path)?;
+    let file: JournalFile =
+        toml::from_str(&text).map_err(|err| UpdateError::Toml(err.to_string()))?;
+    Ok(file.journal)
+}
+
+fn validate_manifest_url(url: &str) -> Result<(), UpdateError> {
+    if url.contains('@') || url.contains('?') || url.contains('#') || url.contains(' ') {
+        return Err(UpdateError::Feed(format!("refusing manifest URL `{url}`")));
+    }
+    if !url.ends_with(MANIFEST_FILE) {
+        return Err(UpdateError::Feed(format!(
+            "manifest URL must end with {MANIFEST_FILE}"
+        )));
+    }
+    if url.starts_with("https://") {
+        return Ok(());
+    }
+    if url.starts_with("http://") {
+        let host = url
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        let host = host.rsplit_once('@').map(|(_, host)| host).unwrap_or(host);
+        let host_only = host
+            .strip_prefix('[')
+            .and_then(|bracketed| bracketed.split(']').next())
+            .unwrap_or_else(|| host.split(':').next().unwrap_or(host));
+        if matches!(host_only, "127.0.0.1" | "localhost" | "::1") {
+            return Ok(());
+        }
+        return Err(UpdateError::Feed(
+            "cleartext update feeds are limited to loopback; production feeds must be https"
+                .to_string(),
+        ));
+    }
+    Err(UpdateError::Feed(format!("refusing manifest URL `{url}`")))
+}
+
+fn validate_artifact_path(path: &str) -> Result<(), UpdateError> {
+    let invalid = path.is_empty()
+        || path.contains('\0')
+        || path.contains(':')
+        || path.contains('\\')
+        || path.starts_with('/')
+        || path.starts_with('.');
+    let path_buf = Path::new(path);
+    let escapes = path_buf.is_absolute()
+        || path_buf.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+    if invalid || escapes {
+        return Err(UpdateError::UnsafePath(path.to_string()));
+    }
+    Ok(())
+}
+
+fn sibling_temp(path: &Path, tag: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "package".to_string());
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{name}.{tag}.tmp"))
+}
+
+fn commit_rename(tmp: &Path, dest: &Path) -> Result<(), UpdateError> {
+    if dest.exists() {
+        let aside = sibling_temp(dest, "aside");
+        if aside.exists() {
+            fs::remove_file(&aside)?;
+        }
+        fs::rename(dest, &aside)?;
+        if let Err(err) = fs::rename(tmp, dest) {
+            let _ = fs::rename(&aside, dest);
+            return Err(UpdateError::Io(err));
+        }
+        let _ = fs::remove_file(&aside);
+        Ok(())
+    } else {
+        fs::rename(tmp, dest).map_err(UpdateError::Io)
+    }
+}
+
+fn copy_file_replacing(from: &Path, to: &Path) -> Result<(), UpdateError> {
+    if let Some(parent) = to.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = sibling_temp(to, "incoming");
+    fs::copy(from, &tmp)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(from)?.permissions().mode() | 0o111;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(mode);
+        fs::set_permissions(&tmp, perms)?;
+    }
+    commit_rename(&tmp, to)
+}
+
+fn launch_command(path: &Path) -> std::process::Command {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    if cfg!(windows)
+        && (extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat"))
+    {
+        let mut command = std::process::Command::new("cmd");
+        command.arg("/C").arg(path);
+        command
+    } else {
+        std::process::Command::new(path)
+    }
+}
+
+fn launch_and_wait(path: &Path) -> Result<std::process::ExitStatus, UpdateError> {
+    launch_command(path)
+        .status()
+        .map_err(|err| UpdateError::Feed(format!("launch {}: {err}", path.display())))
+}
+
+/// Arguments for [`Updater::fetch_stage_swap_and_launch`].
+#[cfg(feature = "updater-http")]
+pub struct HttpInstallRequest<'a> {
+    /// Product mode. Manual returns before any request.
+    pub mode: crate::AppProductMode,
+    /// Signed manifest feed.
+    pub source: &'a HttpManifestSource,
+    /// Channel and current version.
+    pub policy: &'a UpdatePolicy,
+    /// 32-byte Ed25519 verifying key. Tests generate this; production supplies it via config.
+    pub verifying_key: &'a [u8],
+    /// Directory for the downloaded and staged package bytes.
+    pub work_dir: &'a Path,
+    /// Manifest artifact name to swap into `current_path`.
+    pub artifact_name: &'a str,
+    /// Installed package path that will be replaced.
+    pub current_path: &'a Path,
+    /// N-1 slot. The pre-swap bytes are kept here for rollback.
+    pub previous_path: &'a Path,
+    /// Journal path written by the swap and toggled on rollback.
+    pub journal_path: &'a Path,
+    /// UTC timestamp recorded in the journal.
+    pub now_utc: &'a str,
+}
+
+/// Outcome of a configured HTTP install attempt.
+#[cfg(feature = "updater-http")]
+#[derive(Debug)]
+pub enum FetchInstallOutcome {
+    /// Manual mode did not contact the feed.
+    SkippedManual,
+    /// The feed version is not strictly newer.
+    NoUpdate,
+    /// The package was swapped and launched, or launch failed and N-1 was restored.
+    Installed(InstalledPackage),
+}
+
+#[cfg(feature = "updater-http")]
+impl Updater {
+    /// Fetch a signed manifest, reject downgrades, download and hash-check the
+    /// package, stage it, swap it into place, launch it, and keep N-1.
+    pub fn fetch_stage_swap_and_launch(
+        &self,
+        request: HttpInstallRequest<'_>,
+    ) -> Result<FetchInstallOutcome, UpdateError> {
+        if request.mode == crate::AppProductMode::Manual {
+            return Ok(FetchInstallOutcome::SkippedManual);
+        }
+        let check =
+            self.check_for_update(request.source, request.policy, Some(request.verifying_key))?;
+        let UpdateCheck::Available {
+            manifest,
+            signer_status,
+            previous_version,
+        } = check
+        else {
+            return Ok(FetchInstallOutcome::NoUpdate);
+        };
+        if !manifest
+            .artifacts
+            .iter()
+            .any(|artifact| artifact.name == request.artifact_name)
+        {
+            return Err(UpdateError::ArtifactNotFound {
+                path: request.artifact_name.to_string(),
+            });
+        }
+        let download_root = request.work_dir.join("download");
+        fs::create_dir_all(&download_root)?;
+        for artifact in &manifest.artifacts {
+            validate_artifact_path(&artifact.artifact_path)?;
+            request
+                .source
+                .download_artifact(&artifact.artifact_path, &download_root)?;
+        }
+        let staged = self.stage_update(
+            *manifest,
+            &download_root,
+            signer_status,
+            Some(previous_version),
+        )?;
+        let installed = self.swap_keep_previous_and_launch(
+            &staged,
+            request.artifact_name,
+            request.current_path,
+            request.previous_path,
+            request.journal_path,
+            request.now_utc,
+        )?;
+        Ok(FetchInstallOutcome::Installed(installed))
+    }
+}
+
+/// HTTP feed for `release-manifest.v1.toml` and its detached signature.
+///
+/// Artifact URLs are the manifest directory plus the relative artifact path.
+/// The signature URL is the manifest URL with `.sig` appended.
+#[cfg(feature = "updater-http")]
+pub struct HttpManifestSource {
+    manifest_url: String,
+    client: reqwest::blocking::Client,
+}
+
+#[cfg(feature = "updater-http")]
+impl HttpManifestSource {
+    /// Build a client for `manifest_url`.
+    ///
+    /// Cleartext HTTP is limited to loopback. Redirects are disabled.
+    pub fn new(manifest_url: impl Into<String>) -> Result<Self, UpdateError> {
+        Self::with_timeout(manifest_url, std::time::Duration::from_secs(30))
+    }
+
+    /// Same as [`Self::new`] with an explicit request timeout.
+    pub fn with_timeout(
+        manifest_url: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, UpdateError> {
+        let manifest_url = manifest_url.into();
+        validate_manifest_url(&manifest_url)?;
+        install_ring_provider();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| UpdateError::Feed(format!("failed to build update client: {err}")))?;
+        Ok(Self {
+            manifest_url,
+            client,
+        })
+    }
+
+    /// Download one relative artifact into `dest_root`.
+    pub fn download_artifact(
+        &self,
+        artifact_path: &str,
+        dest_root: &Path,
+    ) -> Result<PathBuf, UpdateError> {
+        validate_artifact_path(artifact_path)?;
+        let url = artifact_url(&self.manifest_url, artifact_path)?;
+        let dest = dest_root.join(artifact_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp = sibling_temp(&dest, "download");
+        self.download_limited(&url, &tmp)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&tmp)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&tmp, perms)?;
+        }
+        commit_rename(&tmp, &dest)?;
+        Ok(dest)
+    }
+
+    fn download_limited(&self, url: &str, dest: &Path) -> Result<(), UpdateError> {
+        use std::io::{Read, Write};
+        let mut response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|err| UpdateError::Feed(format!("{url}: {err}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(UpdateError::Feed(format!("{url} returned {status}")));
+        }
+        if let Some(len) = response.content_length()
+            && len > MAX_FEED_OBJECT_BYTES
+        {
+            return Err(UpdateError::Feed(format!(
+                "{url} exceeds {MAX_FEED_OBJECT_BYTES} bytes"
+            )));
+        }
+        let mut file = fs::File::create(dest)?;
+        let mut buf = [0u8; 8192];
+        let mut total = 0u64;
+        loop {
+            let read = response
+                .read(&mut buf)
+                .map_err(|err| UpdateError::Feed(format!("{url}: {err}")))?;
+            if read == 0 {
+                break;
+            }
+            total += read as u64;
+            if total > MAX_FEED_OBJECT_BYTES {
+                return Err(UpdateError::Feed(format!(
+                    "{url} exceeds {MAX_FEED_OBJECT_BYTES} bytes"
+                )));
+            }
+            file.write_all(&buf[..read])?;
+        }
+        Ok(())
+    }
+
+    fn fetch_required(&self, url: &str) -> Result<Vec<u8>, UpdateError> {
+        self.fetch_optional(url)?
+            .ok_or_else(|| UpdateError::Feed(format!("{url} returned 404")))
+    }
+
+    fn fetch_optional(&self, url: &str) -> Result<Option<Vec<u8>>, UpdateError> {
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .map_err(|err| UpdateError::Feed(format!("{url}: {err}")))?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(UpdateError::Feed(format!(
+                "{url} returned {}",
+                response.status()
+            )));
+        }
+        let bytes = response
+            .bytes()
+            .map_err(|err| UpdateError::Feed(format!("{url}: {err}")))?;
+        if bytes.len() as u64 > MAX_FEED_OBJECT_BYTES {
+            return Err(UpdateError::Feed(format!(
+                "{url} exceeds {MAX_FEED_OBJECT_BYTES} bytes"
+            )));
+        }
+        Ok(Some(bytes.to_vec()))
+    }
+}
+
+#[cfg(feature = "updater-http")]
+impl ManifestSource for HttpManifestSource {
+    fn fetch_manifest(&self) -> Result<(Vec<u8>, Option<Vec<u8>>), UpdateError> {
+        let manifest_url = &self.manifest_url;
+        let manifest = self.fetch_required(manifest_url)?;
+        let signature = self.fetch_optional(&format!("{manifest_url}.sig"))?;
+        Ok((manifest, signature))
+    }
+}
+
+#[cfg(feature = "updater-http")]
+fn install_ring_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+#[cfg(feature = "updater-http")]
+fn artifact_url(manifest_url: &str, artifact_path: &str) -> Result<String, UpdateError> {
+    validate_artifact_path(artifact_path)?;
+    let (dir, _) = manifest_url
+        .rsplit_once('/')
+        .ok_or_else(|| UpdateError::Feed("manifest URL has no path".to_string()))?;
+    Ok(format!("{dir}/{artifact_path}"))
 }

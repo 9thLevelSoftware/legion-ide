@@ -3996,6 +3996,8 @@ dependencies = [
  "legion-tracker",
  "legion-ui",
  "regex",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

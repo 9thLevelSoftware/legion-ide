@@ -124,7 +124,7 @@ qualification. No new external or workspace dependency is authorized.
   - `legion-app`
   - `legion-project`
   - `legion-protocol`
-  - `legion-remote`
+  - `legion-remote` (default features off; the `network` feature is enabled only by the desktop `ai` feature, so the offline package does not link `reqwest`)
   - `legion-sandbox`
   - `legion-storage` (OS keyring secret store for BYOK key entry, M9 PKT-PROV)
   - `legion-terminal`
@@ -368,6 +368,20 @@ Phase 8 production dependency rebaseline permits the following external crates o
   HTTP/archive crate requires an ADR-0055 amendment, cargo-deny/license review,
   and contract tests. Existing provider/remote/updater HTTP clients are not
   reusable language-materializer authority.
+- Signed update feed (`legion-app`, feature `updater-http`): an optional
+  direct `reqwest` and `rustls` edge, absent from
+  `--no-default-features --features offline`. This client is not
+  language-materializer authority and is not the `tool-downloads` client.
+  `LEGION_UPDATE_MANIFEST_URL` and `LEGION_UPDATE_VERIFYING_KEY_HEX` are
+  owner-provided process configuration. No production feed URL or verifying
+  key is compiled into the binary. Manual mode does not poll. Cleartext HTTP
+  is accepted only for loopback; an owner feed is HTTPS.
+- Cloud-lane HTTP (`legion-remote`, feature `network`, default on when this
+  crate is built on its own): optional `reqwest` and `rustls`. `legion-app`
+  and `legion-desktop` depend on `legion-remote` with default features
+  disabled. The desktop `ai` feature enables `network` via `remote-network`;
+  the offline Manual package does not. `cargo tree -i reqwest` for
+  `legion-desktop --no-default-features --features offline` is empty.
 - Native terminal PTY (`legion-platform` and `legion-terminal`): `windows` for ConPTY and either `nix` or `rustix` for Unix PTY, process-group, and signal handling. Supervised LSP stdio (`legion-lsp`) may use Unix `nix` process-group signals and the Windows `windows` crate Job Objects (`Win32_System_JobObjects`, plus `Win32_Security` / `Win32_System_Threading` for `CreateJobObjectW` and `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`, `KILL_ON_JOB_CLOSE`) solely to take down the language-server child and descendants that inherited stdout; it does not authorize PTY ownership or a `legion-platform` runtime edge.
 - Raw-source production vault (`legion-retention`): `aes-gcm` or `chacha20poly1305`, `rand_core`/`getrandom`, `sha2`, `zeroize`, and `keyring` for the bundled OS key-provider. Cloud KMS SDKs are not bundled in Phase 8; KMS integration is represented by a provider contract and deployment-supplied adapters.
 - Local-history content addressing (`legion-app`, M8 WS-GIT-01): `sha2` for SHA-256 content hashes of save-time local-history snapshots (metadata-only records; content blobs stay workspace-local under `.legion/local-history/`).

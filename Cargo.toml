@@ -118,7 +118,7 @@ legion-desktop = { path = "crates/legion-desktop" }
 legion-plugin = { path = "crates/legion-plugin" }
 legion-vscode-compat = { path = "crates/legion-vscode-compat" }
 legion-collaboration = { path = "crates/legion-collaboration" }
-legion-remote = { path = "crates/legion-remote" }
+legion-remote = { path = "crates/legion-remote", default-features = false }
 legion-remote-transport = { path = "crates/legion-remote-transport" }
 legion-terminal = { path = "crates/legion-terminal" }
 legion-debug = { path = "crates/legion-debug" }

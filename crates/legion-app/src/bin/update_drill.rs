@@ -25,8 +25,9 @@
 //!
 //! # Constraints
 //!
-//! - Zero egress: all operations are local; no HTTP.
-//! - Binary swap / restart: explicitly out of scope (ADR-0042 D5).
+//! - Zero egress: this drill is local and does not open a feed.
+//! - Signed HTTP fetch, package swap, launch, and N-1 rollback live on
+//!   `Updater` (`signed_feed` integration test), not in this drill.
 //! - Temp directories are cleaned on success, left for inspection on failure.
 
 use std::{

@@ -5,12 +5,19 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = ["network"]
+# Cloud-lane HTTP. The offline desktop package depends on this crate with
+# default features disabled and does not enable `network`, so that build
+# does not link reqwest.
+network = ["dep:reqwest", "dep:rustls"]
+
 [dependencies]
 legion-protocol = { workspace = true }
 legion-remote-transport = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-reqwest = { workspace = true }
-rustls = { workspace = true }
+reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 uuid = { workspace = true }
