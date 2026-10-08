@@ -662,9 +662,7 @@ impl Updater {
         }
 
         copy_file_replacing(current_path, previous_path)?;
-        if let Err(err) = copy_file_replacing(&staged_path, current_path) {
-            return Err(err);
-        }
+        copy_file_replacing(&staged_path, current_path)?;
         if let Err(err) = self.apply_update(staged, journal_path, now_utc) {
             let _ = copy_file_replacing(previous_path, current_path);
             return Err(err);
