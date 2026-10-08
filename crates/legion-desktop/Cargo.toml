@@ -7,13 +7,16 @@ publish.workspace = true
 
 [features]
 default = ["ai"]
-ai = ["legion-app/ai", "dep:legion-ai"]
+ai = ["legion-app/ai", "dep:legion-ai", "dep:legion-ai-providers"]
+# Manual SKU. legion-app/offline keeps the pure-Rust local predictor and
+# excludes legion-ai-providers, so this closure does not link the provider
+# HTTP stack.
 offline = ["legion-app/offline"]
 
 [dependencies]
 anyhow = { workspace = true }
 legion-ai = { workspace = true, optional = true }
-legion-ai-providers = { workspace = true }
+legion-ai-providers = { workspace = true, optional = true }
 legion-agent = { workspace = true }
 legion-app = { workspace = true, default-features = false }
 legion-project = { workspace = true }

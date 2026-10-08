@@ -97,6 +97,7 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     });
 
     assert_eq!(report.status, BetaWorkflowStatus::Passed);
+    assert_eq!(report.product_mode, "Assist");
     // Assert the typed outcome fields directly rather than scraping prose status.
     assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
     // Terminal productization: trusted beta workspaces launch the selected
@@ -119,6 +120,32 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     assert!(!evidence_text.contains("println!"));
     assert!(!evidence_text.contains("metadata-only beta edit"));
 
+    let saved_main = fs::read_to_string(beta_workspace.join("src/main.rs"))
+        .expect("isolated beta fixture should be saved");
+    assert!(saved_main.starts_with("// metadata-only beta edit"));
+}
+
+#[test]
+fn manual_local_workflow_stays_in_manual_and_skips_ai_proposal() {
+    let paths = BetaTestPaths::new();
+    let beta_workspace = paths.path("manual-workspace");
+    let evidence = paths.path("manual-evidence.md");
+    let report = run_beta_workflow(
+        beta_config(&paths, beta_workspace.clone(), evidence.clone()).manual_local(),
+    )
+    .unwrap_or_else(|err| {
+        let evidence_text = std::fs::read_to_string(&evidence)
+            .unwrap_or_else(|read_err| format!("<unable to read evidence: {read_err}>"));
+        panic!("manual local workflow should pass: {err}\n--- evidence ---\n{evidence_text}");
+    });
+
+    assert_eq!(report.status, BetaWorkflowStatus::Passed);
+    assert_eq!(report.product_mode, "Manual");
+    assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
+    assert_eq!(report.proposal_mode, BetaProposalMode::ManualLocalSkipped);
+    assert!(report.errors.is_empty());
+    let evidence_text = fs::read_to_string(&evidence).expect("evidence should be written");
+    assert!(evidence_text.contains("product_mode: Manual"));
     let saved_main = fs::read_to_string(beta_workspace.join("src/main.rs"))
         .expect("isolated beta fixture should be saved");
     assert!(saved_main.starts_with("// metadata-only beta edit"));

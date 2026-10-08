@@ -38,6 +38,7 @@ set -euo pipefail
 # What every Linux job needs to build and link the egui desktop shell.
 GUI_PACKAGES=(
   libxkbcommon-dev
+  libxkbcommon-x11-0
   libwayland-dev
   libxrandr-dev
   libxi-dev

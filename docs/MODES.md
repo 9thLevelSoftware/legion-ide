@@ -77,4 +77,8 @@ Forbidden:
 - autonomous merge before final approval;
 - storing raw traces by default.
 
+## Hosted telemetry
+
+`HostedTelemetry` is denied in Manual, Assist, Delegate, and Legion Workflows. The HTTP exporter is not constructed from the app. Allowing the surface and constructing the exporter have to land together, with consent.
+
 Completion requirement: workflows must be replayable from metadata/evidence and must stop safely on policy, conflict, validation, or cancellation failures.

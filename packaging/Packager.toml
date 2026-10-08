@@ -2,7 +2,10 @@ product-name = "Legion"
 name = "legion-desktop"
 version = "0.0.0"
 # cargo-packager maps `authors` to the Debian control-file Maintainer field.
-authors = ["Legion <dasblueeyeddevil@gmail.com>"]
+# OWNER APPROVAL REQUIRED: packaging@example.invalid is a placeholder.
+# Do not ship or redistribute a package until the owner replaces it with the
+# approved public Maintainer string. example.invalid is a reserved name.
+authors = ["Legion IDE <packaging@example.invalid>"]
 binaries = [{ path = "legion-desktop", main = true }]
 binaries-dir = "__BINARIES_DIR__"
 out-dir = "__OUT_DIR__"
@@ -39,6 +42,9 @@ generate-desktop-entry = false
 
 [deb]
 section = "devel"
+# Runtime library the winit/x11 shell loads. cargo-packager writes this as
+# the Debian control Depends field (cargo-packager 0.11 DebianConfig.depends).
+depends = ["libxkbcommon-x11-0"]
 files = { "__PACKAGING_DIR__/linux/legion.desktop" = "usr/share/applications/legion.desktop", "__PACKAGING_DIR__/icons/legion-512.png" = "usr/share/icons/hicolor/512x512/apps/legion.png", "__REPO_ROOT__/LICENSE" = "usr/share/doc/legion-desktop/LICENSE", "__REPO_ROOT__/docs/PRIVACY.md" = "usr/share/doc/legion-desktop/PRIVACY.md", "__REPO_ROOT__/THIRD_PARTY_NOTICES.md" = "usr/share/doc/legion-desktop/THIRD_PARTY_NOTICES.md" }
 
 [appimage]

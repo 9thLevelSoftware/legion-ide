@@ -86,6 +86,22 @@ fn canonical_entries_cover_all_v1_modes() {
 }
 
 #[test]
+fn hosted_telemetry_is_denied_until_an_exporter_and_consent_path_exist() {
+    for mode in [
+        ProductMode::Manual,
+        ProductMode::Assist,
+        ProductMode::Delegates,
+        ProductMode::Automate,
+        ProductMode::LegionWorkflows,
+    ] {
+        assert!(
+            !mode.allows_runtime_surface(ProductRuntimeSurface::HostedTelemetry),
+            "{mode:?} must deny HostedTelemetry while the exporter is unwired"
+        );
+    }
+}
+
+#[test]
 fn manual_mode_denies_ai_and_network_surfaces() {
     assert!(
         !ProductMode::Manual.allows_runtime_surface(ProductRuntimeSurface::AssistedAi),

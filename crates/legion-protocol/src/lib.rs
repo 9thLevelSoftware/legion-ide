@@ -9046,6 +9046,9 @@ pub enum ProductRuntimeSurface {
     /// Network egress surface.
     NetworkEgress,
     /// Hosted telemetry export or spool surface.
+    ///
+    /// Denied in every product mode until a consent path constructs the
+    /// exporter. The HTTP client is not wired from the app.
     HostedTelemetry,
     /// Delegated task planning or review surface.
     DelegatedTask,
@@ -9068,20 +9071,15 @@ pub fn product_mode_allows_runtime_surface(
 ) -> bool {
     use ProductMode::{Assist, Automate, Delegates, LegionWorkflows, Manual};
     use ProductRuntimeSurface::{
-        AssistedAi, Automation, CloudProvider, Collaboration, DelegatedTask, HostedTelemetry,
-        ManualIde, NetworkEgress, PluginManagement, PluginRuntime, RemoteWorkspace, WorkerRuntime,
+        AssistedAi, Automation, CloudProvider, Collaboration, DelegatedTask, ManualIde,
+        NetworkEgress, PluginManagement, PluginRuntime, RemoteWorkspace, WorkerRuntime,
     };
 
     match mode {
         Manual => matches!(surface, ManualIde | PluginManagement),
         Assist => matches!(
             surface,
-            ManualIde
-                | PluginManagement
-                | AssistedAi
-                | CloudProvider
-                | NetworkEgress
-                | HostedTelemetry
+            ManualIde | PluginManagement | AssistedAi | CloudProvider | NetworkEgress
         ),
         Delegates => matches!(
             surface,
@@ -9090,7 +9088,6 @@ pub fn product_mode_allows_runtime_surface(
                 | AssistedAi
                 | CloudProvider
                 | NetworkEgress
-                | HostedTelemetry
                 | DelegatedTask
                 | WorkerRuntime
                 | Collaboration
@@ -9102,7 +9099,6 @@ pub fn product_mode_allows_runtime_surface(
                 | AssistedAi
                 | CloudProvider
                 | NetworkEgress
-                | HostedTelemetry
                 | DelegatedTask
                 | WorkerRuntime
                 | Automation
