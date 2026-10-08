@@ -450,6 +450,45 @@ fn git_commit_disables_repository_controlled_hooks() {
     assert_eq!(head.trim(), "feat: safe commit");
 }
 
+#[cfg(unix)]
+#[test]
+fn git_commit_does_not_inherit_gpgsign_or_wait_for_gpg() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Instant;
+
+    let repo = TempGitRepo::new();
+    repo.write("tracked.txt", "staged change\n");
+    run_git(repo.path(), ["add", "tracked.txt"]);
+
+    let signer = repo.path().join("slow-gpg");
+    fs::write(&signer, "#!/bin/sh\nsleep 30\nexit 1\n").expect("signer stub should be written");
+    let mut permissions = fs::metadata(&signer)
+        .expect("signer metadata should be readable")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&signer, permissions).expect("signer should be executable");
+    run_git(repo.path(), ["config", "commit.gpgsign", "true"]);
+    run_git(
+        repo.path(),
+        [
+            "config",
+            "gpg.program",
+            signer.to_str().expect("signer path should be utf8"),
+        ],
+    );
+
+    let started = Instant::now();
+    commit_git_changes(repo.path(), "feat: unsigned commit")
+        .expect("commit should succeed without waiting for gpg");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "IDE commit waited on the signer: {:?}",
+        started.elapsed()
+    );
+    let head = run_git(repo.path(), ["log", "-1", "--pretty=%s"]);
+    assert_eq!(head.trim(), "feat: unsigned commit");
+}
+
 #[test]
 fn git_conflict_resolves_current_and_incoming() {
     let repo = TempGitRepo::new();

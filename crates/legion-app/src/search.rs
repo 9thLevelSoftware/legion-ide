@@ -119,6 +119,9 @@ struct SearchBuildResult {
     /// NUL-byte heuristic.  Propagated from `WorkspaceSearchReport` into
     /// `SearchProjection` so the desktop panel can display the count.
     skipped_binary_count: usize,
+    /// True when the workspace walk reported an I/O error. The result set is
+    /// incomplete even when some hits were collected.
+    partial: bool,
     /// Effective search options used for this result set.
     case_sensitive: bool,
     /// Effective whole-word option used for this result set.
@@ -416,6 +419,19 @@ fn search_status_for_result(
         };
     }
 
+    if result.partial {
+        let detail = result
+            .diagnostics
+            .iter()
+            .find(|line| line.contains("walk error"))
+            .cloned()
+            .unwrap_or_else(|| "workspace search walk failed".to_string());
+        return SearchStatusProjection {
+            kind: SearchStatusKindProjection::DegradedLimited,
+            message: format!("Search is partial because a workspace walk failed: {detail}"),
+        };
+    }
+
     if result.results.is_empty() {
         SearchStatusProjection {
             kind: SearchStatusKindProjection::NoResults,
@@ -700,6 +716,7 @@ fn run_search_request(
                 })
                 .map_err(|error| error.to_string())?;
             result.skipped_binary_count = report.skipped_binary_count;
+            result.partial = report.partial;
             Ok(result)
         }
     }
@@ -1112,6 +1129,7 @@ impl AppComposition {
         // Propagate binary-skip count from the workspace report so it is
         // visible to the user via SearchProjection.skipped_binary_count.
         result.skipped_binary_count = report.skipped_binary_count;
+        result.partial = report.partial;
 
         Ok(result)
     }
@@ -1515,6 +1533,55 @@ mod worker_tests {
         assert_eq!(latest.generation, 2);
         assert_eq!(latest.query_id, "search:new");
         assert!(worker.drain_latest().is_none());
+    }
+
+    #[test]
+    fn search_status_marks_workspace_walk_errors_partial() {
+        let empty = SearchBuildResult {
+            partial: true,
+            diagnostics: vec!["workspace search walk error: permission denied".to_string()],
+            ..SearchBuildResult::default()
+        };
+        let empty_status = search_status_for_result(SearchScopeProjection::Workspace, &empty);
+        assert_eq!(
+            empty_status.kind,
+            SearchStatusKindProjection::DegradedLimited
+        );
+        assert!(empty_status.message.contains("walk error"));
+
+        let with_hits = SearchBuildResult {
+            partial: true,
+            diagnostics: empty.diagnostics.clone(),
+            results: vec![SearchResultProjection {
+                query_id: "q".to_string(),
+                scope: SearchScopeProjection::Workspace,
+                workspace_id: None,
+                buffer_id: None,
+                file_id: None,
+                file_path: None,
+                line_number: 0,
+                range: ProtocolTextRange {
+                    start: TextCoordinate {
+                        line: 0,
+                        character: 0,
+                        byte_offset: Some(0),
+                        utf16_offset: Some(0),
+                    },
+                    end: TextCoordinate {
+                        line: 0,
+                        character: 6,
+                        byte_offset: Some(6),
+                        utf16_offset: Some(6),
+                    },
+                },
+                snippet: "needle".to_string(),
+                snippet_truncated: false,
+                stale: false,
+            }],
+            ..SearchBuildResult::default()
+        };
+        let hit_status = search_status_for_result(SearchScopeProjection::Workspace, &with_hits);
+        assert_eq!(hit_status.kind, SearchStatusKindProjection::DegradedLimited);
     }
 
     #[test]
