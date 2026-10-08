@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -136,6 +136,7 @@ impl RemotePair {
     /// This is the check that distinguishes "policy stopped the push" from
     /// "the push ran and happened to fail".
     fn bare_has_commits(&self) -> bool {
+        isolate_git_config();
         Command::new("git")
             .current_dir(&self.bare)
             .args(["log", "--oneline", "master"])
@@ -176,7 +177,33 @@ impl Drop for RemotePair {
     }
 }
 
+/// Point git at an empty global config for this test process.
+///
+/// Ambient `url.*.insteadOf` rules rewrite the scheme `git remote get-url`
+/// reports. The product records that URL, which is the URL git will contact.
+/// These tests assert the configured remote, so they must not inherit the
+/// caller's rewrite rules.
+fn isolate_git_config() {
+    static CONFIG: OnceLock<PathBuf> = OnceLock::new();
+    CONFIG.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!(
+            "legion-app-git-config-global-{}",
+            std::process::id()
+        ));
+        fs::write(&path, "").expect("private gitconfig should be created");
+        // SAFETY: this test binary is the only writer of these process
+        // variables. OnceLock publishes the write before any later git child
+        // is spawned from `run_git` or `bare_has_commits`.
+        unsafe {
+            std::env::set_var("GIT_CONFIG_GLOBAL", &path);
+            std::env::set_var("GIT_CONFIG_NOSYSTEM", "1");
+        }
+        path
+    });
+}
+
 fn run_git(root: &Path, args: &[&str]) -> String {
+    isolate_git_config();
     let output = Command::new("git")
         .current_dir(root)
         .args(args)

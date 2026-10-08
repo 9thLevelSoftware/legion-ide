@@ -92,11 +92,80 @@ fn workspace_search_stream_emits_batches_and_cancels() {
         .expect("search should complete");
 
     assert!(report.cancelled);
+    assert!(!report.partial);
     assert_eq!(report.hit_count, 2);
     assert_eq!(batches.len(), 1);
     assert_eq!(batches[0].hits.len(), 2);
     assert_eq!(batches[0].omitted_hit_count, 0);
     assert_eq!(report.omitted_hit_count, 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn workspace_search_walk_error_is_partial() {
+    use std::os::unix::fs::PermissionsExt;
+
+    struct RestoreMode {
+        path: PathBuf,
+    }
+
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    let root = create_temp_workspace();
+    fs::write(root.join("visible.txt"), "needle\n").expect("write visible file");
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    actor
+        .poll_watcher_events(opened.workspace_id)
+        .expect("initial watcher poll");
+
+    // Created after open and after a watcher poll. Discovery and the watcher
+    // snapshot both fail-close on an unreadable child. The 64ms watcher
+    // debounce then lets the search walk observe the error itself.
+    let blocked = root.join("blocked");
+    fs::create_dir(&blocked).expect("create blocked directory");
+    fs::write(blocked.join("secret.txt"), "needle\n").expect("write blocked file");
+    let _restore = RestoreMode {
+        path: blocked.clone(),
+    };
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
+        .expect("block directory traversal");
+    let report = actor
+        .search_workspace_stream(
+            WorkspaceSearchQuery {
+                workspace_id: opened.workspace_id,
+                pattern: SearchPattern::literal("needle", true, false).expect("literal search"),
+                search_text: "needle".to_string(),
+                filters: WorkspaceSearchFilters::default(),
+                result_limit: 10,
+                batch_size: 8,
+                use_indexed_backend: false,
+            },
+            |_| true,
+        )
+        .expect("search should return a report when the walk hits an error");
+
+    assert!(
+        report.partial,
+        "a walk error must mark the report partial: {report:?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|line| line.contains("walk error")),
+        "diagnostics should name the walk error: {:?}",
+        report.diagnostics
+    );
+    assert!(
+        report.hit_count >= 1,
+        "readable files should still contribute hits"
+    );
+    drop(_restore);
     let _ = fs::remove_dir_all(root);
 }
 

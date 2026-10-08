@@ -233,6 +233,10 @@ pub struct WorkspaceSearchReport {
     pub skipped_binary_count: usize,
     pub diagnostics: Vec<String>,
     pub cancelled: bool,
+    /// True when the workspace walk reported an I/O error. Hits collected
+    /// around that error are incomplete, so a caller must not present the
+    /// report as a successful empty or complete search.
+    pub partial: bool,
 }
 
 type WorkspaceSearchSnapshot = (
@@ -1656,6 +1660,8 @@ pub fn create_git_worktree(
 /// Commit the current index with the supplied message.
 ///
 /// Repository-controlled hooks are disabled for this non-interactive action.
+/// Signing is also disabled for this action: a caller's `commit.gpgsign`
+/// must not spend the 5s local git budget waiting on a signer.
 pub fn commit_git_changes(
     root: impl AsRef<Path>,
     message: &str,
@@ -1666,6 +1672,8 @@ pub fn commit_git_changes(
         &[
             "-c",
             "core.hooksPath=",
+            "-c",
+            "commit.gpgsign=false",
             "commit",
             "--no-verify",
             "--file",
@@ -5449,6 +5457,7 @@ impl WorkspaceActor {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
+                    report.partial = true;
                     report.omitted_file_count = report.omitted_file_count.saturating_add(1);
                     let diagnostic = format!("workspace search walk error: {err}");
                     report.diagnostics.push(diagnostic.clone());
