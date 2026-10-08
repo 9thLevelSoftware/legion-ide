@@ -1648,6 +1648,7 @@ fn stable_hash_u128(value: &str) -> u128 {
     hash
 }
 
+#[cfg(feature = "network")]
 /// Configuration for HTTP Legion Cloud Lane transport.
 ///
 /// The `Debug` implementation intentionally redacts the auth token value.
@@ -1663,6 +1664,7 @@ pub struct HttpLegionCloudLaneTransportConfig {
     pub auth_token: Option<(String, String)>,
 }
 
+#[cfg(feature = "network")]
 impl std::fmt::Debug for HttpLegionCloudLaneTransportConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut builder = f.debug_struct("HttpLegionCloudLaneTransportConfig");
@@ -1681,12 +1683,14 @@ impl std::fmt::Debug for HttpLegionCloudLaneTransportConfig {
     }
 }
 
+#[cfg(feature = "network")]
 /// Production HTTP JSON transport for the Legion Cloud Lane.
 pub struct HttpLegionCloudLaneTransport {
     client: reqwest::blocking::Client,
     config: HttpLegionCloudLaneTransportConfig,
 }
 
+#[cfg(feature = "network")]
 impl std::fmt::Debug for HttpLegionCloudLaneTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpLegionCloudLaneTransport")
@@ -1695,6 +1699,7 @@ impl std::fmt::Debug for HttpLegionCloudLaneTransport {
     }
 }
 
+#[cfg(feature = "network")]
 fn ensure_rustls_provider() {
     use std::sync::Once;
     static INIT: Once = Once::new();
@@ -1705,6 +1710,7 @@ fn ensure_rustls_provider() {
     });
 }
 
+#[cfg(feature = "network")]
 impl HttpLegionCloudLaneTransport {
     /// Construct a transport from explicit configuration.
     pub fn new(config: HttpLegionCloudLaneTransportConfig) -> Result<Self, RemoteRuntimeError> {
@@ -1791,6 +1797,7 @@ impl HttpLegionCloudLaneTransport {
     }
 }
 
+#[cfg(feature = "network")]
 impl LegionCloudLaneTransport for HttpLegionCloudLaneTransport {
     fn submit_task(
         &mut self,

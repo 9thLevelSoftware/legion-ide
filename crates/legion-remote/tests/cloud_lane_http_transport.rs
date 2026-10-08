@@ -1,3 +1,4 @@
+#![cfg(feature = "network")]
 //! Deterministic HTTP JSON cloud-lane transport integration tests.
 //!
 //! Uses a local `std::net::TcpListener` to avoid external network dependencies

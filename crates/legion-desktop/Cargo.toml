@@ -7,10 +7,17 @@ publish.workspace = true
 
 [features]
 default = ["ai"]
-ai = ["legion-app/ai", "dep:legion-ai", "dep:legion-ai-providers"]
+ai = [
+    "legion-app/ai",
+    "legion-app/remote-network",
+    "legion-app/updater-http",
+    "legion-remote/network",
+    "dep:legion-ai",
+    "dep:legion-ai-providers",
+]
 # Manual SKU. legion-app/offline keeps the pure-Rust local predictor and
-# excludes legion-ai-providers, so this closure does not link the provider
-# HTTP stack.
+# excludes legion-ai-providers, updater-http, and legion-remote's network
+# feature, so this closure does not link reqwest.
 offline = ["legion-app/offline"]
 
 [dependencies]
@@ -21,7 +28,7 @@ legion-agent = { workspace = true }
 legion-app = { workspace = true, default-features = false }
 legion-project = { workspace = true }
 legion-protocol = { workspace = true }
-legion-remote = { workspace = true }
+legion-remote = { workspace = true, default-features = false }
 legion-sandbox = { workspace = true }
 legion-storage = { workspace = true }
 legion-terminal = { workspace = true }
