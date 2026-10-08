@@ -67,7 +67,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -124,7 +124,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -172,7 +172,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -220,7 +220,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -268,7 +268,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -316,7 +316,7 @@ jobs:
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui
+        run: bash .github/scripts/apt-install.sh --gui
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

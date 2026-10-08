@@ -31,7 +31,7 @@ jobs:
 
       - name: Install Linux GUI and AT-SPI bindings
         if: runner.os == 'Linux'
-        run: .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1 at-spi2-core dbus-x11 gir1.2-atspi-2.0 python3-gi python3-gi-cairo
+        run: bash .github/scripts/apt-install.sh --gui xvfb mesa-vulkan-drivers libxkbcommon-x11-0 libgl1-mesa-dri libegl1 at-spi2-core dbus-x11 gir1.2-atspi-2.0 python3-gi python3-gi-cairo
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
