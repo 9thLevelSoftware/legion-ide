@@ -154,8 +154,8 @@ file, and for non-Rust workspaces that happen to be trusted.
 **What is deferred (write-side, P2.F1.T5):**
 Rename, format, code actions, and organize imports are typed shell/dispatch-intent proposal
 surfaces rather than command-palette entries. They generate proposal previews, but they are not
-direct edits. Apply activation remains gated by the existing proposal workflow and kanban task
-P3.F1.T2.
+direct edits. Applying a preview still goes through the proposal workflow. Kanban task
+P3.F1.T2 has been done since M9; it is not an open gate on apply.
 See `plans/product-readiness-ledger.md` PR-LANG-001 for the current gate status.
 
 ## Support and release surfaces
@@ -200,7 +200,7 @@ Before committing, Legion validates:
 Legion records a content snapshot every time a file is successfully saved through the proposal workflow.
 Snapshots are bounded to 50 entries or 50 MiB per file (whichever limit is reached first).
 
-Metadata (timestamps, content hash, file identity) is stored in memory by `LocalHistoryMetadataStore`.
+`LocalHistoryMetadataStore` keeps a bounded in-memory index and writes that metadata to `.legion/local-history/manifest.json`, so a restart can restore the entries.
 Content blobs are written to `.legion/local-history/<path-key>/` inside the workspace and are workspace-local — they are never pushed to remote.
 
 To browse or restore from local history:

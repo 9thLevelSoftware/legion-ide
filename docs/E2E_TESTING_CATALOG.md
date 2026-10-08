@@ -154,8 +154,8 @@ Score each as: opens, asks for operands if needed, dispatches, visible result.
 
 | ID | Palette title | Shortcut (projected) |
 | --- | --- | --- |
-| E2E-PAL-01 | Save All | Ctrl+Shift+S |
-| E2E-PAL-02 | Save Active Buffer | ⌘S / Ctrl+S |
+| E2E-PAL-01 | Save All | Ctrl/Cmd+Shift+S (platform command modifier plus Shift+S) |
+| E2E-PAL-02 | Save Active Buffer | Ctrl/Cmd+S (platform command modifier plus S) |
 | E2E-PAL-03 | Close Active Tab | ⌘W |
 | E2E-PAL-04 | Reveal Active File in Explorer | ⇧⌘E |
 | E2E-PAL-05 | Refresh Explorer | F5 (idle, no debug configs) |

@@ -1,4 +1,4 @@
-# Runs the documented 20-gate repository sequence from AGENTS.md.
+# Runs the documented 21-gate repository sequence from the README.
 
 $ErrorActionPreference = "Stop"
 
@@ -16,7 +16,7 @@ function Invoke-Gate {
         [scriptblock] $Command
     )
 
-    Write-Host "[$Index/20] $Name"
+    Write-Host "[$Index/21] $Name"
     & $Command
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
@@ -28,7 +28,7 @@ Invoke-Gate 4 "egui TextEdit boundary gate" { cargo run -p xtask -- no-egui-text
 Invoke-Gate 5 "Kanban backlog gate" { cargo run -p xtask -- verify-kanban-backlog }
 Invoke-Gate 6 "Readiness consistency gate" { cargo run -p xtask -- verify-readiness-consistency }
 Invoke-Gate 7 "Release pipeline dry-run gate" { cargo run -p xtask -- release-pipeline --dry-run }
-Invoke-Gate 8 "Release pipeline verification gate" { cargo run -p xtask -- verify-release-pipeline }
+Invoke-Gate 8 "Release pipeline dry-run descriptor gate" { cargo run -p xtask -- verify-release-pipeline }
 Invoke-Gate 9 "Formatting gate" { cargo fmt --all --check }
 Invoke-Gate 10 "Workspace check gate" { cargo check --workspace --all-targets }
 Invoke-Gate 11 "Workspace test gate" { cargo test --workspace --all-targets }

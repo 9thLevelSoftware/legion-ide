@@ -62,7 +62,7 @@ This table maps accepted production evidence to the product-readiness gates it i
 
 - `PR-UI-001` remains **Substrate validated**. The final PR-15 packet (`354df16e`) has a committed, repeatable Windows UI-tree probe only; macOS and Linux remain unobserved, and no NVDA/VoiceOver/Orca transcript is claimed. The required cross-OS accessibility bar is not met.
 - `PR-UI-002` remains **Substrate validated**. PR-16 (`40bc366a`) wires a renderer-backed 100MB workload, but its evidence is report-only until `large_file_manual_renderer_perf.toml` is produced; no measured renderer result or 3-OS paint result exists. Historical text-model measurements are not paint evidence.
-- The `PR-UI-002` search-on-UI-thread residual remains explicit until the search worker is present in the current tree. No promotion is claimed from PR-16.
+- `SearchWorker` in `legion-app` runs workspace search off the UI thread. The earlier search-on-UI-thread residual described a worker that is now in the tree. `PR-UI-002` stays **Substrate validated**. This sentence does not promote that row.
 
 ## 2026-08-31 release-gap full pass
 

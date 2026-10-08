@@ -13652,13 +13652,13 @@ fn palette_command_specs() -> Vec<PaletteCommandSpec> {
             id: "save-all",
             title: "Save All",
             detail: "Save every open tab",
-            shortcut_label: Some("Ctrl+Shift+S"),
+            shortcut_label: Some("Ctrl/Cmd+Shift+S"),
         },
         PaletteCommandSpec {
             id: "save-active-buffer",
             title: "Save Active Buffer",
             detail: "Save the active tab",
-            shortcut_label: Some("⌘S"),
+            shortcut_label: Some("Ctrl/Cmd+S"),
         },
         PaletteCommandSpec {
             id: "close-active-tab",
@@ -26011,7 +26011,7 @@ impl AppComposition {
                     disabled_reason: active_buffer
                         .is_none()
                         .then(|| "no active buffer".to_string()),
-                    shortcut: Some("⌘S"),
+                    shortcut: Some("Ctrl/Cmd+S"),
                     risk_label: legion_protocol::CommandRiskLabel::Review,
                     required_permission: Some(CapabilityId("workspace.save".to_string())),
                     target: active_buffer.map(|buffer| format!("buffer:{}", buffer.0)),

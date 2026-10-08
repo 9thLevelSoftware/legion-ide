@@ -7,9 +7,9 @@ Treat the labels as the product source of truth for the current profile and plat
 
 | Surface | Action | Shortcut label | Notes |
 | --- | --- | --- | --- |
-| App command palette | Save All | `Ctrl+Shift+S` | Save every open tab through app authority. |
-| Desktop projection row | Save all open files | `Ctrl+S` | Surface-specific label currently rendered in the desktop projection tests. |
-| App command palette | Save Active Buffer | `⌘S` | Save the active tab through app authority. |
+| App command palette | Save All | `Ctrl/Cmd+Shift+S` | Save every open tab through app authority. The keymap flag is the platform command modifier (Ctrl on Linux and Windows, Cmd on macOS) plus Shift+S. |
+| App command palette | Save Active Buffer | `Ctrl/Cmd+S` | Save the active tab through app authority. The keymap flag is the platform command modifier plus S. |
+| Desktop projection fixture | Save all open files | sample label only | `crates/legion-desktop/tests/projection_rendering.rs` renders a fixture row. That fixture is not the keymap. |
 | App command palette | Close Active Tab | `⌘W` | Close the active tab through app authority. |
 | App command palette | Reveal Active File in Explorer | `⇧⌘E` | Reveal the active file in the explorer. |
 | App command palette | Refresh Explorer | `F5` | When **no** debug session and **no** launch configs are projected. |
