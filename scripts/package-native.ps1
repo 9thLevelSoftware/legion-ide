@@ -28,7 +28,9 @@ $OutputDir = if ([System.IO.Path]::IsPathRooted($OutDir)) {
 }
 $BinariesDir = Join-Path $NativeDir "cargo-target/release"
 $PackagingDir = Join-Path $RepoRoot "packaging"
-$ConfigPath = Join-Path $NativeDir "Packager.toml"
+# Per-invocation config. A shared Packager.toml lets a dry-run replace the
+# file a live cargo-packager process is still reading.
+$ConfigPath = Join-Path $NativeDir ("Packager-" + $Format + "-" + [Guid]::NewGuid().ToString("N") + ".toml")
 $Platform = "windows"
 $Architecture = "x64"
 $StagingDir = Join-Path $NativeDir ("packager-" + [Guid]::NewGuid().ToString("N"))
@@ -84,9 +86,9 @@ function Render-PackagerConfig {
 }
 
 Assert-X64PackageHost
-Render-PackagerConfig
 if ($DryRun) {
     Write-Host "Planned package: $PackagePath"
+    Write-Host "desktop_features: --no-default-features --features offline"
     exit 0
 }
 
@@ -98,10 +100,11 @@ New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 New-Item -ItemType Directory -Path $StagingDir | Out-Null
 $originalTargetDir = $env:CARGO_TARGET_DIR
 try {
+    Render-PackagerConfig
     $env:CARGO_TARGET_DIR = Join-Path $NativeDir "cargo-target"
     Push-Location $RepoRoot
     try {
-        cargo build --release -p legion-desktop
+        cargo build --release -p legion-desktop --no-default-features --features offline
         Assert-X64Executable (Join-Path $BinariesDir "legion-desktop.exe")
         New-Item -ItemType Directory -Force -Path $BinariesDir | Out-Null
         Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $BinariesDir "LICENSE") -Force
@@ -149,5 +152,8 @@ try {
     $env:CARGO_TARGET_DIR = $originalTargetDir
     if (Test-Path -LiteralPath $StagingDir) {
         [System.IO.Directory]::Delete($StagingDir, $true)
+    }
+    if (Test-Path -LiteralPath $ConfigPath) {
+        Remove-Item -LiteralPath $ConfigPath -Force
     }
 }

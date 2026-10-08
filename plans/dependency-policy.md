@@ -120,7 +120,7 @@ qualification. No new external or workspace dependency is authorized.
 - `legion-desktop` may depend on:
   - `legion-agent`
   - `legion-ai` (optional, feature-gated behind `ai`)
-  - `legion-ai-providers` (provider tier/gating for setup UX, M9 PKT-PROV)
+  - `legion-ai-providers` (optional, `ai` feature only; the offline Manual SKU must not link the provider HTTP stack)
   - `legion-app`
   - `legion-project`
   - `legion-protocol`

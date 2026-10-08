@@ -6,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use legion_app::AppProductMode;
 use legion_protocol::{ProposalLifecycleState, TextCoordinate};
 use legion_ui::SearchScopeProjection;
 
@@ -212,6 +211,8 @@ pub struct BetaWorkflowReport {
     pub proposal_mode: BetaProposalMode,
     /// Number of projected status messages.
     pub status_message_count: usize,
+    /// Product mode the process actually ran in.
+    pub product_mode: String,
     /// Path to the metadata-only diagnostics export.
     pub diagnostics_export: PathBuf,
     /// Unsupported advanced surface labels.
@@ -245,6 +246,7 @@ impl BetaWorkflowReport {
                 "# GUI Phase 7 Local Workflow Smoke\n\n",
                 "## Status\n\n",
                 "status: {status}\n",
+                "product_mode: {product_mode}\n",
                 "smoke_label: {smoke_label}\n",
                 "metadata-only: true\n",
                 "real_workspace_root: {real_workspace_root}\n",
@@ -271,6 +273,7 @@ impl BetaWorkflowReport {
                 "{errors}\n"
             ),
             status = self.status.as_str(),
+            product_mode = self.product_mode,
             smoke_label = GUI_PHASE7_BETA_SMOKE_LABEL,
             real_workspace_root = self.real_workspace_root.display(),
             beta_workspace_root = self.beta_workspace_root.display(),
@@ -327,6 +330,7 @@ pub fn run_beta_workflow(config: BetaWorkflowConfig) -> Result<BetaWorkflowRepor
             proposal_status: "blocked".to_string(),
             proposal_mode: BetaProposalMode::Blocked,
             status_message_count: 0,
+            product_mode: "unopened".to_string(),
             diagnostics_export: config.diagnostics_export.clone(),
             unsupported_surfaces: unsupported_surfaces(),
             errors: vec![BetaWorkflowError::Blocked {
@@ -366,7 +370,8 @@ fn run_beta_workflow_inner(
     .with_session_state(config.session_state.clone())
     .with_diagnostics_export(config.diagnostics_export.clone());
     let mut runtime = DesktopRuntime::open(launch_config)?;
-    runtime.set_product_mode(AppProductMode::Assist)?;
+    // Manual is the default. This smoke is the local open/edit/save/search
+    // evidence, so it must not escalate to Assist.
     let mut errors: Vec<BetaWorkflowError> = Vec::new();
 
     let browse_status = run_browse_actions(&mut runtime);
@@ -433,6 +438,7 @@ fn run_beta_workflow_inner(
         proposal_status,
         proposal_mode,
         status_message_count: final_snapshot.status_messages.len(),
+        product_mode: final_snapshot.product_mode.label().to_string(),
         diagnostics_export: config.diagnostics_export,
         unsupported_surfaces: unsupported_surfaces(),
         errors,

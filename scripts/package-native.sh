@@ -88,7 +88,9 @@ fi
 
 PACKAGE_NAME="legion-desktop-${PLATFORM}-${ARCH}-${FORMAT}.${EXTENSION}"
 PACKAGE_PATH="$OUTPUT_DIR/$PACKAGE_NAME"
-CONFIG_PATH="$NATIVE_DIR/Packager.toml"
+# Per-invocation config. A shared Packager.toml lets a dry-run replace the
+# file a live cargo-packager process is still reading.
+CONFIG_PATH="$NATIVE_DIR/Packager-${FORMAT}-$$.toml"
 BINARIES_DIR="$NATIVE_DIR/cargo-target/release"
 PACKAGING_DIR="$REPO_ROOT/packaging"
 STAGING_DIR="$NATIVE_DIR/packager-${FORMAT}-$$"
@@ -113,11 +115,14 @@ render_config() {
     "$PACKAGING_DIR/Packager.toml" > "$CONFIG_PATH"
 }
 
-render_config
 if [[ "$DRY_RUN" -eq 1 ]]; then
   echo "Planned package: $PACKAGE_PATH"
+  echo "desktop_features: --no-default-features --features offline"
   exit 0
 fi
+
+trap 'rm -rf -- "$STAGING_DIR"; rm -f -- "$CONFIG_PATH"' EXIT
+render_config
 
 if [[ -e "$PACKAGE_PATH" ]]; then
   echo "refusing to overwrite existing package: $PACKAGE_PATH" >&2
@@ -126,8 +131,7 @@ fi
 
 mkdir -p "$OUTPUT_DIR"
 mkdir "$STAGING_DIR"
-trap 'rm -rf -- "$STAGING_DIR"' EXIT
-CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" cargo build --release -p legion-desktop
+CARGO_TARGET_DIR="$NATIVE_DIR/cargo-target" cargo build --release -p legion-desktop --no-default-features --features offline
 mkdir -p "$BINARIES_DIR"
 cp "$REPO_ROOT/LICENSE" "$BINARIES_DIR/LICENSE"
 cp "$REPO_ROOT/docs/PRIVACY.md" "$BINARIES_DIR/PRIVACY.md"

@@ -97,6 +97,7 @@ fn beta_workflow_runs_through_desktop_runtime_and_writes_metadata_evidence() {
     });
 
     assert_eq!(report.status, BetaWorkflowStatus::Passed);
+    assert_eq!(report.product_mode, "Manual");
     // Assert the typed outcome fields directly rather than scraping prose status.
     assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
     // Terminal productization: trusted beta workspaces launch the selected

@@ -108,6 +108,7 @@ Legion’s network posture is deny-by-default and mode-aware.
 At a high level:
 
 - Manual mode forbids AI, cloud, hosted telemetry, and any network-capable AI action.
+- Hosted telemetry export is denied in every product mode. The HTTP exporter stays unwired until a consent path constructs it.
 - Assisted and delegated flows only use network paths that satisfy policy, privacy, and trust gates.
 - Air-gap policy denies non-loopback network access.
 - Hosted provider invocation is denied in air-gap policy.
