@@ -12,16 +12,16 @@ Counts: **P0 6, P1 9, P2 10, P3 2** (27 findings, `RR-2026-001` through `RR-2026
 
 ## Follow-up as of 2026-10-08
 
-The observations above are the 2026-10-07 tip. Later pull requests changed several of them. This section does not rewrite those observations and does not promote a ledger row. The verdict on the audited tip stays **NO-GO**. What remains after the follow-up PRs is still NO-GO: signing, VoiceOver, Orca, Windows sandbox probes, MSI/DMG, a Linux perf baseline, a clean-VM capture, and an owner-provided production update feed.
+The observations above are the 2026-10-07 tip. #226 through #231 have since merged to `main`. This section does not rewrite those observations and does not promote a ledger row. The verdict on the audited tip stays **NO-GO**. What remains after those merges is still NO-GO: signing, VoiceOver, Orca, Windows sandbox probes, MSI/DMG, a Linux perf baseline, a clean-VM capture, and an owner-provided production update feed.
 
 | Finding | Follow-up |
 | --- | --- |
-| RR-2026-004, RR-2026-009 | #226 merges this tip into `main` and keeps #220. |
-| RR-2026-003, RR-2026-007 | #227 pins wasmtime 48.0.5 and clears the clippy `-D warnings` failure. |
-| RR-2026-008, RR-2026-010, RR-2026-012, RR-2026-013, RR-2026-018, RR-2026-020, RR-2026-022, RR-2026-026 | #228 corrects the docs. No ledger promotion. |
-| RR-2026-011, RR-2026-016, RR-2026-017 | #229 stops IDE commits from inheriting `commit.gpgsign`, isolates git config for remote policy, and marks search walk errors partial. |
-| RR-2026-005 (provider stack), RR-2026-015, RR-2026-019, RR-2026-024, RR-2026-025, RR-2026-027 | #230 builds the offline desktop feature without `legion-ai-providers`, declares `libxkbcommon-x11-0`, keeps a Manual local beta path, denies hosted telemetry in every mode, uses a placeholder Maintainer, and isolates packager config. A rebuilt deb was not inspected. `reqwest` still entered that closure through `legion-remote`. |
-| RR-2026-002, RR-2026-005 (`reqwest`) | #231 adds signed HTTP fetch, hash check, swap, launch, and N-1 rollback. Manual mode does not poll. The production URL and verifying key stay owner config. The offline package does not link `reqwest`. |
+| RR-2026-004, RR-2026-009 | #226 merged at `3344d1f`. It brings this tip into `main` and keeps #220. |
+| RR-2026-003, RR-2026-007 | #227 merged into the #226 branch at `2471c90` and reached `main` with #226. wasmtime is 48.0.5 and clippy `-D warnings` is clear. |
+| RR-2026-008, RR-2026-010, RR-2026-012, RR-2026-013, RR-2026-018, RR-2026-020, RR-2026-022, RR-2026-026 | #228 merged at `985d012`. Documentation only. No ledger promotion. |
+| RR-2026-011, RR-2026-016, RR-2026-017 | #229 merged at `84ccb5c`. IDE commits do not inherit `commit.gpgsign`, git config is isolated for remote policy, and search walk errors are partial. |
+| RR-2026-005 (provider stack), RR-2026-015, RR-2026-019, RR-2026-024, RR-2026-025, RR-2026-027 | #230 merged at `e5e3e35`. The offline desktop feature does not link `legion-ai-providers`, the deb metadata declares `libxkbcommon-x11-0`, a Manual local beta path stays in Manual, hosted telemetry is denied in every mode, the Maintainer is still a placeholder, and packager config is isolated. A rebuilt deb was not inspected. |
+| RR-2026-002, RR-2026-005 (`reqwest`) | #231 merged at `19aca63`. Signed HTTP fetch, hash check, swap, launch, and N-1 rollback are in tree. Manual mode does not poll. The production URL and verifying key stay owner config. The offline package does not link `reqwest`. |
 | RR-2026-001, RR-2026-006, RR-2026-014, RR-2026-021, RR-2026-023 | Still open. Signing certificates, VoiceOver, Orca, Windows sandbox, MSI/DMG, and perf baselines need a human and the other OS. |
 
 ## Branch merge assessment
