@@ -9,6 +9,18 @@
     "ahead_of_main": 10,
     "behind_main": 6
   },
+  "follow_up_2026_10_08": {
+    "note": "The finding records below are the 2026-10-07 tip. These pull requests changed the tree afterward. The audited tip stays NO-GO, and signing, screen readers, Windows sandbox, MSI/DMG, perf baselines, a clean-VM capture, and an owner-provided production update feed are still open.",
+    "pull_requests": {
+      "226": ["RR-2026-004", "RR-2026-009"],
+      "227": ["RR-2026-003", "RR-2026-007"],
+      "228": ["RR-2026-008", "RR-2026-010", "RR-2026-012", "RR-2026-013", "RR-2026-018", "RR-2026-020", "RR-2026-022", "RR-2026-026"],
+      "229": ["RR-2026-011", "RR-2026-016", "RR-2026-017"],
+      "230": ["RR-2026-005", "RR-2026-015", "RR-2026-019", "RR-2026-024", "RR-2026-025", "RR-2026-027"],
+      "231": ["RR-2026-002", "RR-2026-005"]
+    },
+    "still_open": ["RR-2026-001", "RR-2026-006", "RR-2026-014", "RR-2026-021", "RR-2026-023"]
+  },
   "verdict": "NO-GO",
   "verdict_summary": "Do not call this tip general availability or an invitation-only preview. Substrate gates that do not require signing mostly pass on this Linux VM. The tip is missing main's host-qualified file-remote fix and current advisory pins, cargo deny and clippy are red on Rust 1.99, and signing, update, Manual SKU, and macOS/Linux screen-reader proof are still open.",
   "counts": {
