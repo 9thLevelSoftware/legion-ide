@@ -118,6 +118,14 @@ fn workspace_search_walk_error_is_partial() {
 
     let root = create_temp_workspace();
     fs::write(root.join("visible.txt"), "needle\n").expect("write visible file");
+    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
+    actor
+        .poll_watcher_events(opened.workspace_id)
+        .expect("initial watcher poll");
+
+    // Created after open and after a watcher poll. Discovery and the watcher
+    // snapshot both fail-close on an unreadable child. The 64ms watcher
+    // debounce then lets the search walk observe the error itself.
     let blocked = root.join("blocked");
     fs::create_dir(&blocked).expect("create blocked directory");
     fs::write(blocked.join("secret.txt"), "needle\n").expect("write blocked file");
@@ -126,8 +134,6 @@ fn workspace_search_walk_error_is_partial() {
     };
     fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000))
         .expect("block directory traversal");
-
-    let (actor, opened) = open_workspace(&root, WorkspaceTrustState::Trusted);
     let report = actor
         .search_workspace_stream(
             WorkspaceSearchQuery {
