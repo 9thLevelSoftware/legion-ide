@@ -359,6 +359,7 @@ fn validate_cloud_task_id(task_id: &LegionCloudLaneTaskId) -> Result<(), RemoteR
     Ok(())
 }
 
+#[cfg(feature = "network")]
 /// Percent-encodes a string for safe inclusion as a single URL path segment.
 ///
 /// Characters permitted in an RFC 3986 path segment (`pchar`: unreserved,

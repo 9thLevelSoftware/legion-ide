@@ -200,7 +200,6 @@ struct Slot {
     previous: PathBuf,
     journal: PathBuf,
     work: PathBuf,
-    original: Vec<u8>,
 }
 
 impl Slot {
@@ -214,7 +213,6 @@ impl Slot {
             work: root.join("work"),
             root,
             current,
-            original: original.to_vec(),
         }
     }
 }
