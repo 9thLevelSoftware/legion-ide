@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use legion_app::AppProductMode;
 use legion_protocol::{ProposalLifecycleState, TextCoordinate};
 use legion_ui::SearchScopeProjection;
 
@@ -57,6 +58,11 @@ pub struct BetaWorkflowConfig {
     pub session_state: PathBuf,
     /// Metadata-only diagnostics export path.
     pub diagnostics_export: PathBuf,
+    /// When true, stay in Manual and skip the AI proposal step.
+    ///
+    /// The default beta smoke escalates to Assist because that proposal step
+    /// is AI dispatch. That process is not Manual egress evidence.
+    pub manual_local: bool,
 }
 
 impl BetaWorkflowConfig {
@@ -89,7 +95,15 @@ impl BetaWorkflowConfig {
             evidence_path,
             session_state,
             diagnostics_export,
+            manual_local: false,
         })
+    }
+
+    /// Local open/edit/save/search evidence that must remain in Manual.
+    #[must_use]
+    pub fn manual_local(mut self) -> Self {
+        self.manual_local = true;
+        self
     }
 }
 
@@ -150,6 +164,8 @@ pub enum BetaProposalMode {
     AutonomousApply,
     /// The step did not run because the workflow was blocked before it.
     Blocked,
+    /// The AI proposal step was not run so the process could stay in Manual.
+    ManualLocalSkipped,
 }
 
 /// Typed beta workflow error distinguishing blocked-environment failures from
@@ -370,8 +386,11 @@ fn run_beta_workflow_inner(
     .with_session_state(config.session_state.clone())
     .with_diagnostics_export(config.diagnostics_export.clone());
     let mut runtime = DesktopRuntime::open(launch_config)?;
-    // Manual is the default. This smoke is the local open/edit/save/search
-    // evidence, so it must not escalate to Assist.
+    if !config.manual_local {
+        // The AI proposal step requires Assist. Manual local evidence must
+        // not take this branch.
+        runtime.set_product_mode(AppProductMode::Assist)?;
+    }
     let mut errors: Vec<BetaWorkflowError> = Vec::new();
 
     let browse_status = run_browse_actions(&mut runtime);
@@ -383,7 +402,14 @@ fn run_beta_workflow_inner(
         run_search_action(&mut runtime, SearchScopeProjection::Workspace, "beta");
     let language_status = run_language_actions(&mut runtime);
     let (terminal_status, terminal_decision) = run_terminal_actions(&mut runtime);
-    let (proposal_status, proposal_mode) = run_proposal_actions(&mut runtime);
+    let (proposal_status, proposal_mode) = if config.manual_local {
+        (
+            "skipped_manual_local".to_string(),
+            BetaProposalMode::ManualLocalSkipped,
+        )
+    } else {
+        run_proposal_actions(&mut runtime)
+    };
 
     let _ = runtime.handle_action(DesktopAction::Quit);
     let final_snapshot = runtime.projection_snapshot();
@@ -413,6 +439,7 @@ fn run_beta_workflow_inner(
         language_status: &language_status,
         terminal_status: &terminal_status,
         proposal_status: &proposal_status,
+        require_proposal_preview: !config.manual_local,
         diagnostics_export_written,
         diagnostics_export_label: &diagnostics_export_label,
     }));
@@ -535,6 +562,7 @@ struct BetaWorkflowGateInputs<'a> {
     language_status: &'a str,
     terminal_status: &'a str,
     proposal_status: &'a str,
+    require_proposal_preview: bool,
     diagnostics_export_written: bool,
     diagnostics_export_label: &'a str,
 }
@@ -586,12 +614,14 @@ fn beta_workflow_gate_errors(input: BetaWorkflowGateInputs<'_>) -> Vec<BetaWorkf
         "terminal workflow did not record expected trusted-launch session",
         input.terminal_status,
     );
-    record_gate_error(
-        &mut errors,
-        input.proposal_status.contains("preview=Some"),
-        "proposal workflow did not record preview",
-        input.proposal_status,
-    );
+    if input.require_proposal_preview {
+        record_gate_error(
+            &mut errors,
+            input.proposal_status.contains("preview=Some"),
+            "proposal workflow did not record preview",
+            input.proposal_status,
+        );
+    }
     record_gate_error(
         &mut errors,
         input.diagnostics_export_written,
@@ -935,6 +965,7 @@ mod tests {
             language_status: "status=Running operations=1 cancellations=0 problems=0",
             terminal_status: "terminal_running_expected status=Running rows=1 omitted=0",
             proposal_status: "proposal=2 preview=Some(...) ledger_rows=2 selected=Some(ProposalId(2))",
+            require_proposal_preview: true,
             diagnostics_export_written: false,
             diagnostics_export_label: "target/gui-phase7-diagnostics.md",
         });
@@ -961,6 +992,7 @@ mod tests {
             language_status: "status=Cancelled operations=2 cancellations=1 problems=0",
             terminal_status: "terminal_running_expected status=Running rows=1 omitted=0",
             proposal_status: "proposal=2 preview=Some(...) ledger_rows=2 selected=Some(ProposalId(2))",
+            require_proposal_preview: true,
             diagnostics_export_written: true,
             diagnostics_export_label: "target/gui-phase7-diagnostics.md",
         });
