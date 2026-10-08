@@ -190,12 +190,12 @@ pub enum LiveDapSessionError {
         message: String,
     },
     /// Wire framing or I/O failed.
-    #[error("DAP session I/O failed: {source}")]
-    Io {
+    #[error("DAP session I/O failed: {0}")]
+    Io(
         /// Framing source.
         #[from]
-        source: DapFrameError,
-    },
+        DapFrameError,
+    ),
     /// Protocol sequence unexpected.
     #[error("DAP protocol error: {message}")]
     Protocol {
