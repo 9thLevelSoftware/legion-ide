@@ -20663,6 +20663,10 @@ pub struct WorkbenchSettingsRecord {
     /// in the workspace → user → platform-default precedence chain.
     #[serde(default)]
     pub terminal_shell_selection: String,
+    /// Validated, bounded named provider metadata; never credentials or mode consent.
+    /// Absent in older sessions. App composition owns validation and restoration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_provider_configuration_json: Option<String>,
     /// DTO schema version.
     pub schema_version: u16,
 }
@@ -20697,6 +20701,7 @@ impl Default for WorkbenchSettingsRecord {
             next_edit_prediction_enabled: false,
             telemetry: WorkbenchTelemetryConsent::default(),
             terminal_shell_selection: String::new(),
+            ai_provider_configuration_json: None,
             schema_version: 1,
         }
     }

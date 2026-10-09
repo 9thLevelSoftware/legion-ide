@@ -8,6 +8,10 @@ coordinator reported Euclid's final core review PASS on 2026-10-09 and authorize
 committing this bounded slice. Ticket 40 remains open; this is not native or live
 acceptance.
 
+The follow-up persistence slice below incorporated integration `177caa5`, then
+docs-only `18ef5f7`. The coordinator reported Euclid's separate final persistence
+review PASS and authorized the bounded follow-up commit.
+
 ## Scope and authority
 
 Read the TDD skill, glossary, architecture authority boundaries, ticket/spec/
@@ -75,7 +79,10 @@ captures a literal inline request with limit 128 and `thinking.type=disabled`.
 Product chat/Assist uses the existing 512-token bound. These are requested wire
 bounds, not evidence of subscription/model compliance, pricing or quality.
 No key was requested or supplied here; secure subscription credential entry and
-live qualification remain pending. Thinking-disabled behavior is explicit;
+live qualification remain pending. The owner's TokenPlan pilot selection is
+existing task authorization for bounded qualification; it is not a request for
+another paid-call approval gate. Explicit Assist/egress consent and no PAYG
+fallback remain required. Thinking-disabled behavior is explicit;
 reasoning-enabled context/quality work is not certified by this slice.
 
 ## Red-before-green slice checks
@@ -155,7 +162,7 @@ check was repeated as a debugging loop. Commands below are from this worker root
 | `cargo check -p legion-app --no-default-features --features offline` | Passed compilation, with 42 unused-import/dead-code warnings. These include new configured-provider fields/helpers excluded from live use in this build; no warning-clean claim. No network/AI call or native workflow qualification. |
 | `git diff --check` | Passed for tracked changes. |
 
-## Separate remaining gates
+## Remaining gates at core commit 77166f7
 
 - Runtime implementation: core APIs/contracts above are partial. Native profile
   settings/typed intents, exact selection display, durable metadata persistence,
@@ -170,8 +177,9 @@ check was repeated as a debugging loop. Commands below are from this worker root
   key, so an authenticated remote Ollama profile is not qualified. Capabilities
   are adapter metadata, not tested FIM/model capability. Configured completions
   currently publish one chunk rather than qualifying native streaming.
-- Live acceptance: the owner-selected endpoint/model is known; a dedicated secure
-  subscription key and concrete paid/live-call authority are absent. No claim of
+- Live acceptance: the owner-selected endpoint/model is known and bounded pilot
+  qualification is already task-authorized. Secure credential provisioning is
+  pending; no actual key has been supplied/read and no live calls performed. No claim of
   token-plan auth success, actual model identity, subscription quota behavior,
   cost compliance, native interaction, useful real prediction or live quality.
   These are blocked prerequisites, not failed local tests or passed acceptance.
@@ -180,3 +188,116 @@ check was repeated as a debugging loop. Commands below are from this worker root
 
 Ticket 40 acceptance boxes remain unchecked until its complete native and live
 outcome is independently evidenced. No ticket-map or execution status promotion.
+
+## Bounded persistence follow-up
+
+Date: 2026-10-09. Base: integrated core `77166f7`, then clean fast-forward to
+`177caa5` (driver partial; no app overlap), then docs-only `18ef5f7`. Status:
+implementation/checks complete and independently reviewed. The coordinator
+reported Euclid's final persistence PASS: no blockers, five source/test hashes
+match the frozen seven-file patch. Commit authorized; no source changes or
+successful-check repeats after review.
+
+Inspected the actual existing settings path before editing: AppComposition
+captures/restores `WorkspaceSessionRecord.workbench_settings`, and
+`DesktopSessionStore` loads/saves that record with verified temporary-file writes,
+sync and atomic replacement. Interactive desktop session persistence already uses
+this path. ADR-0005's separate metadata/backend reservations are not reopened;
+this extends the existing settings record, not a new global store/backend.
+
+The announced public seams are AppComposition's profile APIs, workspace session
+capture/restore and shell projection, composed with DesktopSessionStore load/save.
+The new test file uses real temporary settings files and a second application
+instance. Synthetic keys live only in the injected existing SecretStore port.
+These seams prove disk reopen and metadata contracts, not native settings input
+or OS keyring persistence.
+
+Source scope: `legion-protocol/src/lib.rs` (settings DTO only),
+`legion-app/src/lib.rs` (settings conversion and session methods only),
+`legion-app/src/provider_configuration.rs` (one shared codec validator),
+`legion-desktop/src/session.rs` (validation at the existing store boundary), and
+`legion-desktop/tests/provider_profile_persistence.rs`. Only this evidence file and
+issue 40 change additionally. No workflow.rs, UI, MCP initializer/module/guard,
+map/execution, dependency or credential-reference algorithm edits.
+
+The additive optional `ai_provider_configuration_json` settings field preserves
+older records through serde defaults. Stored metadata includes exact profiles,
+selection and wire options, never keys, key values, health or mode consent.
+Restore validates through the same bounded app codec as explicit configuration;
+the store validates on both load and save, including the verified temp readback.
+Invalid records produce a generic provider-metadata error without echoing payload
+or secrets. They neither overwrite the valid file nor partially change active
+provider/workbench settings. Fallible memory-snapshot parsing is preflighted
+before applying provider/settings metadata so a later memory error cannot leave a
+partially restored route. Stored selection is metadata, not permission to enter
+Assist or call a provider; a fresh app remains Manual. Health starts unchecked.
+
+An absent legacy field restores an empty/unselected provider configuration without
+deleting secure-store accounts. Profile name/adapter/endpoint/model survive exact
+reopen, so the existing computed secure reference remains stable; revocation from
+the reopened instance reaches the same synthetic key. Native keyring entry,
+replacement/revocation and restart evidence remain unqualified.
+
+### Persistence red/green and failure evidence
+
+Each exact slice command starts
+`cargo test -p legion-desktop --test provider_profile_persistence` and finishes
+with the exact test name and `-- --exact`:
+
+| Exact test | Observed red / repair | Result |
+| --- | --- | --- |
+| `reopened_session_preserves_named_profiles_selection_and_secure_reference_in_manual` | Disk/session reopen restored zero profiles instead of two. Added metadata capture/restore to the existing settings path. | Green: exact route/model/options and selected/unselected profiles reopen; synthetic key absent from bytes; secure-reference revoke works; Manual and unchecked health preserved. |
+| `invalid_profile_metadata_cannot_replace_saved_or_active_session_settings` | Store published malformed provider metadata. Added shared app-codec validation to existing store load/save. | Green: malformed JSON, missing selection, forbidden api_key field and oversized metadata refused; old disk bytes and active settings/profile preserved; invalid disk record refused rather than defaulted. |
+| `legacy_session_without_profiles_restores_empty_selection_without_deleting_keys` | First fixture used an intermediate serde_json::Value and failed with number out of range before exercising restore. Serialized the same protocol record directly with the optional field absent. | Passed affected-only rerun; empty/unselected legacy state, Manual and existing secure-store account preserved. |
+
+Before the invalid-metadata behavioral red, that test failed compilation because
+it called private `settings_projection`. The supported correction uses the
+already approved public shell snapshot. This compiler error is not behavioral red
+evidence. Neither fixture repair changed production behavior or triggered a
+multi-attempt repair escalation.
+
+Two additional characterization checks ran with the first two already-successful
+tests excluded:
+
+```text
+cargo test -p legion-desktop --test provider_profile_persistence -- --skip reopened_session_preserves_named_profiles_selection_and_secure_reference_in_manual --skip invalid_profile_metadata_cannot_replace_saved_or_active_session_settings
+```
+
+`failed_atomic_profile_publication_keeps_previous_session_bytes_and_reopen_state`
+passed on actual Windows file handles. The old file permits READ/WRITE sharing
+but denies DELETE/replacement, so atomic publish fails while an unsafe in-place
+fallback could write. Save returns failure; previous bytes and reopened selected
+model remain unchanged. The existing atomic publisher needed no production fix.
+`malformed_session_memory_does_not_partially_restore_provider_or_workbench_settings`
+also passed: malformed memory preflight leaves old profile/settings and Manual
+unchanged. The third test in that command was the legacy fixture failure noted
+above; only that affected failure was repaired and rerun.
+
+### Final persistence checks
+
+The final combined desktop run checks the completed shared validation and restore
+path after integration, once. Earlier successful cases were not rerun repeatedly
+as a debugging loop. No source changes followed these checks.
+
+| Exact command | Result |
+| --- | --- |
+| `cargo test -p legion-desktop --test provider_profile_persistence --test session_restore` | Passed 5 persistence and 21 existing session/restore contracts; no native window or paid provider invocation. |
+| `cargo test -p legion-app --test explicit_provider_configuration named_profile_round_trips_without_credentials_and_rejects_secret_endpoints_atomically -- --exact` | Passed the one affected existing codec/secure-reference regression after sharing its parser with storage validation. Other unrelated provider cases were not rerun. |
+| `cargo fmt --all --check` | Passed after formatting only the affected app/protocol/desktop crates. |
+| `cargo run -p xtask -- check-deps` | Passed dependency policy checks; no new edges. |
+| `cargo check -p legion-desktop --lib --no-default-features --features offline` | Passed; existing vendor float-literal warning and 42 app unused/dead-code warnings retained. Compilation is not native/offline runtime qualification. |
+| `git diff --check` | Passed tracked changes; subsequent documentation wording clarifies existing pilot authorization and records this result. |
+
+The checks initially shared Cargo locks (sessions 84358, 60618 and 41528); all
+completed successfully. No running command remains. No successful check is
+scheduled for another repeat. Euclid's final persistence PASS and coordinator
+commit approval satisfy the independent-review gate for this bounded follow-up.
+
+Current remaining ticket 40 gates: native profile/selection/health and credential
+UI, attended OS keyring durability/revoke behavior, and owner-authorized live
+Singapore TokenPlan MiMo qualification. No new UI work, key request, paid/live
+call, default activation, PAYG/model fallback or acceptance promotion occurred.
+The existing session store's broader concurrency and crash semantics are reused;
+this check proves the specific Windows replacement refusal above, not every
+power-loss/filesystem/concurrent-writer outcome. Profiles are scoped to the
+existing workspace session settings, not a new global preference store.

@@ -11903,6 +11903,7 @@ fn workbench_settings_record_from_projection(
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
         terminal_shell_selection: settings.terminal_shell_selection.clone(),
+        ai_provider_configuration_json: None,
         schema_version: settings.schema_version,
     }
 }
@@ -29973,6 +29974,8 @@ impl AppComposition {
     ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
         let mut record = capture_workspace_session_record(&self.active_documents, &self.editor)?;
         record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
+        record.workbench_settings.ai_provider_configuration_json =
+            Some(self.ai_provider_configuration_json()?);
         record.language_toolchain_settings = self.language_toolchain_settings.clone();
         record.memory_snapshot_json = Some(
             serde_json::to_string(
@@ -29990,6 +29993,25 @@ impl AppComposition {
         &mut self,
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
+        // Preflight fallible payload restoration before committing provider/settings
+        // metadata. A malformed session must not partially replace the active route.
+        let restored_memory = record
+            .memory_snapshot_json
+            .as_ref()
+            .map(|json| {
+                let snapshot: MemoryServiceSnapshot = serde_json::from_str(json)
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+                MemoryService::from_snapshot(snapshot)
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))
+            })
+            .transpose()?;
+        self.restore_ai_provider_configuration_json(
+            record
+                .workbench_settings
+                .ai_provider_configuration_json
+                .as_deref()
+                .unwrap_or(r#"{"profiles":[],"selected":null}"#),
+        )?;
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
         // Restore metadata only. Stored paths remain an unapproved draft until
         // the operator explicitly configures the toolchain again.
@@ -30000,11 +30022,8 @@ impl AppComposition {
             .set_user_shell_selection(TerminalShellSelection::from_label(
                 &record.workbench_settings.terminal_shell_selection,
             ));
-        if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
-            let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
-                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-            self.memory_service = MemoryService::from_snapshot(snapshot)
-                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        if let Some(memory) = restored_memory {
+            self.memory_service = memory;
         }
         let mut restored_file_ids = Vec::new();
         let mut skipped_tabs = Vec::new();

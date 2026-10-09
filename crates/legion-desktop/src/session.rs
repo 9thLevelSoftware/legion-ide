@@ -108,6 +108,17 @@ fn validate_record(record: &WorkspaceSessionRecord) -> Result<(), DesktopSession
             "session_id must be non-empty".to_string(),
         ));
     }
+    if let Some(json) = record
+        .workbench_settings
+        .ai_provider_configuration_json
+        .as_deref()
+    {
+        legion_app::AppComposition::validate_ai_provider_configuration_json(json).map_err(
+            |_| {
+                DesktopSessionError::InvalidRecord("invalid provider configuration metadata".into())
+            },
+        )?;
+    }
     Ok(())
 }
 

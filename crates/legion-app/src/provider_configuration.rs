@@ -50,6 +50,34 @@ pub(crate) struct AiProviderConfiguration {
     pub(crate) selected: Option<String>,
 }
 
+impl AiProviderConfiguration {
+    fn parse(json: &str) -> Result<Self, AppCompositionError> {
+        if json.len() > 32768 {
+            return Err(config_error("provider configuration exceeds limit"));
+        }
+        let config: Self = serde_json::from_str(json)
+            .map_err(|_| config_error("invalid provider configuration"))?;
+        if config.profiles.len() > 16 {
+            return Err(config_error("provider profile limit reached"));
+        }
+        let mut names = std::collections::HashSet::new();
+        for profile in &config.profiles {
+            profile.validate()?;
+            if !names.insert(&profile.name) {
+                return Err(config_error("duplicate provider profile"));
+            }
+        }
+        if config
+            .selected
+            .as_ref()
+            .is_some_and(|name| !names.contains(name))
+        {
+            return Err(config_error("selected provider profile is missing"));
+        }
+        Ok(config)
+    }
+}
+
 /// Immutable route snapshot retained only for the authorized in-flight request.
 pub(crate) struct ConfiguredProvider {
     pub(crate) profile: AiProviderProfile,
@@ -286,34 +314,19 @@ impl AppComposition {
             .map_err(|_| config_error("provider configuration encoding failed"))
     }
 
+    /// Validate metadata for the existing settings store without reading keys,
+    /// changing application state, or contacting a provider.
+    pub fn validate_ai_provider_configuration_json(json: &str) -> Result<(), AppCompositionError> {
+        AiProviderConfiguration::parse(json).map(|_| ())
+    }
+
     /// Restore metadata atomically; malformed or secret-bearing records fail closed.
     pub fn restore_ai_provider_configuration_json(
         &mut self,
         json: &str,
     ) -> Result<(), AppCompositionError> {
         self.require_idle_provider_configuration()?;
-        if json.len() > 32768 {
-            return Err(config_error("provider configuration exceeds limit"));
-        }
-        let config: AiProviderConfiguration = serde_json::from_str(json)
-            .map_err(|_| config_error("invalid provider configuration"))?;
-        if config.profiles.len() > 16 {
-            return Err(config_error("provider profile limit reached"));
-        }
-        let mut names = std::collections::HashSet::new();
-        for profile in &config.profiles {
-            profile.validate()?;
-            if !names.insert(&profile.name) {
-                return Err(config_error("duplicate provider profile"));
-            }
-        }
-        if config
-            .selected
-            .as_ref()
-            .is_some_and(|name| !names.contains(name))
-        {
-            return Err(config_error("selected provider profile is missing"));
-        }
+        let config = AiProviderConfiguration::parse(json)?;
         self.ai_provider_configuration = config;
         self.ai_profile_health
             .lock()
