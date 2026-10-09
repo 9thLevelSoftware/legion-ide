@@ -480,16 +480,8 @@ impl AppComposition {
                 )
                 .is_ok();
         }
-        let old_operations: std::collections::HashSet<String> =
-            self.pending_lsp_writes.keys().cloned().collect();
-        if !self.issue_lsp_code_action_request(buffer_id, wire_range, organize_imports) {
-            return false;
-        }
-        let Some(operation_id) = self
-            .pending_lsp_writes
-            .keys()
-            .find(|operation_id| !old_operations.contains(*operation_id))
-            .cloned()
+        let Some(operation_id) =
+            self.issue_lsp_code_action_operation(buffer_id, wire_range, organize_imports)
         else {
             return false;
         };

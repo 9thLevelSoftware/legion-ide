@@ -8,6 +8,7 @@
 //! Every method is an inherent `AppComposition` method, so callers are
 //! unaffected by the module existing.
 
+use super::DeferredLspWrite;
 use crate::*;
 use uuid::Uuid;
 
@@ -20,19 +21,6 @@ mod document_sync_tests;
 #[cfg(test)]
 #[path = "write_operation_tests.rs"]
 mod write_operation_tests;
-
-/// Metadata-only rename retained until its target document has entered the
-/// bounded worker queue. No source text is held here.
-#[derive(Clone)]
-pub(crate) struct DeferredLspWrite {
-    pub(crate) buffer_id: BufferId,
-    pub(crate) snapshot_id: SnapshotId,
-    pub(crate) uri: String,
-    pub(crate) method: String,
-    pub(crate) kind: crate::language::LspReadKind,
-    pub(crate) params: serde_json::Value,
-    pub(crate) operation_context: legion_protocol::LspOperationContext,
-}
 
 fn same_lsp_operation_context(
     expected: &legion_protocol::LspOperationContext,
@@ -101,32 +89,23 @@ impl AppComposition {
         status: LanguageToolingStatusKind,
         message: &str,
     ) {
-        let operation_ids: Vec<String> = self
-            .pending_lsp_writes
-            .iter()
-            .filter(|(_, pending)| buffer_id.is_none_or(|id| pending.buffer_id == id))
-            .map(|(id, _)| id.clone())
-            .collect();
-        for operation_id in operation_ids {
-            self.deferred_lsp_writes.remove(&operation_id);
+        for pending in self.lsp_writes.invalidate(buffer_id) {
             self.code_action_authority
-                .remove_resolve_attempt(&operation_id);
-            if let Some(pending) = self.pending_lsp_writes.remove(&operation_id) {
-                self.pending_code_action_contexts.retain(|_, context| {
-                    context.context.workspace_id != pending.workspace_id
-                        || context.context.file_id != pending.file_id
-                        || context.context.buffer_id != pending.buffer_id
-                        || context.context.snapshot_id != pending.snapshot_id
-                        || context.context.correlation_id != pending.event_context.correlation_id
-                        || context.context.causality_id != pending.event_context.causality_id
-                });
-                let _ = self.language_tooling.upsert_write_operation(
-                    &pending,
-                    status,
-                    message.to_string(),
-                    None,
-                );
-            }
+                .remove_resolve_attempt(&pending.operation_id);
+            self.pending_code_action_contexts.retain(|_, context| {
+                context.context.workspace_id != pending.workspace_id
+                    || context.context.file_id != pending.file_id
+                    || context.context.buffer_id != pending.buffer_id
+                    || context.context.snapshot_id != pending.snapshot_id
+                    || context.context.correlation_id != pending.event_context.correlation_id
+                    || context.context.causality_id != pending.event_context.causality_id
+            });
+            let _ = self.language_tooling.upsert_write_operation(
+                &pending,
+                status,
+                message.to_string(),
+                None,
+            );
         }
     }
 
@@ -194,7 +173,7 @@ impl AppComposition {
             .health_record()
             .is_none_or(|health| health.init_status != legion_protocol::LspResultStatus::Fresh)
             || self.lsp_session.failure_reason().is_some();
-        if !self.pending_lsp_writes.is_empty() && session_unavailable {
+        if !self.lsp_writes.is_empty() && session_unavailable {
             self.terminalize_pending_lsp_writes(
                 None,
                 LanguageToolingStatusKind::Failed,
@@ -385,7 +364,7 @@ impl AppComposition {
             let Some(operation_id) = tag.operation_id.as_ref() else {
                 return;
             };
-            let Some(pending) = self.pending_lsp_writes.remove(operation_id) else {
+            let Some(pending) = self.lsp_writes.finish(operation_id) else {
                 return;
             };
             if let LspReadKind::CodeActionResolve {
@@ -1017,7 +996,7 @@ impl AppComposition {
         workspace_id: WorkspaceId,
         operation_kind: LanguageToolingOperationKind,
     ) -> Result<(), String> {
-        if self.pending_lsp_writes.len() >= 32 {
+        if !self.lsp_writes.has_capacity() {
             return Err("code-action command operation limit reached".to_string());
         }
         let (command_id, arguments) =
@@ -1056,6 +1035,11 @@ impl AppComposition {
             return Err("code action command context is unavailable".to_string());
         };
         let command_request_id = operation_context.request_id.0.to_string();
+        let file_id = self
+            .active_documents
+            .metadata_for_buffer(buffer_id)
+            .map(|metadata| metadata.identity.file_id)
+            .ok_or_else(|| "code action buffer is unavailable".to_string())?;
         let tag = crate::language::LspRequestTag {
             buffer_id,
             kind: crate::language::LspReadKind::CodeActionExecuteCommand {
@@ -1067,8 +1051,23 @@ impl AppComposition {
             operation_context: Some(operation_context.clone()),
         };
         if !self
-            .lsp_session
-            .issue_request("workspace/executeCommand", params.clone(), tag)
+            .lsp_writes
+            .submit(
+                crate::language::PendingLspWriteOperation {
+                    operation_id: operation_id.clone(),
+                    operation_kind,
+                    workspace_id,
+                    file_id,
+                    buffer_id,
+                    snapshot_id,
+                    event_context,
+                },
+                || {
+                    self.lsp_session
+                        .issue_request("workspace/executeCommand", params.clone(), tag)
+                },
+            )
+            .map_err(str::to_string)?
         {
             let uri = self
                 .document_uri_for_buffer(buffer_id)
@@ -1097,24 +1096,8 @@ impl AppComposition {
                 operation_kind,
             },
         );
-        let file_id = self
-            .active_documents
-            .metadata_for_buffer(buffer_id)
-            .map(|metadata| metadata.identity.file_id)
-            .ok_or_else(|| "code action buffer is unavailable".to_string())?;
-        self.pending_lsp_writes.insert(
-            operation_id.clone(),
-            crate::language::PendingLspWriteOperation {
-                operation_id: operation_id.clone(),
-                operation_kind,
-                workspace_id,
-                file_id,
-                buffer_id,
-                snapshot_id,
-                event_context,
-            },
-        );
-        if let Some(pending) = self.pending_lsp_writes.get(&operation_id) {
+
+        if let Some(pending) = self.lsp_writes.pending(&operation_id) {
             let _ = self.language_tooling.upsert_write_operation(
                 pending,
                 LanguageToolingStatusKind::Running,
@@ -1169,7 +1152,7 @@ impl AppComposition {
             return Ok(());
         }
         if selected.raw_action.get("edit").is_none() && selected.raw_action.get("data").is_some() {
-            if self.pending_lsp_writes.len() >= 32 {
+            if !self.lsp_writes.has_capacity() {
                 return Err("code-action resolve operation limit reached".to_string());
             }
             if !self.lsp_server_supports_capability("codeActionResolveProvider")
@@ -1227,11 +1210,32 @@ impl AppComposition {
                 }
                 return Ok(());
             }
-            if !self.lsp_session.issue_request(
-                "codeAction/resolve",
-                selected.raw_action.clone(),
-                tag,
-            ) {
+            if !self
+                .lsp_writes
+                .submit(
+                    crate::language::PendingLspWriteOperation {
+                        operation_id: operation_id.clone(),
+                        operation_kind: selected_operation_kind,
+                        workspace_id: selected.identity.workspace_id,
+                        file_id: self
+                            .active_documents
+                            .metadata_for_buffer(buffer_id)
+                            .map(|metadata| metadata.identity.file_id)
+                            .ok_or_else(|| "code action buffer is unavailable".to_string())?,
+                        buffer_id,
+                        snapshot_id,
+                        event_context,
+                    },
+                    || {
+                        self.lsp_session.issue_request(
+                            "codeAction/resolve",
+                            selected.raw_action.clone(),
+                            tag,
+                        )
+                    },
+                )
+                .map_err(str::to_string)?
+            {
                 let Some(uri) = self.document_uri_for_buffer(buffer_id) else {
                     self.code_action_authority
                         .remove_resolve_attempt(&operation_id);
@@ -1257,23 +1261,8 @@ impl AppComposition {
                 }
                 return Ok(());
             }
-            self.pending_lsp_writes.insert(
-                operation_id.clone(),
-                crate::language::PendingLspWriteOperation {
-                    operation_id: operation_id.clone(),
-                    operation_kind: selected_operation_kind,
-                    workspace_id: selected.identity.workspace_id,
-                    file_id: self
-                        .active_documents
-                        .metadata_for_buffer(buffer_id)
-                        .map(|metadata| metadata.identity.file_id)
-                        .ok_or_else(|| "code action buffer is unavailable".to_string())?,
-                    buffer_id,
-                    snapshot_id,
-                    event_context,
-                },
-            );
-            if let Some(pending) = self.pending_lsp_writes.get(&operation_id) {
+
+            if let Some(pending) = self.lsp_writes.pending(&operation_id) {
                 let _ = self.language_tooling.upsert_write_operation(
                     pending,
                     LanguageToolingStatusKind::Running,
@@ -2170,25 +2159,18 @@ impl AppComposition {
         kind: crate::language::LspReadKind,
         params: impl FnOnce(&str) -> serde_json::Value,
         event_context: crate::EventContext,
-    ) -> bool {
-        if self.pending_lsp_writes.len() >= 32 || !self.lsp_server_supports_capability(capability) {
-            return false;
+    ) -> Option<String> {
+        if !self.lsp_writes.has_capacity() || !self.lsp_server_supports_capability(capability) {
+            return None;
         }
-        let Some((uri, snapshot_id)) = self.lsp_read_target(buffer_id) else {
-            return false;
-        };
+        let (uri, snapshot_id) = self.lsp_read_target(buffer_id)?;
         let document_sync_ready =
             self.lsp_document_sync_ready(buffer_id) && self.lsp_workspace_sync_ready();
-        let Some(workspace_id) = self.active_documents.workspace_id() else {
-            return false;
-        };
-        let Some(file_id) = self
+        let workspace_id = self.active_documents.workspace_id()?;
+        let file_id = self
             .active_documents
             .metadata_for_buffer(buffer_id)
-            .map(|metadata| metadata.identity.file_id)
-        else {
-            return false;
-        };
+            .map(|metadata| metadata.identity.file_id)?;
         let operation_kind = match &kind {
             crate::language::LspReadKind::Formatting => {
                 LanguageToolingOperationKind::FormattingProposal
@@ -2199,23 +2181,23 @@ impl AppComposition {
             _ => LanguageToolingOperationKind::CodeActionProposal,
         };
         let operation_id = Uuid::now_v7().to_string();
-        let Some(operation_context) =
-            self.lsp_operation_context(buffer_id, snapshot_id, event_context)
-        else {
-            return false;
-        };
+        let operation_context =
+            self.lsp_operation_context(buffer_id, snapshot_id, event_context)?;
         let request_params = params(&uri);
         if !document_sync_ready {
-            return self.defer_lsp_write_request(
-                buffer_id,
-                snapshot_id,
-                uri,
-                method,
-                kind,
-                request_params,
-                operation_kind,
-                event_context,
-            );
+            return self
+                .defer_lsp_write_request_with_id(
+                    operation_id.clone(),
+                    buffer_id,
+                    snapshot_id,
+                    uri,
+                    method,
+                    kind,
+                    request_params,
+                    operation_kind,
+                    event_context,
+                )
+                .then_some(operation_id);
         }
         let tag = crate::language::LspRequestTag {
             buffer_id,
@@ -2225,41 +2207,48 @@ impl AppComposition {
             operation_context: Some(operation_context),
         };
         if !self
-            .lsp_session
-            .issue_request(method, request_params.clone(), tag)
+            .lsp_writes
+            .submit(
+                crate::language::PendingLspWriteOperation {
+                    operation_id: operation_id.clone(),
+                    operation_kind,
+                    workspace_id,
+                    file_id,
+                    buffer_id,
+                    snapshot_id,
+                    event_context,
+                },
+                || {
+                    self.lsp_session
+                        .issue_request(method, request_params.clone(), tag)
+                },
+            )
+            .unwrap_or(false)
         {
-            return self.defer_lsp_write_request(
-                buffer_id,
-                snapshot_id,
-                uri,
-                method,
-                kind,
-                request_params,
-                operation_kind,
-                event_context,
-            );
+            return self
+                .defer_lsp_write_request_with_id(
+                    operation_id.clone(),
+                    buffer_id,
+                    snapshot_id,
+                    uri,
+                    method,
+                    kind,
+                    request_params,
+                    operation_kind,
+                    event_context,
+                )
+                .then_some(operation_id);
         }
-        self.pending_lsp_writes.insert(
-            operation_id.clone(),
-            crate::language::PendingLspWriteOperation {
-                operation_id: operation_id.clone(),
-                operation_kind,
-                workspace_id,
-                file_id,
-                buffer_id,
-                snapshot_id,
-                event_context,
-            },
-        );
+
         let _ = self.language_tooling.upsert_write_operation(
-            self.pending_lsp_writes
-                .get(&operation_id)
+            self.lsp_writes
+                .pending(&operation_id)
                 .expect("inserted write operation"),
             LanguageToolingStatusKind::Running,
             "LSP write request accepted".to_string(),
             None,
         );
-        true
+        Some(operation_id)
     }
 
     /// Issues a non-blocking LSP references request on the worker thread.
@@ -2655,6 +2644,7 @@ impl AppComposition {
             },
             event_context,
         )
+        .is_some()
     }
 
     /// Issues a non-blocking LSP code-action request on the worker thread.
@@ -2671,9 +2661,19 @@ impl AppComposition {
         range: legion_protocol::Utf16Range,
         organize_imports: bool,
     ) -> bool {
+        self.issue_lsp_code_action_operation(buffer_id, range, organize_imports)
+            .is_some()
+    }
+
+    pub(super) fn issue_lsp_code_action_operation(
+        &mut self,
+        buffer_id: BufferId,
+        range: legion_protocol::Utf16Range,
+        organize_imports: bool,
+    ) -> Option<String> {
         let event_context = self.next_event_context();
         let Ok(snapshot) = self.editor.current_snapshot(buffer_id) else {
-            return false;
+            return None;
         };
         let diagnostics = self.code_action_diagnostics.query_utf16(
             crate::language::DiagnosticIdentity {
@@ -2755,7 +2755,7 @@ impl AppComposition {
         position: TextCoordinate,
         new_name: String,
     ) -> bool {
-        if self.pending_lsp_writes.len() >= 32 {
+        if !self.lsp_writes.has_capacity() {
             return false;
         }
         let Some(meta) = self
@@ -2796,26 +2796,30 @@ impl AppComposition {
             operation_context: Some(operation_context),
         };
         if !self
-            .lsp_session
-            .issue_request("textDocument/rename", params, tag)
+            .lsp_writes
+            .submit(
+                crate::language::PendingLspWriteOperation {
+                    operation_id: operation_id.clone(),
+                    operation_kind: LanguageToolingOperationKind::RenameProposal,
+                    workspace_id,
+                    file_id: meta.identity.file_id,
+                    buffer_id,
+                    snapshot_id,
+                    event_context,
+                },
+                || {
+                    self.lsp_session
+                        .issue_request("textDocument/rename", params, tag)
+                },
+            )
+            .unwrap_or(false)
         {
             return false;
         }
-        self.pending_lsp_writes.insert(
-            operation_id.clone(),
-            crate::language::PendingLspWriteOperation {
-                operation_id: operation_id.clone(),
-                operation_kind: LanguageToolingOperationKind::RenameProposal,
-                workspace_id,
-                file_id: meta.identity.file_id,
-                buffer_id,
-                snapshot_id,
-                event_context,
-            },
-        );
+
         let _ = self.language_tooling.upsert_write_operation(
-            self.pending_lsp_writes
-                .get(&operation_id)
+            self.lsp_writes
+                .pending(&operation_id)
                 .expect("inserted rename operation"),
             LanguageToolingStatusKind::Running,
             "LSP rename request accepted".to_string(),
@@ -2832,11 +2836,7 @@ impl AppComposition {
     ) -> bool {
         if new_name.is_empty()
             || new_name.len() > 4_096
-            || self.pending_lsp_writes.len() >= 32
-            || self
-                .deferred_lsp_writes
-                .values()
-                .any(|deferred| deferred.buffer_id == buffer_id)
+            || !self.lsp_writes.can_defer(buffer_id)
             || !self
                 .lsp_session
                 .health_record()
@@ -2913,11 +2913,7 @@ impl AppComposition {
         operation_kind: LanguageToolingOperationKind,
         event_context: crate::EventContext,
     ) -> bool {
-        if self.pending_lsp_writes.len() >= 32
-            || self
-                .deferred_lsp_writes
-                .values()
-                .any(|deferred| deferred.buffer_id == buffer_id)
+        if !self.lsp_writes.can_defer(buffer_id)
             || !self
                 .lsp_session
                 .health_record()
@@ -2949,20 +2945,24 @@ impl AppComposition {
             snapshot_id,
             event_context,
         };
-        self.pending_lsp_writes
-            .insert(operation_id.clone(), pending.clone());
-        self.deferred_lsp_writes.insert(
-            operation_id,
-            DeferredLspWrite {
-                buffer_id,
-                snapshot_id,
-                uri,
-                method: method.to_string(),
-                kind,
-                params,
-                operation_context,
-            },
-        );
+        if self
+            .lsp_writes
+            .admit(
+                pending.clone(),
+                Some(DeferredLspWrite {
+                    buffer_id,
+                    snapshot_id,
+                    uri,
+                    method: method.to_string(),
+                    kind,
+                    params,
+                    operation_context,
+                }),
+            )
+            .is_err()
+        {
+            return false;
+        }
         let _ = self.language_tooling.upsert_write_operation(
             &pending,
             LanguageToolingStatusKind::Running,
@@ -2973,18 +2973,8 @@ impl AppComposition {
     }
 
     fn drain_deferred_lsp_writes(&mut self) {
-        let deferred_ids: Vec<String> = self.deferred_lsp_writes.keys().cloned().collect();
-        for operation_id in deferred_ids {
-            let Some(deferred) = self.deferred_lsp_writes.get(&operation_id).cloned() else {
-                continue;
-            };
-            let Some(pending) = self.pending_lsp_writes.get(&operation_id).cloned() else {
-                self.deferred_lsp_writes.remove(&operation_id);
-                let _ = self
-                    .code_action_authority
-                    .remove_resolve_attempt(&operation_id);
-                continue;
-            };
+        for (pending, deferred) in self.lsp_writes.deferred() {
+            let operation_id = pending.operation_id.clone();
             let current_snapshot = self.editor.current_snapshot(deferred.buffer_id).ok();
             let current_file = self
                 .active_documents
@@ -3002,8 +2992,7 @@ impl AppComposition {
                 || current_uri.as_deref() != Some(deferred.uri.as_str())
                 || current_workspace != Some(pending.workspace_id)
             {
-                self.deferred_lsp_writes.remove(&operation_id);
-                self.pending_lsp_writes.remove(&operation_id);
+                self.lsp_writes.finish(&operation_id);
                 let _ = self
                     .code_action_authority
                     .remove_resolve_attempt(&operation_id);
@@ -3030,7 +3019,7 @@ impl AppComposition {
                 .lsp_session
                 .issue_request(&deferred.method, deferred.params, tag)
             {
-                self.deferred_lsp_writes.remove(&operation_id);
+                self.lsp_writes.dispatched(&operation_id);
                 if matches!(
                     deferred.kind,
                     crate::language::LspReadKind::CodeActionExecuteCommand { .. }

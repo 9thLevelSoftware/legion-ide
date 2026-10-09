@@ -1,9 +1,9 @@
-//! Background Git inspection and mutation worker.
+//! App-owned Git scheduling and its background execution adapter.
 
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    mpsc::{self, Receiver, SyncSender, TrySendError},
+    mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
 };
 use std::thread;
 
@@ -82,7 +82,7 @@ impl GitMutateOp {
 }
 
 #[derive(Debug, Clone)]
-pub enum GitWorkRequest {
+enum GitWorkRequest {
     Snapshot {
         generation: u64,
         root: PathBuf,
@@ -107,7 +107,7 @@ pub enum GitWorkRequest {
 }
 
 #[derive(Debug)]
-pub enum GitWorkResult {
+enum GitWorkResult {
     SnapshotReady {
         generation: u64,
         snapshot: ProjectGitSnapshot,
@@ -122,23 +122,24 @@ pub enum GitWorkResult {
     },
 }
 
-pub struct GitWorker {
+struct GitWorker {
     request_tx: SyncSender<GitWorkRequest>,
     result_rx: Receiver<GitWorkResult>,
-    in_flight: bool,
 }
 
 impl GitWorker {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self::new_with_runner(Arc::new(|_, root, active_file, options| {
             collect_git_snapshot(root, active_file, options)
         }))
     }
 
-    pub fn new_with_runner(runner: GitInspectionRunner) -> Self {
+    fn new_with_runner(runner: GitInspectionRunner) -> Self {
         let (request_tx, request_rx) = mpsc::sync_channel::<GitWorkRequest>(1);
         let (result_tx, result_rx) = mpsc::sync_channel::<GitWorkResult>(4);
-        thread::Builder::new()
+        // Failed thread creation drops the channel endpoints. The workflow reports
+        // Unavailable just as it does for an unexpectedly disconnected worker.
+        let _ = thread::Builder::new()
             .name("legion-git-inspection".to_string())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
@@ -199,39 +200,15 @@ impl GitWorker {
                         break;
                     }
                 }
-            })
-            .expect("Git inspection worker must spawn");
+            });
         Self {
             request_tx,
             result_rx,
-            in_flight: false,
         }
     }
 
-    pub fn try_send(&mut self, request: GitWorkRequest) -> bool {
-        if self.in_flight {
-            return false;
-        }
-        match self.request_tx.try_send(request) {
-            Ok(()) => {
-                self.in_flight = true;
-                true
-            }
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => false,
-        }
-    }
-
-    pub fn drain(&mut self) -> Vec<GitWorkResult> {
-        let mut results = Vec::new();
-        while let Ok(result) = self.result_rx.try_recv() {
-            self.in_flight = false;
-            results.push(result);
-        }
-        results
-    }
-
-    pub fn is_idle(&self) -> bool {
-        !self.in_flight
+    fn try_recv(&self) -> Result<GitWorkResult, TryRecvError> {
+        self.result_rx.try_recv()
     }
 }
 
@@ -265,9 +242,282 @@ fn run_remote(
     }
 }
 
-impl Default for GitWorker {
+impl Default for GitWorkflow {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GitScheduleResult {
+    /// Owned by the workflow, either dispatched or retained for dispatch.
+    Accepted,
+    /// A mutation is already queued. The caller's operation was not accepted.
+    Busy,
+    /// The worker is gone. No automatic retry is safe for mutations.
+    Unavailable,
+}
+
+enum GitMutation {
+    Local(GitMutateOp),
+    Remote {
+        root: PathBuf,
+        operation: GitRemoteOperation,
+        remote: String,
+        branch: String,
+    },
+}
+
+impl GitMutation {
+    fn root(&self) -> &Path {
+        match self {
+            Self::Local(operation) => operation.root(),
+            Self::Remote { root, .. } => root,
+        }
+    }
+}
+
+struct GitInFlight {
+    generation: u64,
+    mutation: bool,
+}
+
+/// Scheduling authority for app-approved Git work. The channel adapter owns no
+/// scheduling state; policy and projection overlays remain in AppComposition.
+pub(crate) struct GitWorkflow {
+    worker: GitWorker,
+    in_flight: Option<GitInFlight>,
+    requested_generation: u64,
+    applied_generation: u64,
+    pending_mutation: Option<GitWorkRequest>,
+    latest_refresh: Option<GitWorkRequest>,
+    latest_workspace_root: Option<PathBuf>,
+    unavailable: bool,
+    terminal_diagnostic: Option<String>,
+}
+
+impl GitWorkflow {
+    pub(crate) fn new() -> Self {
+        Self::with_worker(GitWorker::new())
+    }
+
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn new_with_runner(runner: GitInspectionRunner) -> Self {
+        Self::with_worker(GitWorker::new_with_runner(runner))
+    }
+
+    fn with_worker(worker: GitWorker) -> Self {
+        Self {
+            worker,
+            in_flight: None,
+            requested_generation: 0,
+            applied_generation: 0,
+            pending_mutation: None,
+            latest_refresh: None,
+            latest_workspace_root: None,
+            unavailable: false,
+            terminal_diagnostic: None,
+        }
+    }
+
+    fn refresh(&mut self, root: PathBuf, active_file: Option<PathBuf>) -> GitScheduleResult {
+        if self.unavailable {
+            return GitScheduleResult::Unavailable;
+        }
+        self.requested_generation = self.requested_generation.saturating_add(1);
+        self.latest_workspace_root = Some(root.clone());
+        self.latest_refresh = Some(GitWorkRequest::Snapshot {
+            generation: self.requested_generation,
+            root,
+            active_file,
+            options: GitSnapshotOptions::default(),
+        });
+        self.dispatch_next();
+        self.schedule_result()
+    }
+
+    fn enqueue(
+        &mut self,
+        mutation: GitMutation,
+        active_file: Option<PathBuf>,
+    ) -> GitScheduleResult {
+        if self.unavailable {
+            return GitScheduleResult::Unavailable;
+        }
+        if self.pending_mutation.is_some() {
+            return GitScheduleResult::Busy;
+        }
+        self.requested_generation = self.requested_generation.saturating_add(1);
+        self.latest_workspace_root = Some(mutation.root().to_path_buf());
+        let generation = self.requested_generation;
+        let options = GitSnapshotOptions::default();
+        self.pending_mutation = Some(match mutation {
+            GitMutation::Local(operation) => GitWorkRequest::Mutate {
+                generation,
+                operation,
+                active_file,
+                options,
+            },
+            GitMutation::Remote {
+                root,
+                operation,
+                remote,
+                branch,
+            } => GitWorkRequest::Remote {
+                generation,
+                root,
+                operation,
+                remote,
+                branch,
+                active_file,
+                options,
+            },
+        });
+        // The mutation includes a snapshot, so older refreshes are redundant.
+        // Refreshes requested after this mutation remain queued behind it.
+        self.latest_refresh = None;
+        self.dispatch_next();
+        self.schedule_result()
+    }
+
+    fn schedule_result(&self) -> GitScheduleResult {
+        if self.unavailable {
+            GitScheduleResult::Unavailable
+        } else {
+            GitScheduleResult::Accepted
+        }
+    }
+
+    fn dispatch_next(&mut self) {
+        if self.unavailable || self.in_flight.is_some() {
+            return;
+        }
+        let Some(request) = self
+            .pending_mutation
+            .take()
+            .or_else(|| self.latest_refresh.take())
+        else {
+            return;
+        };
+        let generation = request_generation(&request);
+        let mutation = !matches!(&request, GitWorkRequest::Snapshot { .. });
+        match self.worker.request_tx.try_send(request) {
+            Ok(()) => {
+                self.in_flight = Some(GitInFlight {
+                    generation,
+                    mutation,
+                })
+            }
+            Err(TrySendError::Full(request)) => self.restore_request(request),
+            Err(TrySendError::Disconnected(request)) => {
+                self.restore_request(request);
+                self.disconnect();
+            }
+        }
+    }
+
+    fn restore_request(&mut self, request: GitWorkRequest) {
+        match &request {
+            GitWorkRequest::Snapshot { .. } => self.latest_refresh = Some(request),
+            _ => self.pending_mutation = Some(request),
+        }
+    }
+
+    fn disconnect(&mut self) {
+        if self.unavailable {
+            return;
+        }
+        self.unavailable = true;
+        let mut diagnostic = "git.worker_unavailable: Git worker disconnected".to_string();
+        if let Some(active) = self.in_flight.take() {
+            diagnostic.push_str(&format!(
+                "; generation {} did not return a result",
+                active.generation
+            ));
+            if active.mutation {
+                diagnostic
+                    .push_str(" (mutation may have completed; inspect repository before retrying)");
+            }
+        }
+        if let Some(pending) = self.pending_mutation.take() {
+            diagnostic.push_str(&format!(
+                "; queued mutation generation {} was not executed",
+                request_generation(&pending)
+            ));
+        }
+        self.latest_refresh = None;
+        self.terminal_diagnostic = Some(diagnostic);
+    }
+
+    /// Nonblocking: only matching completions release the single in-flight slot.
+    /// Obsolete snapshots are hidden, but failed accepted mutations remain visible.
+    fn poll(
+        &mut self,
+        workspace_root: Option<&Path>,
+        active_file: Option<&Path>,
+    ) -> Vec<GitWorkResult> {
+        // Workspace opening is owned by app composition. Observe its current
+        // context before releasing any result, including switches with no explicit
+        // RefreshGit intent. Never retarget an already accepted mutation.
+        if self.requested_generation > 0
+            && !self.unavailable
+            && let Some(root) = workspace_root
+            && self.latest_workspace_root.as_deref() != Some(root)
+        {
+            self.refresh(root.to_path_buf(), active_file.map(Path::to_path_buf));
+        }
+        let mut results = Vec::new();
+        if !self.unavailable {
+            loop {
+                match self.worker.try_recv() {
+                    Ok(result) => {
+                        let generation = match &result {
+                            GitWorkResult::SnapshotReady { generation, .. }
+                            | GitWorkResult::MutateReady { generation, .. }
+                            | GitWorkResult::Failed { generation, .. } => *generation,
+                        };
+                        if !self
+                            .in_flight
+                            .as_ref()
+                            .is_some_and(|active| active.generation == generation)
+                        {
+                            continue;
+                        }
+                        let active = self.in_flight.take().expect("matched in-flight generation");
+                        if generation == self.requested_generation
+                            && generation > self.applied_generation
+                        {
+                            self.applied_generation = generation;
+                            results.push(result);
+                        } else if active.mutation && matches!(&result, GitWorkResult::Failed { .. })
+                        {
+                            results.push(result);
+                        }
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.disconnect();
+                        break;
+                    }
+                }
+            }
+            self.dispatch_next();
+        }
+        if let Some(diagnostic) = self.terminal_diagnostic.take() {
+            self.applied_generation = self.requested_generation;
+            results.push(GitWorkResult::Failed {
+                generation: self.requested_generation,
+                diagnostic,
+            });
+        }
+        results
+    }
+
+    fn is_idle(&self) -> bool {
+        self.unavailable
+            || (self.in_flight.is_none()
+                && self.pending_mutation.is_none()
+                && self.latest_refresh.is_none())
     }
 }
 
@@ -414,19 +664,17 @@ impl AppComposition {
             .active_file_path
             .as_deref()
             .map(PathBuf::from);
-        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
-        self.git_projection.refresh_state = GitRefreshState::Refreshing;
-        self.git_projection.stale = true;
-        if !self.git_in_flight && self.pending_mutation.is_none() {
-            let request = GitWorkRequest::Snapshot {
-                generation: self.git_latest_generation,
-                root: PathBuf::from(root_path),
-                active_file,
-                options: GitSnapshotOptions::default(),
-            };
-            self.git_in_flight = self.git_worker.try_send(request);
+        let scheduled = self
+            .git_workflow
+            .refresh(PathBuf::from(root_path), active_file);
+        if scheduled == GitScheduleResult::Accepted {
+            self.git_projection.refresh_state = GitRefreshState::Refreshing;
+            self.git_projection.stale = true;
         }
         self.drain_git_inspection();
+        if scheduled == GitScheduleResult::Unavailable {
+            self.mark_git_worker_unavailable();
+        }
         self.sync_git_projection_overlay();
         self.git_projection.clone()
     }
@@ -435,33 +683,7 @@ impl AppComposition {
         &mut self,
         operation: GitMutateOp,
     ) -> Result<GitProjection, AppCompositionError> {
-        if self.pending_mutation.is_some() {
-            return Err(git_protocol_error(
-                "git_mutation_pending",
-                "another Git mutation is already waiting for the worker",
-            ));
-        }
-        let active_file = self
-            .active_documents
-            .active_file_path
-            .as_deref()
-            .map(PathBuf::from);
-        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
-        self.git_projection.refresh_state = GitRefreshState::Refreshing;
-        self.git_projection.stale = true;
-        let request = GitWorkRequest::Mutate {
-            generation: self.git_latest_generation,
-            operation,
-            active_file,
-            options: GitSnapshotOptions::default(),
-        };
-        if self.git_in_flight {
-            self.pending_mutation = Some(request);
-        } else {
-            self.git_in_flight = self.git_worker.try_send(request);
-        }
-        self.sync_git_projection_overlay();
-        Ok(self.git_projection.clone())
+        self.enqueue_git_operation(GitMutation::Local(operation))
     }
 
     pub(crate) fn enqueue_git_remote(
@@ -470,37 +692,45 @@ impl AppComposition {
         remote: String,
         branch: String,
     ) -> Result<GitProjection, AppCompositionError> {
-        if self.pending_mutation.is_some() {
-            return Err(git_protocol_error(
-                "git_mutation_pending",
-                "another Git mutation is already waiting for the worker",
-            ));
-        }
         let Some(root_path) = self.active_documents.workspace_root_path.as_deref() else {
             return Err(AppCompositionError::WorkspaceNotOpen);
         };
+        self.enqueue_git_operation(GitMutation::Remote {
+            root: PathBuf::from(root_path),
+            operation,
+            remote,
+            branch,
+        })
+    }
+
+    fn enqueue_git_operation(
+        &mut self,
+        mutation: GitMutation,
+    ) -> Result<GitProjection, AppCompositionError> {
         let active_file = self
             .active_documents
             .active_file_path
             .as_deref()
             .map(PathBuf::from);
-        self.git_latest_generation = self.git_latest_generation.saturating_add(1);
+        match self.git_workflow.enqueue(mutation, active_file) {
+            GitScheduleResult::Accepted => {}
+            GitScheduleResult::Busy => {
+                return Err(git_protocol_error(
+                    "git_mutation_pending",
+                    "another Git mutation is already waiting for the worker",
+                ));
+            }
+            GitScheduleResult::Unavailable => {
+                self.drain_git_inspection();
+                self.mark_git_worker_unavailable();
+                return Err(git_protocol_error(
+                    "git_worker_unavailable",
+                    "Git worker is unavailable; the operation was not accepted",
+                ));
+            }
+        }
         self.git_projection.refresh_state = GitRefreshState::Refreshing;
         self.git_projection.stale = true;
-        let request = GitWorkRequest::Remote {
-            generation: self.git_latest_generation,
-            root: PathBuf::from(root_path),
-            operation,
-            remote,
-            branch,
-            active_file,
-            options: GitSnapshotOptions::default(),
-        };
-        if self.git_in_flight {
-            self.pending_mutation = Some(request);
-        } else {
-            self.git_in_flight = self.git_worker.try_send(request);
-        }
         self.sync_git_projection_overlay();
         Ok(self.git_projection.clone())
     }
@@ -508,28 +738,21 @@ impl AppComposition {
     /// Apply completed Git worker results without blocking.
     pub fn drain_git_inspection(&mut self) -> bool {
         let mut applied = false;
-        let mut received = false;
-        for result in self.git_worker.drain() {
-            received = true;
-            self.git_in_flight = false;
-            let (generation, snapshot, diagnostic) = match result {
-                GitWorkResult::SnapshotReady {
-                    generation,
-                    snapshot,
-                }
-                | GitWorkResult::MutateReady {
-                    generation,
-                    snapshot,
-                } => (generation, Some(snapshot), None),
-                GitWorkResult::Failed {
-                    generation,
-                    diagnostic,
-                } => (generation, None, Some(diagnostic)),
+        for result in self.git_workflow.poll(
+            self.active_documents
+                .workspace_root_path
+                .as_deref()
+                .map(Path::new),
+            self.active_documents
+                .active_file_path
+                .as_deref()
+                .map(Path::new),
+        ) {
+            let (snapshot, diagnostic) = match result {
+                GitWorkResult::SnapshotReady { snapshot, .. }
+                | GitWorkResult::MutateReady { snapshot, .. } => (Some(snapshot), None),
+                GitWorkResult::Failed { diagnostic, .. } => (None, Some(diagnostic)),
             };
-            if generation != self.git_latest_generation {
-                continue;
-            }
-            self.git_applied_generation = generation;
             applied = true;
             if let Some(snapshot) = snapshot {
                 self.git_hunk_cache = snapshot
@@ -558,29 +781,9 @@ impl AppComposition {
                     .push(format!("git.refresh_failed: {message}"));
             }
         }
-        if received && !self.git_in_flight {
-            if let Some(pending) = self.pending_mutation.take() {
-                if self.git_worker.try_send(pending.clone()) {
-                    self.git_in_flight = true;
-                } else {
-                    self.pending_mutation = Some(pending);
-                }
-            } else if self.git_applied_generation < self.git_latest_generation {
-                let root_path = self.active_documents.workspace_root_path.clone();
-                if let Some(root_path) = root_path {
-                    let request = GitWorkRequest::Snapshot {
-                        generation: self.git_latest_generation,
-                        root: PathBuf::from(root_path),
-                        active_file: self
-                            .active_documents
-                            .active_file_path
-                            .as_deref()
-                            .map(PathBuf::from),
-                        options: GitSnapshotOptions::default(),
-                    };
-                    self.git_in_flight = self.git_worker.try_send(request);
-                }
-            }
+        if !self.git_workflow.is_idle() {
+            self.git_projection.refresh_state = GitRefreshState::Refreshing;
+            self.git_projection.stale = true;
         }
         self.sync_git_projection_overlay();
         applied
@@ -588,14 +791,32 @@ impl AppComposition {
 
     /// Drain Git worker results until no accepted job remains.
     pub fn drain_git_until_idle(&mut self) -> GitProjection {
-        while !self.git_worker.is_idle() {
+        // Observe a possible workspace switch even when the previous context is idle.
+        self.drain_git_inspection();
+        while !self.git_workflow.is_idle() {
             self.drain_git_inspection();
-            if !self.git_worker.is_idle() {
+            if !self.git_workflow.is_idle() {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
         self.drain_git_inspection();
         self.git_projection.clone()
+    }
+
+    fn mark_git_worker_unavailable(&mut self) {
+        self.git_projection.refresh_state = GitRefreshState::Failed;
+        self.git_projection.stale = false;
+        self.git_hunk_cache.clear();
+        if !self
+            .git_projection
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("git.worker_unavailable"))
+        {
+            self.git_projection
+                .diagnostics
+                .push("git.worker_unavailable: Git worker is unavailable".to_string());
+        }
     }
 
     fn sync_git_projection_overlay(&mut self) {
@@ -667,5 +888,325 @@ impl AppComposition {
         self.focused_git_hunk_id = new_id;
         self.git_projection.focused_hunk_id = self.focused_git_hunk_id.clone();
         self.git_projection.clone()
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+
+    // Exercise the scheduling interface with real bounded channels, without
+    // filesystem side effects or timing-dependent background threads.
+    fn workflow_channels() -> (
+        GitWorkflow,
+        Receiver<GitWorkRequest>,
+        SyncSender<GitWorkResult>,
+    ) {
+        let (request_tx, request_rx) = mpsc::sync_channel(1);
+        let (result_tx, result_rx) = mpsc::sync_channel(4);
+        (
+            GitWorkflow::with_worker(GitWorker {
+                request_tx,
+                result_rx,
+            }),
+            request_rx,
+            result_tx,
+        )
+    }
+
+    fn local_mutation() -> GitMutation {
+        GitMutation::Local(GitMutateOp::Path {
+            root: PathBuf::from("repo"),
+            path: "file.rs".to_string(),
+            stage: true,
+        })
+    }
+
+    fn complete(result_tx: &SyncSender<GitWorkResult>, generation: u64) {
+        result_tx
+            .send(GitWorkResult::Failed {
+                generation,
+                diagnostic: format!("generation {generation} failed"),
+            })
+            .expect("send completion");
+    }
+
+    fn poll(workflow: &mut GitWorkflow) -> Vec<GitWorkResult> {
+        let root = workflow.latest_workspace_root.clone();
+        workflow.poll(root.as_deref(), None)
+    }
+
+    #[test]
+    fn pending_mutation_precedes_latest_refresh_and_busy_preserves_order() {
+        // Local and remote mutations share exactly the same queue guarantees.
+        for remote in [false, true] {
+            let (mut workflow, requests, results) = workflow_channels();
+            assert_eq!(
+                workflow.refresh("repo".into(), None),
+                GitScheduleResult::Accepted
+            );
+            assert_eq!(
+                request_generation(&requests.try_recv().expect("first refresh")),
+                1
+            );
+            assert_eq!(
+                workflow.refresh("obsolete".into(), None),
+                GitScheduleResult::Accepted
+            );
+            let mutation = if remote {
+                GitMutation::Remote {
+                    root: "repo".into(),
+                    operation: GitRemoteOperation::Fetch,
+                    remote: "origin".into(),
+                    branch: String::new(),
+                }
+            } else {
+                local_mutation()
+            };
+            assert_eq!(
+                workflow.enqueue(mutation, None),
+                GitScheduleResult::Accepted
+            );
+            assert_eq!(
+                workflow.enqueue(local_mutation(), None),
+                GitScheduleResult::Busy
+            );
+            assert_eq!(
+                workflow.refresh("newest".into(), Some("active.rs".into())),
+                GitScheduleResult::Accepted
+            );
+            assert_eq!(
+                workflow.refresh("latest".into(), Some("latest.rs".into())),
+                GitScheduleResult::Accepted
+            );
+            assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+
+            complete(&results, 1);
+            assert!(
+                poll(&mut workflow).is_empty(),
+                "obsolete refresh is not published"
+            );
+            let mutation = requests.try_recv().expect("queued mutation");
+            assert_eq!(
+                request_generation(&mutation),
+                3,
+                "Busy must not consume a generation"
+            );
+            if remote {
+                assert!(
+                    matches!(mutation, GitWorkRequest::Remote { remote, .. } if remote == "origin")
+                );
+            } else {
+                assert!(
+                    matches!(mutation, GitWorkRequest::Mutate { operation: GitMutateOp::Path { path, stage: true, .. }, .. } if path == "file.rs")
+                );
+            }
+
+            complete(&results, 3);
+            assert!(
+                matches!(
+                    poll(&mut workflow).as_slice(),
+                    [GitWorkResult::Failed { generation: 3, .. }]
+                ),
+                "a failed accepted mutation must remain visible despite a newer refresh"
+            );
+            assert!(
+                matches!(requests.try_recv().expect("latest refresh"), GitWorkRequest::Snapshot { generation: 5, root, active_file: Some(active_file), .. } if root == Path::new("latest") && active_file == Path::new("latest.rs"))
+            );
+            complete(&results, 5);
+            assert!(matches!(
+                poll(&mut workflow).as_slice(),
+                [GitWorkResult::Failed { generation: 5, .. }]
+            ));
+            assert!(workflow.is_idle());
+            assert!(poll(&mut workflow).is_empty());
+            assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+        }
+    }
+
+    #[test]
+    fn newer_mutation_snapshot_absorbs_older_queued_refresh() {
+        let (mut workflow, requests, results) = workflow_channels();
+        assert_eq!(
+            workflow.refresh("repo".into(), None),
+            GitScheduleResult::Accepted
+        );
+        requests.try_recv().expect("initial refresh");
+        assert_eq!(
+            workflow.refresh("repo".into(), None),
+            GitScheduleResult::Accepted
+        );
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Accepted
+        );
+        complete(&results, 1);
+        assert!(poll(&mut workflow).is_empty());
+        assert!(matches!(
+            requests.try_recv().expect("mutation"),
+            GitWorkRequest::Mutate { generation: 3, .. }
+        ));
+        complete(&results, 3);
+        assert!(matches!(
+            poll(&mut workflow).as_slice(),
+            [GitWorkResult::Failed { generation: 3, .. }]
+        ));
+        assert!(workflow.is_idle());
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn backpressure_retains_accepted_mutation_before_latest_refresh() {
+        let (mut workflow, requests, results) = workflow_channels();
+        // Occupy the adapter slot to force Full independently of scheduling state.
+        workflow
+            .worker
+            .request_tx
+            .try_send(GitWorkRequest::Snapshot {
+                generation: 99,
+                root: "fixture".into(),
+                active_file: None,
+                options: GitSnapshotOptions::default(),
+            })
+            .expect("fill channel");
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Accepted
+        );
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Busy
+        );
+        assert_eq!(
+            workflow.refresh("repo".into(), None),
+            GitScheduleResult::Accepted
+        );
+        assert!(
+            !workflow.is_idle(),
+            "queued work is not idle even before dispatch"
+        );
+        assert!(poll(&mut workflow).is_empty());
+        assert_eq!(
+            request_generation(&requests.try_recv().expect("fixture")),
+            99
+        );
+        assert!(poll(&mut workflow).is_empty());
+        assert!(matches!(
+            requests.try_recv().expect("retained mutation"),
+            GitWorkRequest::Mutate { generation: 1, .. }
+        ));
+        complete(&results, 1);
+        assert_eq!(poll(&mut workflow).len(), 1);
+        assert!(matches!(
+            requests.try_recv().expect("refresh after mutation"),
+            GitWorkRequest::Snapshot { generation: 2, .. }
+        ));
+        complete(&results, 2);
+        assert_eq!(poll(&mut workflow).len(), 1);
+        assert!(workflow.is_idle());
+    }
+
+    #[test]
+    fn unmatched_result_cannot_release_in_flight_authority() {
+        let (mut workflow, requests, results) = workflow_channels();
+        workflow.refresh("repo".into(), None);
+        requests.try_recv().expect("initial refresh");
+        workflow.enqueue(local_mutation(), None);
+        complete(&results, 2);
+        assert!(poll(&mut workflow).is_empty());
+        assert!(matches!(requests.try_recv(), Err(TryRecvError::Empty)));
+        complete(&results, 1);
+        assert!(poll(&mut workflow).is_empty());
+        assert!(matches!(
+            requests
+                .try_recv()
+                .expect("mutation after actual completion"),
+            GitWorkRequest::Mutate { generation: 2, .. }
+        ));
+        complete(&results, 2);
+        assert_eq!(poll(&mut workflow).len(), 1);
+        assert!(workflow.is_idle());
+    }
+
+    #[test]
+    fn disconnection_settles_in_flight_and_queued_mutations_once() {
+        let (mut workflow, requests, results) = workflow_channels();
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Accepted
+        );
+        requests.try_recv().expect("in-flight mutation");
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Accepted
+        );
+        assert_eq!(
+            workflow.refresh("repo".into(), None),
+            GitScheduleResult::Accepted
+        );
+        drop(requests);
+        drop(results);
+        let failures = poll(&mut workflow);
+        assert!(
+            matches!(failures.as_slice(), [GitWorkResult::Failed { generation: 3, diagnostic }] if diagnostic.contains("mutation may have completed") && diagnostic.contains("queued mutation generation 2 was not executed"))
+        );
+        assert!(workflow.is_idle());
+        assert_eq!(
+            workflow.refresh("repo".into(), None),
+            GitScheduleResult::Unavailable
+        );
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Unavailable
+        );
+        assert!(
+            poll(&mut workflow).is_empty(),
+            "terminal failure must not repeat or reschedule"
+        );
+    }
+
+    #[test]
+    fn disconnected_send_reports_unavailable_without_accepting_mutation() {
+        let (mut workflow, requests, _results) = workflow_channels();
+        drop(requests);
+        assert_eq!(
+            workflow.enqueue(local_mutation(), None),
+            GitScheduleResult::Unavailable
+        );
+        assert!(
+            matches!(poll(&mut workflow).as_slice(), [GitWorkResult::Failed { diagnostic, .. }] if diagnostic.contains("was not executed"))
+        );
+        assert!(workflow.is_idle());
+        assert!(poll(&mut workflow).is_empty());
+    }
+
+    #[test]
+    fn workspace_switch_keeps_mutation_root_and_refreshes_latest_context() {
+        let (mut workflow, requests, results) = workflow_channels();
+        workflow.refresh("repo".into(), Some("repo/old.rs".into()));
+        requests.try_recv().expect("old-root inspection");
+        workflow.enqueue(local_mutation(), Some("repo/old.rs".into()));
+        complete(&results, 1);
+        assert!(
+            workflow
+                .poll(Some(Path::new("other")), Some(Path::new("other/new.rs")))
+                .is_empty()
+        );
+        assert!(
+            matches!(requests.try_recv().expect("original mutation"), GitWorkRequest::Mutate { generation: 2, operation: GitMutateOp::Path { root, .. }, active_file: Some(active_file), .. } if root == Path::new("repo") && active_file == Path::new("repo/old.rs"))
+        );
+        complete(&results, 2);
+        assert_eq!(
+            workflow
+                .poll(Some(Path::new("other")), Some(Path::new("other/new.rs")))
+                .len(),
+            1
+        );
+        assert!(
+            matches!(requests.try_recv().expect("new-root refresh"), GitWorkRequest::Snapshot { generation: 3, root, active_file: Some(active_file), .. } if root == Path::new("other") && active_file == Path::new("other/new.rs"))
+        );
+        complete(&results, 3);
+        assert_eq!(poll(&mut workflow).len(), 1);
+        assert!(workflow.is_idle());
     }
 }

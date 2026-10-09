@@ -1355,20 +1355,10 @@ pub enum DesktopAppRequest {
         /// Buffer to save and then close.
         buffer_id: BufferId,
     },
-    /// Activate an explorer row: open the file, or expand the directory.
-    ///
-    /// Activation is two app dispatches for a file — open the buffer, then
-    /// reveal the row — because the explorer projection is push-updated by the
-    /// reveal outcome and would otherwise keep highlighting the previous
-    /// selection after the new file opened. Sequencing them is adapter work,
-    /// so this arrives as an app *request* rather than a single intent.
+    /// Request cohesive file activation through app authority.
     ActivateExplorerFile {
-        /// File identifier of the activated row.
-        file_id: FileId,
         /// Canonical path represented by the activated row.
         path: String,
-        /// Whether the row is a directory.
-        is_directory: bool,
     },
     /// Open an external URL in the system browser.
     OpenExternalUrl {
@@ -2254,11 +2244,14 @@ impl DesktopCommandBridge {
             },
             DesktopAction::SelectExplorerFile { file_id } => {
                 match explorer_node(snapshot, file_id) {
+                    Some(node) if node.is_directory => {
+                        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ToggleExplorerPath {
+                            path: node.canonical_path.0.clone(),
+                        })
+                    }
                     Some(node) => {
                         DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
-                            file_id,
                             path: node.canonical_path.0.clone(),
-                            is_directory: node.is_directory,
                         })
                     }
                     None => DesktopBridgeOutput::Error(DesktopBridgeError::UnknownExplorerFile {

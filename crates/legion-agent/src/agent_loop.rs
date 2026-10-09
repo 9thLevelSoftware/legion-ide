@@ -24,6 +24,8 @@ use crate::AgentError;
 use crate::scope::validate_delegated_task_tool_call;
 use crate::worktree::{DelegatedTaskProposalGenerator, DelegatedTaskProposalInput};
 
+mod search_traversal;
+
 // ─── Port traits ──────────────────────────────────────────────────────────────
 
 /// External tool host for commands that run outside the process.
@@ -72,6 +74,175 @@ mod forbidden_walk_tests {
                 schema_version: 1,
             },
             forbidden_paths: vec!["config-secret".to_string()],
+        }
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_skip_hidden_directories_but_include_hidden_files() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("visible/.hidden")).unwrap();
+        std::fs::create_dir(root.path().join(".hidden")).unwrap();
+        for file in [
+            ".hidden/root.txt",
+            "visible/.hidden/nested.txt",
+            ".visible.txt",
+        ] {
+            std::fs::write(root.path().join(file), "CANARY local").unwrap();
+        }
+        let config = config(root.path(), vec![]);
+
+        assert_eq!(
+            execute_grep(
+                &serde_json::json!({"pattern": "CANARY"}),
+                &config,
+                &mut || {}
+            )
+            .unwrap(),
+            ".visible.txt:1: CANARY local"
+        );
+        assert_eq!(
+            execute_glob(
+                &serde_json::json!({"pattern": "*.txt"}),
+                &config,
+                &mut || {}
+            )
+            .unwrap(),
+            ".visible.txt"
+        );
+    }
+
+    #[test]
+    fn grep_filters_basenames_while_glob_also_matches_relative_paths() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir(root.path().join("nested")).unwrap();
+        std::fs::write(
+            root.path().join("nested/match.txt"),
+            "skip\nCANARY 42\nCANARY nope\n",
+        )
+        .unwrap();
+        std::fs::write(root.path().join("nested/other.rs"), "CANARY 99").unwrap();
+        let config = config(root.path(), vec![]);
+        let relative = Path::new("nested")
+            .join("match.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            execute_grep(
+                &serde_json::json!({"pattern": "^CANARY [0-9]+$", "file_glob": "*.txt"}),
+                &config,
+                &mut || {},
+            )
+            .unwrap(),
+            format!("{relative}:2: CANARY 42")
+        );
+        assert_eq!(
+            execute_grep(
+                &serde_json::json!({"pattern": "CANARY", "file_glob": "nested/*.txt"}),
+                &config,
+                &mut || {},
+            )
+            .unwrap(),
+            "No matches found."
+        );
+        for pattern in ["nested/*.txt", "match.txt"] {
+            assert_eq!(
+                execute_glob(
+                    &serde_json::json!({"pattern": pattern}),
+                    &config,
+                    &mut || {}
+                )
+                .unwrap(),
+                relative
+            );
+        }
+    }
+
+    #[test]
+    fn grep_skips_binary_and_invalid_utf8_files_while_glob_lists_them() {
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("binary.txt"), b"CANARY\0binary").unwrap();
+        std::fs::write(root.path().join("invalid.txt"), b"CANARY\xff").unwrap();
+        std::fs::write(root.path().join("text.txt"), "CANARY text").unwrap();
+        let config = config(root.path(), vec![]);
+
+        assert_eq!(
+            execute_grep(
+                &serde_json::json!({"pattern": "CANARY"}),
+                &config,
+                &mut || {}
+            )
+            .unwrap(),
+            "text.txt:1: CANARY text"
+        );
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "*.txt"}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let mut files: Vec<_> = glob.lines().collect();
+        files.sort_unstable();
+        assert_eq!(files, ["binary.txt", "invalid.txt", "text.txt"]);
+    }
+
+    #[test]
+    fn recursive_grep_limits_lines_and_glob_limits_files() {
+        let root = TempDir::new().unwrap();
+        std::fs::create_dir_all(root.path().join("nested/deeper")).unwrap();
+        for file in ["nested/a.txt", "nested/b.txt", "nested/deeper/c.txt"] {
+            std::fs::write(
+                root.path().join(file),
+                "CANARY first\nCANARY second\nCANARY third",
+            )
+            .unwrap();
+        }
+        let config = config(root.path(), vec![]);
+
+        let grep = execute_grep(
+            &serde_json::json!({"pattern": "CANARY", "limit": 2}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let lines: Vec<_> = grep.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].ends_with(":1: CANARY first"));
+        assert!(lines[1].ends_with(":2: CANARY second"));
+        let glob = execute_glob(
+            &serde_json::json!({"pattern": "*.txt", "limit": 2}),
+            &config,
+            &mut || {},
+        )
+        .unwrap();
+        let files: Vec<_> = glob.lines().collect();
+        assert_eq!(files.len(), 2);
+        assert_ne!(files[0], files[1]);
+    }
+
+    #[test]
+    fn zero_limit_grep_and_glob_record_dispatch_without_reading_the_directory() {
+        let root = TempDir::new().unwrap();
+        let config = config(root.path(), vec![]);
+        for (tool, pattern, expected) in [
+            (LegionToolKind::Grep, "CANARY", "No matches found."),
+            (LegionToolKind::Glob, "*.txt", "No matching files found."),
+        ] {
+            let selected = root.path().join("selected");
+            std::fs::create_dir(&selected).unwrap();
+            let input = serde_json::json!({"pattern": pattern, "path": "selected", "limit": 0});
+            let mut dispatches = 0;
+            let mut dispatched = || {
+                dispatches += 1;
+                std::fs::remove_dir(&selected).unwrap();
+            };
+            let result = match tool {
+                LegionToolKind::Grep => execute_grep(&input, &config, &mut dispatched),
+                LegionToolKind::Glob => execute_glob(&input, &config, &mut dispatched),
+                _ => unreachable!(),
+            };
+            assert_eq!(result.unwrap(), expected);
+            assert_eq!(dispatches, 1);
         }
     }
 
@@ -308,6 +479,62 @@ mod forbidden_walk_tests {
         .unwrap();
         assert!(glob.contains("allowed.txt"));
         assert!(!glob.contains("secret"));
+    }
+
+    #[test]
+    fn recursive_grep_and_glob_map_worktree_entries_to_workspace_forbidden_paths() {
+        let root = TempDir::new().unwrap();
+        let worktree = root.path().join("worktree");
+        let workspace = root.path().join("workspace");
+        for dir in [
+            "scope-secret",
+            "config-secret",
+            "absolute-secret",
+            "scope-secret-public",
+        ] {
+            std::fs::create_dir_all(worktree.join(dir)).unwrap();
+            std::fs::write(worktree.join(dir).join("token.txt"), "CANARY local").unwrap();
+        }
+        let mut config = config(
+            &worktree,
+            vec![CanonicalPath(
+                workspace
+                    .join("scope-secret")
+                    .to_string_lossy()
+                    .into_owned(),
+            )],
+        );
+        config.workspace_root = workspace.clone();
+        config.scope.workspace_root = CanonicalPath(workspace.to_string_lossy().into_owned());
+        config.forbidden_paths.push(
+            workspace
+                .join("absolute-secret")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let relative = Path::new("scope-secret-public")
+            .join("token.txt")
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            execute_grep(
+                &serde_json::json!({"pattern": "CANARY"}),
+                &config,
+                &mut || {}
+            )
+            .unwrap(),
+            format!("{relative}:1: CANARY local")
+        );
+        assert_eq!(
+            execute_glob(
+                &serde_json::json!({"pattern": "*.txt"}),
+                &config,
+                &mut || {}
+            )
+            .unwrap(),
+            relative
+        );
     }
 }
 
@@ -610,28 +837,6 @@ fn worktree_relative_to_workspace_path(worktree_relative: &Path, workspace_root:
     workspace_root.join(worktree_relative)
 }
 
-/// Return whether a worktree entry is excluded by either source of delegated-task
-/// forbidden paths. This check is intentionally applied to every recursive walk
-/// entry, rather than only to the caller-supplied search root.
-fn worktree_path_is_forbidden(config: &DelegatedTaskLoopConfig, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(&config.worktree_root) else {
-        return true;
-    };
-    let candidate = worktree_relative_to_workspace_path(relative, &config.workspace_root);
-    let canonical = legion_protocol::CanonicalPath(candidate.to_string_lossy().into_owned());
-
-    config.scope.forbids_path(&canonical)
-        || config.forbidden_paths.iter().any(|forbidden| {
-            let forbidden = Path::new(forbidden);
-            let forbidden = if forbidden.is_absolute() {
-                forbidden.to_path_buf()
-            } else {
-                config.workspace_root.join(forbidden)
-            };
-            candidate == forbidden || candidate.starts_with(forbidden)
-        })
-}
-
 /// Invoke the capability broker for a single tool call.
 ///
 /// Returns `Ok(())` if the broker grants the capability, or a
@@ -852,14 +1057,37 @@ fn execute_grep(
     // never returns, and an execution nobody can distinguish from a refusal is
     // exactly what this event exists to prevent.
     reached_the_machine();
-    grep_walk(
+    search_traversal::walk_files(
         &search_root,
-        &search_root,
-        &re,
-        &glob_matcher,
         config,
         &mut results,
         limit,
+        |path, rel, results| {
+            // Grep's optional glob matches only the basename, not the relative path.
+            if let Some(matcher) = &glob_matcher {
+                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !matcher.is_match(file_name) {
+                    return Ok(());
+                }
+            }
+            if looks_binary(path)? {
+                return Ok(());
+            }
+            let content = match std::fs::read_to_string(path) {
+                Ok(content) => content,
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            for (i, line) in content.lines().enumerate() {
+                if results.len() >= limit {
+                    return Ok(());
+                }
+                if re.is_match(line) {
+                    results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
+                }
+            }
+            Ok(())
+        },
     )
     .map_err(|error| {
         LegionToolCallFeedback::new(
@@ -875,68 +1103,6 @@ fn execute_grep(
     }
 
     Ok(results.join("\n"))
-}
-
-/// Recursive grep walker.
-fn grep_walk(
-    base: &Path,
-    dir: &Path,
-    re: &regex::Regex,
-    glob_matcher: &Option<globset::GlobSet>,
-    config: &DelegatedTaskLoopConfig,
-    results: &mut Vec<String>,
-    limit: usize,
-) -> std::io::Result<()> {
-    if results.len() >= limit {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(dir)?;
-    for entry in entries {
-        if results.len() >= limit {
-            return Ok(());
-        }
-        let entry = entry?;
-        let path = entry.path();
-        if worktree_path_is_forbidden(config, &path) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            // Skip hidden dirs
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.starts_with('.') {
-                continue;
-            }
-            grep_walk(base, &path, re, glob_matcher, config, results, limit)?;
-        } else if file_type.is_file() {
-            // Apply file glob filter
-            if let Some(matcher) = glob_matcher {
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !matcher.is_match(file_name) {
-                    continue;
-                }
-            }
-            // Skip binary files (check first bytes)
-            if looks_binary(&path)? {
-                continue;
-            }
-            let content = match std::fs::read_to_string(&path) {
-                Ok(content) => content,
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidData => continue,
-                Err(error) => return Err(error),
-            };
-            let rel = path.strip_prefix(base).unwrap_or(&path);
-            for (i, line) in content.lines().enumerate() {
-                if results.len() >= limit {
-                    return Ok(());
-                }
-                if re.is_match(line) {
-                    results.push(format!("{}:{}: {}", rel.to_string_lossy(), i + 1, line));
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Heuristic binary file check — skip if the first 512 bytes contain a NUL.
@@ -1007,13 +1173,18 @@ fn execute_glob(
     // never returns, and an execution nobody can distinguish from a refusal is
     // exactly what this event exists to prevent.
     reached_the_machine();
-    glob_walk(
+    search_traversal::walk_files(
         &search_root,
-        &search_root,
-        &matcher,
         config,
         &mut results,
         limit,
+        |path, rel, results| {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if matcher.is_match(rel) || matcher.is_match(name) {
+                results.push(rel.to_string_lossy().into_owned());
+            }
+            Ok(())
+        },
     )
     .map_err(|error| {
         LegionToolCallFeedback::new(
@@ -1029,45 +1200,6 @@ fn execute_glob(
     }
 
     Ok(results.join("\n"))
-}
-
-/// Recursive glob walker.
-fn glob_walk(
-    base: &Path,
-    dir: &Path,
-    matcher: &globset::GlobSet,
-    config: &DelegatedTaskLoopConfig,
-    results: &mut Vec<String>,
-    limit: usize,
-) -> std::io::Result<()> {
-    if results.len() >= limit {
-        return Ok(());
-    }
-    let entries = std::fs::read_dir(dir)?;
-    for entry in entries {
-        if results.len() >= limit {
-            return Ok(());
-        }
-        let entry = entry?;
-        let path = entry.path();
-        if worktree_path_is_forbidden(config, &path) {
-            continue;
-        }
-        let file_type = entry.file_type()?;
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if file_type.is_dir() {
-            if name.starts_with('.') {
-                continue;
-            }
-            glob_walk(base, &path, matcher, config, results, limit)?;
-        } else if file_type.is_file() {
-            let rel = path.strip_prefix(base).unwrap_or(&path);
-            if matcher.is_match(rel) || matcher.is_match(name) {
-                results.push(rel.to_string_lossy().into_owned());
-            }
-        }
-    }
-    Ok(())
 }
 
 fn execute_outline(

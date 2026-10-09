@@ -84,6 +84,19 @@ Every current workspace crate must have an explicit internal dependency policy e
 
 - `legion-editor` MUST NOT depend on `legion-project`.
 
+ADR-0057's snapshot-backed Vim resolution uses the existing `legion-text` and
+`legion-protocol` edges. UI motion intents are translated in `legion-app`;
+`legion-editor` does not gain a dependency on `legion-ui`. Git scheduling and
+LSP write-lifecycle modules remain private app implementation, with no new
+crate edge or runtime capability activation. Existing dependency enforcement
+continues to apply unchanged.
+
+ADR-0058's worktree search traversal stays internal to `legion-agent`.
+Completion/hover scheduling and explorer activation remain app-owned workflows
+over the existing UI/app/editor/project edges; `legion-desktop` retains input
+ownership and presentation. No dependency edge or runtime capability is added,
+and the existing dependency enforcement remains unchanged.
+
 The S1-04h vertical-caret contract adds no dependency edge. `legion-editor`
 continues to own ordered carets, typed row-local preferred X, grapheme and
 affinity validation, layout-identity guards, bounded shaped-stop validation,

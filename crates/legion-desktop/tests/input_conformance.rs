@@ -590,9 +590,9 @@ fn replacement_completion_uses_post_action_cursor_and_buffer() {
             text: "X".to_string(),
         })
         .expect("replacement action");
-    let events = runtime.lsp_debounce_events_for_test(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-    );
+    let events = runtime
+        .app_mut_for_test()
+        .tick_lsp_debounces(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let completion = events
         .iter()
         .find(|event| event.kind == LspDebounceKind::Completion)
@@ -623,9 +623,9 @@ fn directional_delete_completion_uses_post_action_cursor_and_noop_stays_disarmed
             backward: true,
         })
         .expect("backspace action");
-    let events = runtime.lsp_debounce_events_for_test(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-    );
+    let events = runtime
+        .app_mut_for_test()
+        .tick_lsp_debounces(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let completion = events
         .iter()
         .find(|event| event.kind == LspDebounceKind::Completion)
@@ -645,9 +645,9 @@ fn directional_delete_completion_uses_post_action_cursor_and_noop_stays_disarmed
             backward: true,
         })
         .expect("noop backspace action");
-    let noop_events = runtime.lsp_debounce_events_for_test(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-    );
+    let noop_events = runtime
+        .app_mut_for_test()
+        .tick_lsp_debounces(std::time::Instant::now() + std::time::Duration::from_secs(1));
     assert!(
         noop_events
             .iter()
@@ -679,9 +679,9 @@ fn boundary_hover_uses_post_action_cursor() {
             extend: false,
         })
         .expect("boundary action");
-    let events = runtime.lsp_debounce_events_for_test(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-    );
+    let events = runtime
+        .app_mut_for_test()
+        .tick_lsp_debounces(std::time::Instant::now() + std::time::Duration::from_secs(1));
     let hover = events
         .iter()
         .find(|event| event.kind == LspDebounceKind::Hover)
@@ -713,9 +713,9 @@ fn palette_blocks_directed_replacement_without_arming_completion() {
         })
         .expect("blocked action should be handled");
     assert_eq!(snapshot_text(&runtime), Some("abcd".to_string()));
-    let events = runtime.lsp_debounce_events_for_test(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-    );
+    let events = runtime
+        .app_mut_for_test()
+        .tick_lsp_debounces(std::time::Instant::now() + std::time::Duration::from_secs(1));
     assert!(
         events
             .iter()

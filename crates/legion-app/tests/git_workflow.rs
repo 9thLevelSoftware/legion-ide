@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    sync::{Arc, Barrier},
+    sync::{Arc, Barrier, Mutex, mpsc},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -128,6 +128,229 @@ fn projected_path_matches(path: &str, expected: &Path) -> bool {
     Path::new(path)
         .canonicalize()
         .is_ok_and(|actual| actual == expected)
+}
+
+struct PausedGitRunner {
+    runner: GitInspectionRunner,
+    started: mpsc::Receiver<()>,
+    release: mpsc::SyncSender<()>,
+    generations: Arc<Mutex<Vec<u64>>>,
+}
+
+impl PausedGitRunner {
+    fn new(panic_after_release: bool) -> Self {
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::sync_channel(1);
+        let release_rx = Mutex::new(release_rx);
+        let generations = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&generations);
+        let runner: GitInspectionRunner =
+            Arc::new(move |generation, root, active_file, options| {
+                observed
+                    .lock()
+                    .expect("runner observations")
+                    .push(generation);
+                if generation == 2 {
+                    started_tx.send(()).expect("signal paused runner");
+                    release_rx
+                        .lock()
+                        .expect("runner release lock")
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release paused runner");
+                    assert!(!panic_after_release, "synthetic Git worker disconnection");
+                }
+                legion_project::collect_git_snapshot(root, active_file, options)
+            });
+        Self {
+            runner,
+            started,
+            release,
+            generations,
+        }
+    }
+}
+
+fn app_with_git_runner(repo: &TempGitRepo, runner: GitInspectionRunner) -> AppComposition {
+    let mut app = AppComposition::new_with_git_runner_for_test(runner);
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-scheduling-test".to_string()),
+    )
+    .expect("open workspace");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("initial refresh");
+    assert_eq!(
+        app.drain_git_until_idle().refresh_state,
+        GitRefreshState::Idle
+    );
+    app
+}
+
+#[test]
+fn git_queued_mutation_executes_before_latest_refresh_and_rejects_competing_mutation() {
+    let repo = TempGitRepo::new();
+    repo.write("file.rs", "before\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    repo.write("file.rs", "after\n");
+    let paused = PausedGitRunner::new(false);
+    let mut app = app_with_git_runner(&repo, Arc::clone(&paused.runner));
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("paused refresh");
+    paused
+        .started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker started");
+    app.dispatch_ui_intent(CommandDispatchIntent::StageGitPath {
+        path: "file.rs".into(),
+    })
+    .expect("queue stage");
+    for _ in 0..2 {
+        app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+            .expect("coalesced refresh");
+    }
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::UnstageGitPath {
+            path: "file.rs".into(),
+        })
+        .expect_err("queued stage must not be displaced");
+    assert!(error.to_string().contains("git_mutation_pending"));
+    paused.release.send(()).expect("release refresh");
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, GitRefreshState::Idle);
+    assert!(!settled.stale);
+    assert_eq!(
+        *paused.generations.lock().expect("observations"),
+        vec![1, 2, 3, 5]
+    );
+    assert!(run_git(repo.path(), ["diff", "--cached", "--", "file.rs"]).contains("after"));
+}
+
+#[test]
+fn git_disconnection_reports_queued_mutation_without_rescheduling_or_spinning() {
+    let repo = TempGitRepo::new();
+    repo.write("file.rs", "before\n");
+    run_git(repo.path(), ["add", "."]);
+    run_git(repo.path(), ["commit", "-m", "initial"]);
+    repo.write("file.rs", "after\n");
+    let paused = PausedGitRunner::new(true);
+    let mut app = app_with_git_runner(&repo, Arc::clone(&paused.runner));
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("paused refresh");
+    paused
+        .started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker started");
+    app.dispatch_ui_intent(CommandDispatchIntent::StageGitPath {
+        path: "file.rs".into(),
+    })
+    .expect("queue stage");
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("refresh after stage");
+    paused.release.send(()).expect("disconnect worker");
+    // A bounded poll verifies terminal state before calling the blocking helper.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let settled = loop {
+        app.drain_git_inspection();
+        let snapshot = app
+            .shell_projection_snapshot("disconnected-git")
+            .expect("projection");
+        if snapshot.git_projection.refresh_state == GitRefreshState::Failed {
+            break snapshot.git_projection;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disconnected worker did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(!settled.stale);
+    assert!(
+        settled
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("queued mutation generation 3 was not executed"))
+    );
+    assert!(run_git(repo.path(), ["diff", "--cached", "--", "file.rs"]).is_empty());
+    let diagnostic_count = settled.diagnostics.len();
+    assert_eq!(
+        app.drain_git_until_idle().refresh_state,
+        GitRefreshState::Failed
+    );
+    for _ in 0..3 {
+        let projection = app.refresh_git_projection();
+        assert_eq!(projection.refresh_state, GitRefreshState::Failed);
+        assert_eq!(projection.diagnostics.len(), diagnostic_count);
+    }
+    let error = app
+        .dispatch_ui_intent(CommandDispatchIntent::StageGitPath {
+            path: "file.rs".into(),
+        })
+        .expect_err("dead worker must refuse stage");
+    assert!(error.to_string().contains("git_worker_unavailable"));
+    assert_eq!(
+        *paused.generations.lock().expect("observations"),
+        vec![1, 2]
+    );
+}
+
+#[test]
+fn git_workspace_switch_keeps_queued_mutation_in_original_repo_and_projects_new_repo() {
+    let original = TempGitRepo::new();
+    let replacement = TempGitRepo::new();
+    for repo in [&original, &replacement] {
+        repo.write("file.rs", "before\n");
+        run_git(repo.path(), ["add", "."]);
+        run_git(repo.path(), ["commit", "-m", "initial"]);
+        repo.write("file.rs", "after\n");
+    }
+    let paused = PausedGitRunner::new(false);
+    let mut app = app_with_git_runner(&original, Arc::clone(&paused.runner));
+    app.dispatch_ui_intent(CommandDispatchIntent::RefreshGit)
+        .expect("paused refresh");
+    paused
+        .started
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker started");
+    app.dispatch_ui_intent(CommandDispatchIntent::StageGitPath {
+        path: "file.rs".into(),
+    })
+    .expect("queue original stage");
+    app.open_workspace(
+        replacement.path(),
+        legion_protocol::WorkspaceTrustState::Trusted,
+        legion_protocol::PrincipalId("git-replacement-workspace".into()),
+    )
+    .expect("switch workspace");
+    let source = replacement.path().join("file.rs");
+    app.open_file(source.to_string_lossy())
+        .expect("open replacement file");
+    // No explicit refresh: poll must capture the new root and active-file context.
+    app.drain_git_inspection();
+    paused.release.send(()).expect("release original refresh");
+    let settled = app.drain_git_until_idle();
+    assert_eq!(settled.refresh_state, GitRefreshState::Idle);
+    assert!(!settled.stale);
+    let replacement_root = replacement.path().canonicalize().expect("replacement root");
+    assert!(
+        settled
+            .root_label
+            .as_deref()
+            .is_some_and(|root| projected_path_matches(root, &replacement_root))
+    );
+    assert!(
+        settled
+            .hunks
+            .iter()
+            .any(|hunk| hunk.stage == GitHunkStageProjection::Unstaged)
+    );
+    assert!(run_git(original.path(), ["diff", "--cached", "--", "file.rs"]).contains("after"));
+    assert!(run_git(replacement.path(), ["diff", "--cached", "--", "file.rs"]).is_empty());
+    assert_eq!(
+        *paused.generations.lock().expect("observations"),
+        vec![1, 2, 3, 4]
+    );
 }
 
 #[test]

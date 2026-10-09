@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow};
 use legion_app::{
     AppAiRunOutcome, AppCloseTabOutcome, AppCommandOutcome, AppComposition, AppProductMode,
     AppSaveAllItemOutcome, AppSaveAllItemStatus, AppSaveAllOutcome, AppSaveAllStatus,
-    AppSessionRestoreOutcome, DurableCheckpointSummary, LspDebounceKind, OwnedSnapshotLease,
+    AppSessionRestoreOutcome, DurableCheckpointSummary, OwnedSnapshotLease,
     proposal::{ProposalHunkDispositionState, filtered_batch_proposal_for_accepted_targets},
 };
 use legion_protocol::{
@@ -1840,54 +1840,6 @@ impl DesktopRuntime {
             }
             action => {
                 let snapshot = self.shell.projection_snapshot();
-                let arm_post_action_hover = matches!(
-                    action,
-                    DesktopAction::MoveToBoundary { .. }
-                        | DesktopAction::MoveHorizontally { .. }
-                        | DesktopAction::SetDirectedSelection { .. }
-                        | DesktopAction::SetVisualCursor { .. }
-                        | DesktopAction::SetVisualDirectedSelection { .. }
-                );
-                let arm_post_action_completion = matches!(
-                    action,
-                    DesktopAction::ReplaceDirectedCarets { .. }
-                        | DesktopAction::DeleteDirectedCarets { .. }
-                );
-
-                // T6: dismiss popup and arm debounce on text-edit actions.
-                // Directed replacement collapses a selection at the mapped edit end, so its
-                // authoritative completion position only exists after dispatch + projection
-                // refresh. Palette-owned text actions must not arm a timer for a blocked edit.
-                if !arm_post_action_completion
-                    && !editor_text_action_blocked_by_palette(&action, &snapshot)
-                    && let Some((buffer_id, at)) = completion_debounce_info(&action, &snapshot)
-                {
-                    self.completion_popup_open = false;
-                    self.app.arm_lsp_completion_debounce(buffer_id, at);
-                }
-
-                // T6: dismiss popup on tab switch/close (stale popup rule).
-                // T7: dismiss hover tooltip on tab switch too.
-                if matches!(
-                    action,
-                    DesktopAction::SwitchTab { .. } | DesktopAction::CloseTab { .. }
-                ) {
-                    self.completion_popup_open = false;
-                    self.app.disarm_lsp_completion_debounce();
-                    self.completion_selected_index = 0;
-                    self.hover_tooltip_visible = false;
-                    self.app.disarm_lsp_hover_debounce();
-                    // Do NOT clear last_hover_id: the old id prevents the dismissed
-                    // tooltip from re-appearing on the new tab until a genuinely new
-                    // hover response arrives with a different id.
-                }
-
-                // T7: arm hover debounce on cursor movement (200ms settle window).
-                if let Some((buffer_id, at)) = hover_debounce_info(&action, &snapshot) {
-                    self.hover_tooltip_visible = false;
-                    self.app.arm_lsp_hover_debounce(buffer_id, at);
-                }
-
                 // T7: flag that a definition navigation is expected on next refresh.
                 if matches!(action, DesktopAction::GoToDefinition { .. }) {
                     self.definition_navigation_queued = true;
@@ -1922,26 +1874,6 @@ impl DesktopRuntime {
 
                 self.persist_session_if_configured();
                 self.refresh_projection()?;
-                if arm_post_action_completion && matches!(outcome, DesktopWorkflowOutcome::Edited) {
-                    let refreshed = self.shell.projection_snapshot();
-                    if let (Some(buffer_id), Some(viewport)) = (
-                        refreshed.active_buffer_projection.buffer_id,
-                        refreshed.active_buffer_projection.viewport.as_ref(),
-                    ) {
-                        self.completion_popup_open = false;
-                        self.app
-                            .arm_lsp_completion_debounce(buffer_id, viewport.cursor);
-                    }
-                }
-                if arm_post_action_hover {
-                    let refreshed = self.shell.projection_snapshot();
-                    if let Some((buffer_id, at)) =
-                        post_action_hover_position(arm_post_action_hover, &refreshed)
-                    {
-                        self.hover_tooltip_visible = false;
-                        self.app.arm_lsp_hover_debounce(buffer_id, at);
-                    }
-                }
                 self.last_outcome = outcome.clone();
                 self.persist_diagnostics_if_configured();
                 Ok(outcome)
@@ -2450,16 +2382,6 @@ impl DesktopRuntime {
                 self.view.streamed_navigation_rows(identity).is_some()
             });
         paint_ready && streamed_ready
-    }
-
-    /// Test-only access to the app-owned debounce queue. The caller supplies a
-    /// future instant so assertions remain deterministic and do not sleep.
-    #[doc(hidden)]
-    pub fn lsp_debounce_events_for_test(
-        &mut self,
-        now: Instant,
-    ) -> Vec<legion_app::LspDebounceEvent> {
-        self.app.tick_lsp_debounces(now)
     }
 
     /// Drain Git inspections to completion for deterministic tests and golden paths.
@@ -3050,11 +2972,13 @@ impl DesktopRuntime {
         // Pre-sync count so refresh_projection doesn't re-open for same batch.
         self.app
             .pre_sync_lsp_completion_count(snapshot.language_tooling_projection.completions.len());
-        self.dispatch_intent(CommandDispatchIntent::Insert {
+        let outcome = self.dispatch_intent(CommandDispatchIntent::Insert {
             buffer_id,
             at: cursor,
             text,
-        })
+        })?;
+        self.app.disarm_lsp_completion_debounce();
+        Ok(outcome)
     }
 
     /// Navigate to the currently selected problem in the Problems panel (T4).
@@ -3398,26 +3322,15 @@ impl DesktopRuntime {
                 }
                 self.dispatch_intent(CommandDispatchIntent::CloseTab { buffer_id })
             }
-            DesktopAppRequest::ActivateExplorerFile {
-                file_id,
-                path,
-                is_directory,
-            } => {
-                if is_directory {
-                    // A directory row activates the same way its chevron does.
-                    // Requiring the chevron makes the wide, obvious part of the
-                    // row inert, which reads as a broken tree.
-                    return self.handle_app_request(DesktopAppRequest::ToggleExplorerPath { path });
+            DesktopAppRequest::ActivateExplorerFile { path } => {
+                match self.app.activate_explorer_file(path) {
+                    Ok(outcome) => Ok(self.map_app_outcome(outcome, None)),
+                    Err(error) => {
+                        let message = error.to_string();
+                        self.set_status(StatusSeverity::Error, message.clone());
+                        Ok(DesktopWorkflowOutcome::Error(message))
+                    }
                 }
-                // Open first, then reveal. `open_file` sets the app's
-                // `active_file_id`, but the explorer projection is only rebuilt
-                // by the reveal outcome, so reversing these leaves the tree
-                // highlighting the row the user clicked *before* this one.
-                let opened = self.dispatch_intent(CommandDispatchIntent::OpenPath { path })?;
-                if let DesktopWorkflowOutcome::Error(message) = opened {
-                    return Ok(DesktopWorkflowOutcome::Error(message));
-                }
-                self.dispatch_intent(CommandDispatchIntent::RevealInExplorer { file_id })
             }
             DesktopAppRequest::OpenExternalUrl { url } => {
                 open_url_in_system_browser(&url)?;
@@ -3807,6 +3720,13 @@ impl DesktopRuntime {
         DesktopWorkflowOutcome::Error(message)
     }
 
+    fn dismiss_language_popups(&mut self) {
+        self.completion_popup_open = false;
+        self.completion_selected_index = 0;
+        self.hover_tooltip_visible = false;
+        // Retain the last hover id so the dismissed response cannot reappear.
+    }
+
     fn map_app_outcome(
         &mut self,
         outcome: AppCommandOutcome,
@@ -3841,6 +3761,7 @@ impl DesktopRuntime {
                 }
             }
             AppCommandOutcome::Edited(_) => {
+                self.completion_popup_open = false;
                 self.set_status(StatusSeverity::Info, "Edited");
                 DesktopWorkflowOutcome::Edited
             }
@@ -3892,6 +3813,7 @@ impl DesktopRuntime {
                 }
             }
             AppCommandOutcome::TabSwitched(buffer_id) => {
+                self.dismiss_language_popups();
                 self.set_status(
                     StatusSeverity::Info,
                     format!("Tab switched {}", buffer_id.0),
@@ -3899,12 +3821,14 @@ impl DesktopRuntime {
                 DesktopWorkflowOutcome::TabSwitched(buffer_id)
             }
             AppCommandOutcome::TabClose(AppCloseTabOutcome::Closed { buffer_id }) => {
+                self.dismiss_language_popups();
                 self.set_status(StatusSeverity::Info, format!("Tab closed {}", buffer_id.0));
                 DesktopWorkflowOutcome::TabClosed(buffer_id)
             }
             AppCommandOutcome::TabClose(AppCloseTabOutcome::CloseDirtyPrompt {
                 buffer_id, ..
             }) => {
+                self.dismiss_language_popups();
                 self.set_status(
                     StatusSeverity::Warning,
                     format!("Close dirty prompt {}", buffer_id.0),
@@ -3923,10 +3847,12 @@ impl DesktopRuntime {
                 DesktopWorkflowOutcome::VimModeChanged(mode)
             }
             AppCommandOutcome::CursorSet(buffer_id) => {
+                self.hover_tooltip_visible = false;
                 self.set_status(StatusSeverity::Info, format!("Cursor set {}", buffer_id.0));
                 DesktopWorkflowOutcome::CursorSet(buffer_id)
             }
             AppCommandOutcome::SelectionSet(buffer_id) => {
+                self.hover_tooltip_visible = false;
                 self.set_status(
                     StatusSeverity::Info,
                     format!("Selection set {}", buffer_id.0),
@@ -4425,22 +4351,7 @@ impl DesktopRuntime {
     }
 
     fn refresh_projection(&mut self) -> Result<()> {
-        // T6/T7: check all armed debounces (completion=50ms, hover=200ms).
-        // Decision logic lives in AppComposition; desktop dispatches returned events.
-        for event in self.app.tick_lsp_debounces(Instant::now()) {
-            let intent = match event.kind {
-                LspDebounceKind::Completion => CommandDispatchIntent::RequestCompletion {
-                    buffer_id: event.buffer_id,
-                    position: event.position,
-                },
-                LspDebounceKind::Hover => CommandDispatchIntent::RequestHover {
-                    buffer_id: event.buffer_id,
-                    position: event.position,
-                },
-            };
-            // Non-fatal: LSP may be unavailable; swallow error.
-            let _ = self.app.dispatch_ui_intent(intent);
-        }
+        self.app.tick_lsp_interactions(Instant::now());
 
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
         self.app.drain_lsp_session();
@@ -4863,63 +4774,6 @@ fn editor_text_action_blocked_by_palette(
                 | DesktopAction::ReplaceDirectedCarets { .. }
                 | DesktopAction::SelectAll { .. }
         )
-}
-
-/// Extract `(buffer_id, cursor)` from text-edit actions that should arm the
-/// completion debounce timer (T6).  Returns `None` for non-edit actions.
-///
-/// M5: `DeleteRange` re-arms the debounce so backspace/delete triggers a fresh
-/// completion request (the preceding token may have changed).
-fn completion_debounce_info(
-    action: &DesktopAction,
-    snapshot: &ShellProjectionSnapshot,
-) -> Option<(BufferId, TextCoordinate)> {
-    let at = match action {
-        DesktopAction::InsertText { at, .. }
-        | DesktopAction::ClipboardPaste { at, .. }
-        | DesktopAction::ImeCommit { at, .. } => *at,
-        DesktopAction::ReplaceDirectedCarets { .. } => {
-            snapshot.active_buffer_projection.viewport.as_ref()?.cursor
-        }
-        DesktopAction::DeleteDirectedCarets { .. } => {
-            snapshot.active_buffer_projection.viewport.as_ref()?.cursor
-        }
-        // M5: treat delete/backspace as an edit that re-arms completion.
-        // Use the start of the deleted range as the new trigger position.
-        DesktopAction::DeleteRange { range } => range.start,
-        _ => return None,
-    };
-    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
-    Some((buffer_id, at))
-}
-
-/// Extract `(buffer_id, cursor)` from cursor-movement actions that should arm
-/// the hover debounce timer (T7).  Returns `None` for non-cursor actions.
-fn hover_debounce_info(
-    action: &DesktopAction,
-    snapshot: &ShellProjectionSnapshot,
-) -> Option<(BufferId, TextCoordinate)> {
-    let cursor = match action {
-        DesktopAction::SetCursor {
-            cursor,
-            buffer_id: _,
-        } => *cursor,
-        _ => return None,
-    };
-    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
-    Some((buffer_id, cursor))
-}
-
-fn post_action_hover_position(
-    is_boundary_selection_action: bool,
-    snapshot: &ShellProjectionSnapshot,
-) -> Option<(BufferId, TextCoordinate)> {
-    if !is_boundary_selection_action {
-        return None;
-    }
-    let buffer_id = snapshot.active_buffer_projection.buffer_id?;
-    let cursor = snapshot.active_buffer_projection.viewport.as_ref()?.cursor;
-    Some((buffer_id, cursor))
 }
 
 fn plugin_intent_context(intent: &CommandDispatchIntent) -> Option<(PluginId, String)> {

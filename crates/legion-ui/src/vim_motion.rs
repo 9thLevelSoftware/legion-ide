@@ -32,11 +32,20 @@ pub fn resolve_motion(
     count: usize,
 ) -> TextCoordinate {
     let lines = line_chars(text);
-    let mut position = clamp_to_text(&lines, cursor);
+    resolve_motion_in_lines(&lines, cursor, motion, count)
+}
+
+fn resolve_motion_in_lines(
+    lines: &[Vec<char>],
+    cursor: TextCoordinate,
+    motion: VimMotionKind,
+    count: usize,
+) -> TextCoordinate {
+    let mut position = clamp_to_text(lines, cursor);
     let repeats = count.max(1);
 
     for _ in 0..repeats {
-        position = step(&lines, position, motion);
+        position = step(lines, position, motion);
     }
     position
 }
@@ -498,7 +507,7 @@ pub fn resolve_operator_range(
 ) -> Option<VimRange> {
     let lines = line_chars(text);
     let from = clamp_to_text(&lines, cursor);
-    let to = resolve_motion(text, cursor, motion, count);
+    let to = resolve_motion_in_lines(&lines, from, motion, count);
 
     let a = (from.line as usize, from.character as usize);
     let b = (to.line as usize, to.character as usize);

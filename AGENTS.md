@@ -62,6 +62,23 @@ Follow `plans/dependency-policy.md` and `cargo run -p xtask -- check-deps` for i
 
 The Rust workspace uses edition 2024 and requires Rust/Cargo 1.92 or newer (`Cargo.toml`). Cargo is the product build/test tool. Install `cargo-deny` for the full local gate scripts. Python harnesses require Python 3.10 or newer; `evals/` and `training/` are separate workflows, with heavier dependencies used only for relevant evaluation/training modes. `mockups/` is a separate pnpm/Vite package; no Node version requirement is established here. Do not use Node or Bun as a prerequisite for the Rust IDE.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs use local Markdown under `.scratch/<feature>/`.
+See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five default triage roles as local issue status values.
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout: root `GLOSSARY.md` and existing `plans/adrs/`.
+See `docs/agents/domain.md`.
+
 ## Testing & QA
 
 Put unit tests alongside source and integration tests in `crates/<crate>/tests/`. Name tests for observable behavior and expected outcome. Prefer isolated temporary directories, fixed/scripted transports, and committed replay fixtures; keep live-provider checks distinct and opt-in/credential-gated. When tests mutate process-global environment, isolate the test binary and guard shared state.

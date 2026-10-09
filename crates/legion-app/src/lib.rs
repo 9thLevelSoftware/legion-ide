@@ -34,16 +34,18 @@ mod acp_host;
 mod assist_proposal;
 mod git_inspection;
 mod hot_exit;
+mod lsp_interaction;
 use acp_host::AcpHostCommand;
 #[cfg(feature = "ai")]
 use acp_host::run_acp_host_proposal;
+pub use lsp_interaction::{LspDebounceEvent, LspDebounceKind};
 /// Language-tooling orchestration: capability-gated download decisions and
 /// artifact verification for LSP servers (design §5, §10).
 pub mod language;
 use crate::language::{language_projection_for_new_identity, language_quick_fixes_prioritizing};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use git_inspection::GitInspectionRunner;
-use git_inspection::{GitMutateOp, GitWorkRequest, GitWorker};
+use git_inspection::{GitMutateOp, GitWorkflow};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use language::LspWorkerRequest;
 
@@ -14634,30 +14636,6 @@ fn default_ai_registry() -> ProviderRegistry {
     make_stub_registry()
 }
 
-/// Which debounce timer fired (completion vs hover). App-side classification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LspDebounceKind {
-    /// The completion debounce timer elapsed; a completion request should fire.
-    Completion,
-    /// The hover debounce timer elapsed; a hover request should fire.
-    Hover,
-}
-
-/// A debounce event returned by [`AppComposition::tick_lsp_debounces`].
-///
-/// The desktop receives these events each frame and dispatches them as
-/// `CommandDispatchIntent` values through the app. The desktop never decides
-/// whether the elapsed threshold has been crossed — that logic lives here.
-#[derive(Debug, Clone)]
-pub struct LspDebounceEvent {
-    /// Buffer in which the triggering edit or cursor movement occurred.
-    pub buffer_id: BufferId,
-    /// Position at which the request should be issued.
-    pub position: TextCoordinate,
-    /// Which request kind fired.
-    pub kind: LspDebounceKind,
-}
-
 /// Maximum characters of a Delegate chat prompt that reach app authority.
 ///
 /// Exported so the renderer's composer caps at the same number; the two used to
@@ -14771,11 +14749,7 @@ pub struct AppComposition {
     search_generation: u64,
     structural_search_projection: StructuralSearchProjection,
     git_projection: GitProjection,
-    git_worker: GitWorker,
-    git_latest_generation: u64,
-    git_applied_generation: u64,
-    git_in_flight: bool,
-    pending_mutation: Option<GitWorkRequest>,
+    git_workflow: GitWorkflow,
     git_hunk_cache: HashMap<String, legion_project::ProjectGitHunk>,
     /// Identifier of the keyboard-focused hunk in the diff review surface.
     focused_git_hunk_id: Option<String>,
@@ -14821,9 +14795,7 @@ pub struct AppComposition {
     /// so it waits here in between. See `language/call_hierarchy.rs`.
     pending_call_hierarchy: Option<crate::language::PendingCallHierarchy>,
     /// Accepted write-side LSP requests awaiting their matching server response.
-    pending_lsp_writes: HashMap<String, crate::language::PendingLspWriteOperation>,
-    /// Bounded rename requests admitted while their document sync is queued.
-    deferred_lsp_writes: HashMap<String, crate::language::DeferredLspWrite>,
+    lsp_writes: crate::language::LspWriteLifecycle,
     /// Bounded two-step code-action response and selection authority.
     code_action_authority: crate::language::CodeActionAuthority,
     code_action_command_sidecars: crate::language::CodeActionCommandSidecars,
@@ -14833,12 +14805,10 @@ pub struct AppComposition {
     /// Keeping the complete context prevents an inbound applyEdit from being
     /// authorized solely by a recycled request-id string.
     pending_code_action_contexts: HashMap<String, crate::language::PendingLspCommandContext>,
-    /// Arming instant, buffer, and position for the completion debounce (I1).
-    lsp_ui_completion_debounce: Option<(Instant, BufferId, TextCoordinate)>,
+    /// Accepted editor interaction scheduling, independent of the renderer.
+    lsp_interaction: lsp_interaction::LspInteraction,
     /// Count of completions seen at the last pre-sync; used for new-arrival detection (I1).
     lsp_ui_last_completion_count: usize,
-    /// Arming instant, buffer, and position for the hover debounce (I1).
-    lsp_ui_hover_debounce: Option<(Instant, BufferId, TextCoordinate)>,
     /// Hover id last seen at auto-show time; prevents dismissed tooltip from re-opening (I1).
     lsp_ui_last_hover_id: Option<String>,
     /// Metadata-only per-workspace palette usage counters.
@@ -15171,7 +15141,7 @@ impl AppComposition {
     #[cfg(any(test, feature = "test-helpers"))]
     pub fn new_with_git_runner_for_test(runner: GitInspectionRunner) -> Self {
         let mut app = Self::new();
-        app.git_worker = GitWorker::new_with_runner(runner);
+        app.git_workflow = GitWorkflow::new_with_runner(runner);
         app
     }
 
@@ -15260,11 +15230,7 @@ impl AppComposition {
             search_generation: 0,
             structural_search_projection: StructuralSearchProjection::idle(),
             git_projection: GitProjection::idle(),
-            git_worker: GitWorker::new(),
-            git_latest_generation: 0,
-            git_applied_generation: 0,
-            git_in_flight: false,
-            pending_mutation: None,
+            git_workflow: GitWorkflow::new(),
             git_hunk_cache: HashMap::new(),
             focused_git_hunk_id: None,
             git_remote_policy_audit: Vec::new(),
@@ -15290,16 +15256,14 @@ impl AppComposition {
             language_toolchain_settings: LanguageToolchainSettingsRecord::default(),
             document_sync_ledger: HashMap::new(),
             pending_call_hierarchy: None,
-            pending_lsp_writes: HashMap::new(),
-            deferred_lsp_writes: HashMap::new(),
+            lsp_writes: crate::language::LspWriteLifecycle::default(),
             code_action_authority: crate::language::CodeActionAuthority::default(),
             code_action_command_sidecars: crate::language::CodeActionCommandSidecars::default(),
             code_action_diagnostics: crate::language::CodeActionDiagnostics::new(),
             server_apply_edits: crate::language::ServerApplyEditAuthority::default(),
             pending_code_action_contexts: HashMap::new(),
-            lsp_ui_completion_debounce: None,
+            lsp_interaction: lsp_interaction::LspInteraction::default(),
             lsp_ui_last_completion_count: 0,
-            lsp_ui_hover_debounce: None,
             lsp_ui_last_hover_id: None,
             palette_usage: Box::new(InMemoryPaletteUsageRepository::new()),
             batch_apply_policy: BatchRuntimeApplyPolicy::default(),
@@ -16585,6 +16549,7 @@ impl AppComposition {
         };
         self.active_documents
             .bind_workspace(opened.clone(), root_path, principal, trust.clone());
+        self.lsp_interaction.invalidate();
         if switching_workspace {
             self.terminalize_pending_lsp_writes(
                 None,
@@ -17820,59 +17785,6 @@ impl AppComposition {
         self.editor.release_snapshot_lease(lease_id)
     }
 
-    // ── LSP UI debounce authority (I1) ──────────────────────────────────────
-    // Timing and armed-state decisions live here; the desktop only forwards
-    // typed intents and renders (brief hard rule).
-
-    /// Arm the completion debounce.  Resets the timer to `now` on each call.
-    pub fn arm_lsp_completion_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
-        self.lsp_ui_completion_debounce = Some((Instant::now(), buffer_id, position));
-    }
-
-    /// Disarm the completion debounce without firing it.
-    pub fn disarm_lsp_completion_debounce(&mut self) {
-        self.lsp_ui_completion_debounce = None;
-    }
-
-    /// Arm the hover debounce.  Resets the settle timer to `now` on each call.
-    pub fn arm_lsp_hover_debounce(&mut self, buffer_id: BufferId, position: TextCoordinate) {
-        self.lsp_ui_hover_debounce = Some((Instant::now(), buffer_id, position));
-    }
-
-    /// Disarm the hover debounce without firing it.
-    pub fn disarm_lsp_hover_debounce(&mut self) {
-        self.lsp_ui_hover_debounce = None;
-    }
-
-    /// Check all armed debounces against `now`.  Returns events for any that
-    /// have elapsed; clears those timers.  Desktop dispatches returned events.
-    ///
-    /// Completion threshold: 50 ms.  Hover threshold: 200 ms.
-    pub fn tick_lsp_debounces(&mut self, now: Instant) -> Vec<LspDebounceEvent> {
-        let mut fired = Vec::new();
-        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_completion_debounce
-            && now.duration_since(armed_at) >= std::time::Duration::from_millis(50)
-        {
-            self.lsp_ui_completion_debounce = None;
-            fired.push(LspDebounceEvent {
-                buffer_id,
-                position,
-                kind: LspDebounceKind::Completion,
-            });
-        }
-        if let Some((armed_at, buffer_id, position)) = self.lsp_ui_hover_debounce
-            && now.duration_since(armed_at) >= std::time::Duration::from_millis(200)
-        {
-            self.lsp_ui_hover_debounce = None;
-            fired.push(LspDebounceEvent {
-                buffer_id,
-                position,
-                kind: LspDebounceKind::Hover,
-            });
-        }
-        fired
-    }
-
     /// Update the saved completion count after a refresh (auto-show detection).
     pub fn pre_sync_lsp_completion_count(&mut self, count: usize) {
         self.lsp_ui_last_completion_count = count;
@@ -17896,6 +17808,16 @@ impl AppComposition {
     /// Open a file through workspace authority and bind it into editor engine.
     pub fn open_file(&mut self, path: impl AsRef<str>) -> Result<FileId, AppCompositionError> {
         self.open_file_with_intent(path, OpenFileIntent::Existing)
+    }
+
+    /// Activate an explorer file, revealing the identity returned by a successful open.
+    /// A failed open leaves the current buffer and explorer selection intact.
+    pub fn activate_explorer_file(
+        &mut self,
+        path: impl AsRef<str>,
+    ) -> Result<AppCommandOutcome, AppCompositionError> {
+        let file_id = self.open_file(path)?;
+        self.dispatch_ui_intent(CommandDispatchIntent::RevealInExplorer { file_id })
     }
 
     /// Open a new-file buffer only when the caller explicitly requested create intent.
@@ -17965,6 +17887,7 @@ impl AppComposition {
             )?;
 
         self.active_documents.bind_opened_file(&opened, buffer_id);
+        self.lsp_interaction.invalidate();
         self.notify_lsp_did_open(buffer_id);
         // Lexical retrieval indexing is not on the open path (GAP-09.3). Language
         // reads, Delegate retrieval, and the symbol palette index on demand. Save
@@ -19278,7 +19201,9 @@ impl AppComposition {
         intent: &CommandDispatchIntent,
         event_context: &EventContext,
     ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
-        use crate::vim_session::byte_to_character_column;
+        if let Some(outcome) = self.dispatch_vim_text_intent(intent, event_context)? {
+            return Ok(Some(outcome));
+        }
 
         match intent {
             CommandDispatchIntent::SetVimModeEnabled(enabled) => {
@@ -19299,53 +19224,6 @@ impl AppComposition {
                     self.vim.display_mode(),
                 )))
             }
-            CommandDispatchIntent::VimMotion { motion, count } => {
-                if !self.vim.enabled {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                }
-                let Some(buffer_id) = self.active_documents.active_buffer_id else {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                let text = self.editor.text(buffer_id)?.to_string();
-                let position = self.editor.primary_cursor(buffer_id)?;
-
-                // Into character space, resolve, and back: the editor counts
-                // columns in bytes and Vim counts them in characters.
-                let from = legion_protocol::TextCoordinate {
-                    line: position.line as u32,
-                    character: byte_to_character_column(&text, position.line, position.column)
-                        as u32,
-                    byte_offset: None,
-                    utf16_offset: None,
-                };
-                let to = legion_ui::resolve_motion(&text, from, *motion, *count);
-                self.set_vim_cursor(buffer_id, &text, to)?;
-                Ok(Some(AppCommandOutcome::CursorSet(buffer_id)))
-            }
-            CommandDispatchIntent::VimOperatorMotion {
-                operator,
-                count,
-                motion,
-            } => {
-                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                let Some(range) = legion_ui::resolve_operator_range(&text, from, *motion, *count)
-                else {
-                    // The motion did not move, so there is nothing to operate
-                    // on. Emitting an empty edit would cost an undo entry and
-                    // change nothing.
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
-            }
-            CommandDispatchIntent::VimLinewiseOperator { operator, count } => {
-                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                let range = legion_ui::resolve_linewise_range(&text, from, *count);
-                self.apply_vim_operator(buffer_id, &text, range, *operator, event_context)
-            }
             CommandDispatchIntent::VimPut => {
                 let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
                     return Ok(Some(AppCommandOutcome::Noop));
@@ -19354,23 +19232,6 @@ impl AppComposition {
                     return Ok(Some(AppCommandOutcome::Noop));
                 };
                 self.apply_vim_put(buffer_id, &text, from, &register, event_context)
-            }
-            CommandDispatchIntent::VimInsertBefore | CommandDispatchIntent::VimInsertAfter => {
-                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                // `a` is `i` one character to the right. Doing it as a motion
-                // keeps the line-end clamping in one place rather than
-                // repeating it here.
-                if matches!(intent, CommandDispatchIntent::VimInsertAfter) {
-                    let to =
-                        legion_ui::resolve_motion(&text, from, legion_ui::VimMotionKind::Right, 1);
-                    self.set_vim_cursor(buffer_id, &text, to)?;
-                }
-                self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
-                Ok(Some(AppCommandOutcome::VimModeChanged(
-                    self.vim.display_mode(),
-                )))
             }
             CommandDispatchIntent::VimInsertLineBelow
             | CommandDispatchIntent::VimInsertLineAbove => {
@@ -19391,35 +19252,6 @@ impl AppComposition {
                 self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
                 Ok(Some(outcome))
             }
-            CommandDispatchIntent::VimDeleteChar => {
-                let Some((buffer_id, text, from)) = self.vim_cursor_context()? else {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                };
-                // `x` takes the character under the cursor, which is a
-                // one-character inclusive range rather than any motion.
-                let line = from.line as usize;
-                let character = from.character as usize;
-                // Nothing under the cursor — an empty line, or past the end.
-                // Asked directly rather than by converting two columns and
-                // comparing them, which walked the line twice to learn one
-                // thing.
-                let line_chars = text.split('\n').nth(line).map(|l| l.chars().count());
-                if line_chars.is_none_or(|count| character >= count) {
-                    return Ok(Some(AppCommandOutcome::Noop));
-                }
-                let range = legion_ui::VimRange {
-                    start: (line, character),
-                    end: (line, character + 1),
-                    linewise: false,
-                };
-                self.apply_vim_operator(
-                    buffer_id,
-                    &text,
-                    range,
-                    legion_ui::VimOperatorKind::Delete,
-                    event_context,
-                )
-            }
             CommandDispatchIntent::VimSearchForward => {
                 if !self.vim.enabled {
                     return Ok(Some(AppCommandOutcome::Noop));
@@ -19434,26 +19266,6 @@ impl AppComposition {
             }
             _ => Ok(None),
         }
-    }
-
-    /// Move the cursor to a character-space coordinate.
-    fn set_vim_cursor(
-        &mut self,
-        buffer_id: BufferId,
-        text: &str,
-        to: legion_protocol::TextCoordinate,
-    ) -> Result<(), AppCompositionError> {
-        let target = legion_editor::TextPosition::new(
-            to.line as usize,
-            crate::vim_session::character_to_byte_column(
-                text,
-                to.line as usize,
-                to.character as usize,
-            ),
-        );
-        self.editor
-            .set_cursors(buffer_id, vec![legion_editor::Cursor { position: target }])?;
-        Ok(())
     }
 
     /// Buffer, text and character-space cursor for a Vim command.
@@ -19481,54 +19293,6 @@ impl AppComposition {
             utf16_offset: None,
         };
         Ok(Some((buffer_id, text, cursor)))
-    }
-
-    /// Apply a Vim operator to an already-resolved range.
-    ///
-    /// Delete and change both fill the register first: Vim's delete is a cut,
-    /// so `dd` then `p` moves a line. Change additionally leaves the session in
-    /// insert mode, which is the whole difference between `c` and `d`.
-    fn apply_vim_operator(
-        &mut self,
-        buffer_id: BufferId,
-        text: &str,
-        range: legion_ui::VimRange,
-        operator: legion_ui::VimOperatorKind,
-        event_context: &EventContext,
-    ) -> Result<Option<AppCommandOutcome>, AppCompositionError> {
-        use crate::vim_session::{VimRegister, character_to_byte_column};
-        use legion_ui::VimOperatorKind;
-
-        self.vim.register = Some(VimRegister {
-            text: legion_ui::range_text(text, range),
-            linewise: range.linewise,
-        });
-
-        if matches!(operator, VimOperatorKind::Yank) {
-            // A yank copies and leaves the buffer alone, so there is no edit
-            // and no undo entry.
-            return Ok(Some(AppCommandOutcome::Noop));
-        }
-
-        let edit = legion_editor::TextEdit::new(
-            legion_editor::TextRange::new(
-                legion_editor::TextPosition::new(
-                    range.start.0,
-                    character_to_byte_column(text, range.start.0, range.start.1),
-                ),
-                legion_editor::TextPosition::new(
-                    range.end.0,
-                    character_to_byte_column(text, range.end.0, range.end.1),
-                ),
-            ),
-            String::new(),
-        );
-        let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
-
-        if matches!(operator, VimOperatorKind::Change) {
-            self.vim.state.set_mode(legion_ui::EditorInputMode::Insert);
-        }
-        Ok(Some(outcome))
     }
 
     /// Put the register at the cursor.
@@ -19717,7 +19481,7 @@ impl AppComposition {
     }
 
     /// Route a UI dispatch intent through editor and workspace authorities.
-    pub fn dispatch_ui_intent(
+    fn dispatch_ui_intent_inner(
         &mut self,
         intent: CommandDispatchIntent,
     ) -> Result<AppCommandOutcome, AppCompositionError> {
@@ -20779,8 +20543,7 @@ impl AppComposition {
                     self.clear_code_actions();
                 }
                 let event_context = self.next_event_context();
-                self.deferred_lsp_writes.remove(&operation_id);
-                if let Some(pending) = self.pending_lsp_writes.remove(&operation_id) {
+                if let Some(pending) = self.lsp_writes.finish(&operation_id) {
                     let _ = self.language_tooling.upsert_write_operation(
                         &pending,
                         LanguageToolingStatusKind::Cancelled,
@@ -26875,7 +26638,9 @@ impl AppComposition {
 
     /// Switch the active tab to an already-open buffer.
     pub fn switch_tab(&mut self, buffer_id: BufferId) -> Result<(), AppCompositionError> {
-        self.active_documents.switch_to_buffer(buffer_id)
+        self.active_documents.switch_to_buffer(buffer_id)?;
+        self.lsp_interaction.invalidate();
+        Ok(())
     }
 
     /// Reorder a tab to a new position in the open tabs list.
@@ -26896,6 +26661,7 @@ impl AppComposition {
         buffer_id: BufferId,
     ) -> Result<AppCloseTabOutcome, AppCompositionError> {
         self.active_documents.require_open_buffer(buffer_id)?;
+        self.lsp_interaction.invalidate();
         if self.editor.is_dirty(buffer_id)? {
             self.active_documents.prompt_dirty_close(buffer_id)?;
             let prompt = self

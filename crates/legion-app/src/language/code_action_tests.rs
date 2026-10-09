@@ -1218,7 +1218,7 @@ fn selecting_resolve_candidate_twice_does_not_emit_second_wire_request() {
         .dispatch_ui_intent(selection)
         .expect("duplicate resolve selection");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
     let once_edit = resolved_edit(&fixture.uri, "ONCE");
     send_response(&mut fixture, first, once_edit);
     assert_eq!(projected_proposal_count(&fixture), 1);
@@ -1275,7 +1275,7 @@ fn cancelled_resolve_retry_rejects_old_response_and_accepts_new_once() {
     let old_edit = resolved_edit(&fixture.uri, "OLD");
     send_response(&mut fixture, first, old_edit);
     assert_eq!(projected_proposal_count(&fixture), 0);
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
     fixture
         .app
         .dispatch_ui_intent(CommandDispatchIntent::SelectCodeAction {
@@ -1284,7 +1284,7 @@ fn cancelled_resolve_retry_rejects_old_response_and_accepts_new_once() {
         })
         .expect("duplicate retry remains blocked");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
     let new_edit = resolved_edit(&fixture.uri, "NEW");
     send_response(&mut fixture, retry, new_edit);
     assert_eq!(projected_proposal_count(&fixture), 1);
@@ -1420,8 +1420,8 @@ fn resolve_admission_is_bounded_by_shared_thirty_two_pending_limit() {
     };
     let template = fixture
         .app
-        .pending_lsp_writes
-        .values()
+        .lsp_writes
+        .pending_operations()
         .next()
         .cloned()
         .expect("pending resolve");
@@ -1430,10 +1430,11 @@ fn resolve_admission_is_bounded_by_shared_thirty_two_pending_limit() {
         pending.operation_id = format!("resolve-cap-{index}");
         fixture
             .app
-            .pending_lsp_writes
-            .insert(pending.operation_id.clone(), pending);
+            .lsp_writes
+            .admit(pending, None)
+            .expect("within admission capacity");
     }
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
     fixture
         .app
         .dispatch_ui_intent(CommandDispatchIntent::SelectCodeAction {
@@ -1442,7 +1443,7 @@ fn resolve_admission_is_bounded_by_shared_thirty_two_pending_limit() {
         })
         .expect("bounded duplicate resolve selection");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
     let _ = first;
 }
 
@@ -1749,7 +1750,7 @@ fn selected_command_preserves_exact_arguments_and_null_completion_is_terminal() 
         })
         .expect("replay command selection");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
 
     send_response(&mut fixture, tag.clone(), serde_json::Value::Null);
     let rows = fixture
@@ -1830,7 +1831,7 @@ fn advertised_provider_still_rejects_unallowlisted_command_without_wire() {
         })
         .expect("unallowlisted command handled");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 0);
+    assert_eq!(fixture.app.lsp_writes.len(), 0);
     assert_eq!(projected_proposal_count(&fixture), 0);
 }
 
@@ -1840,7 +1841,7 @@ fn command_pending_admission_is_bounded_at_thirty_two() {
     for _ in 0..32 {
         let _ = admit_command_and_capture_wire(&mut fixture);
     }
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
     fixture
         .app
         .dispatch_ui_intent(CommandDispatchIntent::RequestCodeActions {
@@ -1849,5 +1850,5 @@ fn command_pending_admission_is_bounded_at_thirty_two() {
         })
         .expect("bounded code-action request");
     assert!(fixture.requests.try_recv().is_err());
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
 }
