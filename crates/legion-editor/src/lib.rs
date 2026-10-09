@@ -4,6 +4,9 @@
 
 pub mod diff;
 
+/// Snapshot-backed Vim motion and operator resolution in native editor coordinates.
+pub mod vim;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

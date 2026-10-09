@@ -83,12 +83,13 @@ pub(crate) use apply_edit_decision::{
     ApplyEditClaim, ApplyEditDecision, ApplyEditDecisionResult, DeadlineDecision,
 };
 mod lsp_reads;
+mod write_lifecycle;
 pub(crate) use code_action_commands::{
     CodeActionCommand, CodeActionCommandSidecars, extract_command,
 };
 pub(crate) use code_action_diagnostics::{CodeActionDiagnostics, DiagnosticIdentity};
 pub(crate) use code_actions::{CodeActionAuthority, CodeActionIdentity, bounded_code_action_size};
-pub(crate) use lsp_reads::DeferredLspWrite;
+pub(crate) use write_lifecycle::{DeferredLspWrite, LspWriteLifecycle, PendingLspWriteOperation};
 
 mod problem_rows;
 pub(crate) use problem_rows::{
@@ -104,7 +105,7 @@ pub use call_hierarchy::{
 mod app_lsp;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use app_lsp::LspWorkerRequest;
-pub(crate) use app_lsp::PendingLspWriteOperation;
+
 pub use app_lsp::{
     LanguageServerStartConfig, LspReadKind, LspRequestTag, LspSelectedServerMetadata,
     LspSessionHandle, LspWorkerResult,

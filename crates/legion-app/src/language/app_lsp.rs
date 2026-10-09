@@ -37,7 +37,7 @@ const STDERR_RING_CAPACITY: usize = 100;
 const STDERR_LINE_MAX_LEN: usize = 512;
 
 use legion_protocol::{
-    BufferId, FileId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord,
+    BufferId, LanguageId, LanguageServerId, LspResultStatus, LspServerHealthRecord,
     LspSessionLifecycleKind, LspSessionLogProjection, LspSessionStatusProjection, SnapshotId,
     WorkspaceId,
 };
@@ -162,23 +162,6 @@ pub struct LspRequestTag {
     /// `None` is retained only for unit-fixture compatibility; product reads
     /// and writes populate it before crossing to the worker.
     pub operation_context: Option<legion_protocol::LspOperationContext>,
-}
-
-/// Bounded metadata retained while an accepted write-side LSP request is in flight.
-#[derive(Debug, Clone)]
-pub(crate) struct PendingLspWriteOperation {
-    /// Opaque operation identifier reused in the projected terminal result.
-    pub(crate) operation_id: String,
-    /// Existing projection operation category.
-    pub(crate) operation_kind: crate::LanguageToolingOperationKind,
-    /// Workspace and file identity retained for terminal status projection.
-    pub(crate) workspace_id: WorkspaceId,
-    pub(crate) file_id: FileId,
-    /// Buffer and snapshot the request was admitted against.
-    pub(crate) buffer_id: BufferId,
-    pub(crate) snapshot_id: SnapshotId,
-    /// Event context reused when the resulting proposal is recorded.
-    pub(crate) event_context: crate::EventContext,
 }
 
 /// Discriminator for routing worker read results.

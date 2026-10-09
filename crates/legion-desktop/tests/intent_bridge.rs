@@ -504,22 +504,17 @@ fn intent_bridge_routes_explorer_actions_and_adapter_local_toggle() {
             &snapshot,
         ),
         DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
-            file_id: FileId(3),
             path: "src/main.rs".to_string(),
-            is_directory: false,
         })
     );
-    // The same gesture on a directory row carries the directory flag, so the
-    // workflow expands instead of trying to open a folder as text.
+    // Directory rows keep adapter-owned expansion.
     assert_eq!(
         bridge.translate(
             DesktopAction::SelectExplorerFile { file_id: FileId(2) },
             &snapshot,
         ),
-        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ActivateExplorerFile {
-            file_id: FileId(2),
+        DesktopBridgeOutput::AppRequest(DesktopAppRequest::ToggleExplorerPath {
             path: "src".to_string(),
-            is_directory: true,
         })
     );
     assert_eq!(

@@ -1,6 +1,8 @@
-//! Vim modal editing state and the column conversion it depends on.
+//! Vim modal session state and app dispatch of editor-resolved text operations.
 //!
-//! Two things live here because they are inseparable in practice.
+//! The UI parser supplies pure intents. The editor resolves movements and operator
+//! ranges from bounded snapshots in native UTF-8 coordinates. The app owns register
+//! contents, mode changes, and ordinary edit/undo transactions.
 //!
 //! **The session.** [`VimSession`] holds whether modal editing is on and the
 //! parser's state across keystrokes — `d` then `w` is one command, so the
@@ -8,23 +10,140 @@
 //! per-buffer, matching Vim: the mode and the pending command follow the user,
 //! not the file.
 //!
-//! **The column conversion.** [`character_to_byte_column`] and
-//! [`byte_to_character_column`] exist because two coordinate types in this
-//! workspace disagree about what a column is, and Vim is the first feature
-//! that has to be right about it:
+//! [`character_to_byte_column`] and [`byte_to_character_column`] remain compatibility
+//! helpers for put/open-line commands and tests. Motion/operator dispatch does not
+//! read full text or convert columns in app. The two legacy coordinate types differ:
 //!
 //! * `legion_protocol::TextCoordinate::character` — a **character** offset.
 //! * `legion_text::TextPosition::column` — a **UTF-8 byte** offset.
 //!
-//! `CommandDispatcher::editor_position` converts between them with a cast,
-//! which is correct only while every line is ASCII. Motion resolution is
-//! deliberately character-based (`w` over `café` must not land inside the é),
-//! so the Vim path converts properly at the boundary instead of inheriting
-//! that cast. The wider fix — making every coordinate conversion text-aware —
-//! is a separate change with a much larger blast radius.
+//! Pure UI resolution remains available as a compatibility reference; native
+//! resolution treats CRLF as a terminator and retains its exact bytes in registers.
 
 use legion_editor::TextPosition;
 use legion_ui::{EditorInputMode, VimState};
+
+/// Translate parser vocabulary at the app boundary; the editor never depends on UI.
+pub(crate) fn editor_motion(motion: legion_ui::VimMotionKind) -> legion_editor::vim::Motion {
+    use legion_editor::vim::Motion;
+    use legion_ui::VimMotionKind;
+    match motion {
+        VimMotionKind::Left => Motion::Left,
+        VimMotionKind::Right => Motion::Right,
+        VimMotionKind::Up => Motion::Up,
+        VimMotionKind::Down => Motion::Down,
+        VimMotionKind::WordForward => Motion::WordForward,
+        VimMotionKind::WordBackward => Motion::WordBackward,
+        VimMotionKind::WordEnd => Motion::WordEnd,
+        VimMotionKind::LineStart => Motion::LineStart,
+        VimMotionKind::LineEnd => Motion::LineEnd,
+        VimMotionKind::FirstNonBlank => Motion::FirstNonBlank,
+        VimMotionKind::FileStart => Motion::FileStart,
+        VimMotionKind::FileEnd => Motion::FileEnd,
+        VimMotionKind::FindChar(c) => Motion::FindChar(c),
+        VimMotionKind::TillChar(c) => Motion::TillChar(c),
+    }
+}
+
+impl crate::AppComposition {
+    /// Handle text-dependent Vim intents with editor-owned bounded resolution.
+    pub(crate) fn dispatch_vim_text_intent(
+        &mut self,
+        intent: &legion_ui::CommandDispatchIntent,
+        event_context: &crate::EventContext,
+    ) -> Result<Option<crate::AppCommandOutcome>, crate::AppCompositionError> {
+        use crate::AppCommandOutcome;
+        use legion_ui::CommandDispatchIntent;
+
+        if !matches!(
+            intent,
+            CommandDispatchIntent::VimMotion { .. }
+                | CommandDispatchIntent::VimOperatorMotion { .. }
+                | CommandDispatchIntent::VimLinewiseOperator { .. }
+                | CommandDispatchIntent::VimDeleteChar
+                | CommandDispatchIntent::VimInsertBefore
+                | CommandDispatchIntent::VimInsertAfter
+        ) {
+            return Ok(None);
+        }
+        if !self.vim.enabled {
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+        let Some(buffer_id) = self.active_documents.active_buffer_id else {
+            return Ok(Some(AppCommandOutcome::Noop));
+        };
+        let position = self.editor.primary_cursor(buffer_id)?;
+        let (range, operator) = match intent {
+            CommandDispatchIntent::VimMotion { motion, count } => {
+                let to = self.editor.resolve_vim_motion(
+                    buffer_id,
+                    position,
+                    editor_motion(*motion),
+                    *count,
+                )?;
+                self.editor
+                    .set_cursors(buffer_id, vec![legion_editor::Cursor { position: to }])?;
+                return Ok(Some(AppCommandOutcome::CursorSet(buffer_id)));
+            }
+            CommandDispatchIntent::VimOperatorMotion {
+                operator,
+                count,
+                motion,
+            } => (
+                self.editor.resolve_vim_operator_range(
+                    buffer_id,
+                    position,
+                    editor_motion(*motion),
+                    *count,
+                )?,
+                *operator,
+            ),
+            CommandDispatchIntent::VimLinewiseOperator { operator, count } => (
+                Some(
+                    self.editor
+                        .resolve_vim_linewise_range(buffer_id, position, *count)?,
+                ),
+                *operator,
+            ),
+            CommandDispatchIntent::VimDeleteChar => (
+                self.editor
+                    .resolve_vim_character_range(buffer_id, position)?,
+                legion_ui::VimOperatorKind::Delete,
+            ),
+            CommandDispatchIntent::VimInsertBefore | CommandDispatchIntent::VimInsertAfter => {
+                if matches!(intent, CommandDispatchIntent::VimInsertAfter) {
+                    let to = self
+                        .editor
+                        .resolve_vim_character_range(buffer_id, position)?
+                        .map_or(position, |range| range.range.end);
+                    self.editor
+                        .set_cursors(buffer_id, vec![legion_editor::Cursor { position: to }])?;
+                }
+                self.vim.state.set_mode(EditorInputMode::Insert);
+                return Ok(Some(AppCommandOutcome::VimModeChanged(
+                    self.vim.display_mode(),
+                )));
+            }
+            _ => unreachable!("text intent filtered above"),
+        };
+        let Some(range) = range else {
+            return Ok(Some(AppCommandOutcome::Noop));
+        };
+        self.vim.register = Some(VimRegister {
+            text: self.editor.vim_range_text(buffer_id, range.range)?,
+            linewise: range.linewise,
+        });
+        if matches!(operator, legion_ui::VimOperatorKind::Yank) {
+            return Ok(Some(AppCommandOutcome::Noop));
+        }
+        let edit = legion_editor::TextEdit::new(range.range, String::new());
+        let outcome = self.apply_vim_edit(buffer_id, edit, event_context)?;
+        if matches!(operator, legion_ui::VimOperatorKind::Change) {
+            self.vim.state.set_mode(EditorInputMode::Insert);
+        }
+        Ok(Some(outcome))
+    }
+}
 
 /// Application-wide Vim modal editing state.
 #[derive(Debug, Default)]

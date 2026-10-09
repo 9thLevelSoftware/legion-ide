@@ -10,6 +10,263 @@ use legion_app::{AppCommandOutcome, AppComposition};
 use legion_protocol::{PrincipalId, WorkspaceTrustState};
 use legion_ui::{CommandDispatchIntent, EditorInputMode, VimMotionKind, VimOperatorKind};
 
+#[test]
+fn native_vim_resolution_matches_pure_ui_logical_content() {
+    use legion_app::vim_session::{byte_to_character_column, character_to_byte_column};
+    use legion_editor::vim::Motion;
+    use legion_editor::{EditorEngine, TextPosition};
+    use legion_protocol::{FileId, TextCoordinate, WorkspaceId};
+
+    let motions = [
+        (VimMotionKind::Left, Motion::Left),
+        (VimMotionKind::Right, Motion::Right),
+        (VimMotionKind::Up, Motion::Up),
+        (VimMotionKind::Down, Motion::Down),
+        (VimMotionKind::WordForward, Motion::WordForward),
+        (VimMotionKind::WordBackward, Motion::WordBackward),
+        (VimMotionKind::WordEnd, Motion::WordEnd),
+        (VimMotionKind::LineStart, Motion::LineStart),
+        (VimMotionKind::LineEnd, Motion::LineEnd),
+        (VimMotionKind::FirstNonBlank, Motion::FirstNonBlank),
+        (VimMotionKind::FileStart, Motion::FileStart),
+        (VimMotionKind::FileEnd, Motion::FileEnd),
+        (VimMotionKind::FindChar('é'), Motion::FindChar('é')),
+        (VimMotionKind::FindChar('🦀'), Motion::FindChar('🦀')),
+        (VimMotionKind::FindChar(' '), Motion::FindChar(' ')),
+        (VimMotionKind::FindChar('z'), Motion::FindChar('z')),
+        (VimMotionKind::TillChar('é'), Motion::TillChar('é')),
+        (VimMotionKind::TillChar('🦀'), Motion::TillChar('🦀')),
+        (VimMotionKind::TillChar('z'), Motion::TillChar('z')),
+    ];
+    for text in [
+        "",
+        "x",
+        "é🦀",
+        "café au lait\n",
+        "  é_e ++ 🦀 z\n\n\tfin",
+        "\n\n",
+        "ab\n短\nlong line\n",
+        "é🦀\r\n\r\n  fin",
+        "x\r\n",
+    ] {
+        // Native coordinates exclude CRLF terminators. The old raw UI resolver
+        // counts CR as text, so compare its LF logical-content semantics here;
+        // raw CRLF correction has a separate explicit regression below.
+        let logical = text.replace("\r\n", "\n");
+        let mut editor = EditorEngine::new();
+        let id = editor
+            .open_buffer(WorkspaceId(1), FileId(1), "differential.txt", text)
+            .unwrap();
+        let lines: Vec<_> = logical.split('\n').collect();
+        let character_position =
+            |p: TextPosition| (p.line, byte_to_character_column(&logical, p.line, p.column));
+        // Legacy app dispatch converted operator endpoints to bytes, clamping
+        // character overshoots (including inclusive ends on empty final lines).
+        let effective_endpoint = |(line, character): (usize, usize)| {
+            TextPosition::new(line, character_to_byte_column(&logical, line, character))
+        };
+        for line in 0..=lines.len() {
+            let clamped_line = line.min(lines.len() - 1);
+            // Every byte includes interior UTF-8 offsets, end positions and overshoots.
+            for column in 0..=lines[clamped_line].len() + 2 {
+                let cursor = TextPosition::new(line, column);
+                let from = TextCoordinate {
+                    line: line as u32,
+                    character: byte_to_character_column(&logical, clamped_line, column) as u32,
+                    byte_offset: None,
+                    utf16_offset: None,
+                };
+                for count in [0, 1, 2, 4] {
+                    for (ui_motion, native_motion) in motions {
+                        let expected = legion_ui::resolve_motion(&logical, from, ui_motion, count);
+                        let actual = editor
+                            .resolve_vim_motion(id, cursor, native_motion, count)
+                            .unwrap();
+                        assert_eq!(
+                            character_position(actual),
+                            (expected.line as usize, expected.character as usize),
+                            "motion {ui_motion:?}/{count} from {cursor:?} in {text:?}"
+                        );
+                        let expected =
+                            legion_ui::resolve_operator_range(&logical, from, ui_motion, count);
+                        let actual = editor
+                            .resolve_vim_operator_range(id, cursor, native_motion, count)
+                            .unwrap();
+                        assert_eq!(
+                            actual.map(|r| (r.range.start, r.range.end, r.linewise)),
+                            expected.map(|r| (
+                                effective_endpoint(r.start),
+                                effective_endpoint(r.end),
+                                r.linewise
+                            )),
+                            "operator {ui_motion:?}/{count} from {cursor:?} in {text:?}"
+                        );
+                        if let (Some(actual), Some(expected)) = (actual, expected) {
+                            let expected_text = legion_ui::range_text(&logical, expected);
+                            let actual_text = editor.vim_range_text(id, actual.range).unwrap();
+                            assert_eq!(actual_text.replace("\r\n", "\n"), expected_text);
+                        }
+                    }
+                    let expected = legion_ui::resolve_linewise_range(&logical, from, count);
+                    let actual = editor
+                        .resolve_vim_linewise_range(id, cursor, count)
+                        .unwrap();
+                    assert_eq!(
+                        (
+                            character_position(actual.range.start),
+                            character_position(actual.range.end),
+                            actual.linewise
+                        ),
+                        (expected.start, expected.end, expected.linewise)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn crlf_motion_stays_on_content_and_linewise_register_preserves_terminators() {
+    let (mut app, id) = app_with_text("é🦀\r\nnext");
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::LineEnd, 1);
+    assert_eq!(
+        app.editor().primary_cursor(id).unwrap(),
+        legion_editor::TextPosition::new(0, 2)
+    );
+    let legacy = legion_ui::resolve_motion(
+        "é🦀\r\nnext",
+        legion_protocol::TextCoordinate {
+            line: 0,
+            character: 0,
+            byte_offset: None,
+            utf16_offset: None,
+        },
+        VimMotionKind::LineEnd,
+        1,
+    );
+    assert_eq!(
+        legacy.character, 2,
+        "legacy raw text places the cursor on CR"
+    );
+    linewise(&mut app, VimOperatorKind::Yank, 1);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimPut)
+        .unwrap();
+    assert_eq!(text_of(&app, id), "é🦀\r\né🦀\r\nnext");
+}
+
+#[test]
+fn empty_linewise_change_still_enters_insert_and_insert_after_reaches_content_end() {
+    let (mut app, _) = app_with_text("");
+    enable_vim(&mut app);
+    linewise(&mut app, VimOperatorKind::Change, 1);
+    assert_eq!(app.vim_display_mode(), Some(EditorInputMode::Insert));
+    let (mut app, id) = app_with_text("é");
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertAfter)
+        .unwrap();
+    assert_eq!(
+        app.editor().primary_cursor(id).unwrap(),
+        legion_editor::TextPosition::new(0, 2)
+    );
+    assert_eq!(app.vim_display_mode(), Some(EditorInputMode::Insert));
+}
+
+#[test]
+fn insert_after_final_multibyte_scalar_types_before_lf_or_crlf_terminator() {
+    for ending in ["\n", "\r\n"] {
+        let (mut app, id) = app_with_text(&format!("é🦀{ending}"));
+        enable_vim(&mut app);
+        motion(&mut app, VimMotionKind::LineEnd, 1);
+        assert_eq!(
+            app.editor().primary_cursor(id).unwrap(),
+            legion_editor::TextPosition::new(0, 2)
+        );
+        app.dispatch_ui_intent(CommandDispatchIntent::VimInsertAfter)
+            .unwrap();
+        assert_eq!(
+            app.editor().primary_cursor(id).unwrap(),
+            legion_editor::TextPosition::new(0, 6)
+        );
+        app.dispatch_ui_intent(CommandDispatchIntent::ReplaceDirectedCarets {
+            buffer_id: id,
+            text: "!".to_string(),
+        })
+        .unwrap();
+        assert_eq!(text_of(&app, id), format!("é🦀!{ending}"));
+    }
+    let (mut app, id) = app_with_text("");
+    enable_vim(&mut app);
+    app.dispatch_ui_intent(CommandDispatchIntent::VimInsertAfter)
+        .unwrap();
+    assert_eq!(
+        app.editor().primary_cursor(id).unwrap(),
+        legion_editor::TextPosition::zero()
+    );
+    assert_eq!(app.vim_display_mode(), Some(EditorInputMode::Insert));
+}
+
+#[test]
+fn large_streamed_app_dispatch_moves_and_deletes_motion_range_near_eof() {
+    use std::io::{Read, Write};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large.txt");
+    let mut app = AppComposition::new();
+    let prefix_bytes =
+        (5 * 1024 * 1024).max(app.editor().thresholds().large_file_threshold_bytes) + 1024;
+    {
+        let mut file = std::fs::File::create(&path).unwrap();
+        std::io::copy(
+            &mut std::io::repeat(b'x').take(prefix_bytes as u64),
+            &mut file,
+        )
+        .unwrap();
+        file.write_all("\né🦀 fin\n".as_bytes()).unwrap();
+    }
+    app.open_workspace(
+        dir.path(),
+        WorkspaceTrustState::Trusted,
+        PrincipalId("vim-large-test".to_string()),
+    )
+    .unwrap();
+    app.open_file(path.to_string_lossy()).unwrap();
+    let id = app.active_buffer_id().unwrap();
+    assert!(app.editor().buffer_is_streamed(id).unwrap());
+    let before = app.editor().buffer_metadata(id).unwrap();
+    assert!(before.byte_len > 5 * 1024 * 1024);
+    enable_vim(&mut app);
+    motion(&mut app, VimMotionKind::FileEnd, 1);
+    assert_eq!(
+        app.editor().primary_cursor(id).unwrap(),
+        legion_editor::TextPosition::new(2, 0)
+    );
+    motion(&mut app, VimMotionKind::Up, 1);
+    assert_eq!(
+        app.editor().primary_cursor(id).unwrap(),
+        legion_editor::TextPosition::new(1, 0)
+    );
+    let outcome = app
+        .dispatch_ui_intent(CommandDispatchIntent::VimOperatorMotion {
+            operator: VimOperatorKind::Delete,
+            motion: VimMotionKind::FindChar('🦀'),
+            count: 1,
+        })
+        .unwrap();
+    assert!(matches!(outcome, AppCommandOutcome::Edited(_)));
+    let after = app.editor().buffer_metadata(id).unwrap();
+    assert_eq!(after.byte_len, before.byte_len - 6);
+    assert_eq!(after.undo_len, before.undo_len + 1);
+    let tail = app
+        .editor()
+        .buffer_byte_offset(id, legion_editor::TextPosition::new(1, 0))
+        .unwrap();
+    let window = app.editor().line_window_around_byte(id, tail, 64).unwrap();
+    assert_eq!(window.text, " fin");
+    assert!(app.editor().buffer_is_streamed(id).unwrap());
+    // No text_of()/cursor() helper or full-text API is used on this large buffer.
+}
+
 /// Open a workspace with one file and return the app plus its buffer id.
 fn app_with_text(text: &str) -> (AppComposition, legion_protocol::BufferId) {
     let dir = tempfile::tempdir().expect("temp dir");

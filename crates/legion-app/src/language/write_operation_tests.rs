@@ -199,9 +199,14 @@ fn accepted_format_is_running_with_same_operation_and_no_proposal_until_response
     let tag = issue_formatting(&mut fixture);
     let operation_id = tag.operation_id.clone().expect("write operation id");
 
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
     assert_eq!(
-        fixture.app.pending_lsp_writes[&operation_id].operation_id,
+        fixture
+            .app
+            .lsp_writes
+            .pending(&operation_id)
+            .expect("admitted operation")
+            .operation_id,
         operation_id
     );
     let rows = operation(&fixture, &operation_id);
@@ -218,7 +223,7 @@ fn accepted_format_is_running_with_same_operation_and_no_proposal_until_response
 fn unavailable_format_has_no_pending_request_or_proposal() {
     let mut fixture = fixture(&[]);
     assert!(!fixture.app.issue_lsp_formatting_request(fixture.buffer));
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     assert!(
         fixture
             .app
@@ -240,7 +245,7 @@ fn valid_response_creates_exactly_one_preview_with_the_request_operation_id() {
         .expect("document URI");
 
     send_response(&mut fixture, tag.clone(), formatting_response(&uri));
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, LanguageToolingStatusKind::Ready);
@@ -269,7 +274,7 @@ fn worker_error_is_failed_with_same_operation_and_no_proposal() {
         })
         .expect("worker error");
     fixture.app.drain_lsp_session();
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, LanguageToolingStatusKind::Failed);
@@ -281,7 +286,7 @@ fn transport_death_fails_pending_write_and_releases_capacity() {
     let mut fixture = fixture(&["documentFormattingProvider"]);
     let tag = issue_formatting(&mut fixture);
     let operation_id = tag.operation_id.clone().expect("write operation id");
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
 
     fixture
         .results
@@ -291,7 +296,7 @@ fn transport_death_fails_pending_write_and_releases_capacity() {
         .expect("transport death");
     fixture.app.drain_lsp_session();
 
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, LanguageToolingStatusKind::Failed);
@@ -309,7 +314,7 @@ fn cancellation_followed_by_a_late_response_produces_no_preview() {
             operation_id: operation_id.clone(),
         })
         .expect("cancel operation");
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
 
     let uri = fixture
         .app
@@ -331,7 +336,7 @@ fn explicit_restart_clears_pending_write_as_cancelled() {
         .app
         .dispatch_ui_intent(CommandDispatchIntent::LspRestartSession)
         .expect("restart session");
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, LanguageToolingStatusKind::Cancelled);
@@ -357,7 +362,7 @@ fn switching_workspace_clears_pending_write_and_isolates_old_operation() {
             PrincipalId("write-operation-other-workspace".to_string()),
         )
         .expect("switch workspace");
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     assert!(operation(&fixture, &operation_id).is_empty());
 
     // The old worker may still deliver after the workspace switch.  The
@@ -376,7 +381,7 @@ fn switching_workspace_clears_pending_write_and_isolates_old_operation() {
             })
             .is_err()
     );
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     assert!(operation(&fixture, &operation_id).is_empty());
     assert!(
         fixture
@@ -419,7 +424,7 @@ fn stale_edit_response_is_terminal_and_does_not_leave_pending_state() {
         .document_uri_for_buffer_for_test(fixture.buffer)
         .expect("document URI");
     send_response(&mut fixture, tag, formatting_response(&uri));
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, LanguageToolingStatusKind::Stale);
@@ -436,7 +441,7 @@ fn closed_buffer_response_is_terminal_and_does_not_leave_pending_state() {
         crate::AppCloseTabOutcome::Closed { .. }
     ));
     send_response(&mut fixture, tag, serde_json::json!([]));
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     let rows = operation(&fixture, &operation_id);
     assert_eq!(rows.len(), 1);
     assert!(matches!(
@@ -567,7 +572,7 @@ fn write_admission_is_bounded_at_thirty_two_operations() {
         tags.push(issue_formatting(&mut fixture));
     }
     assert_eq!(tags.len(), 32);
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
     for tag in &tags {
         let operation_id = tag.operation_id.as_deref().expect("write operation id");
         let rows = operation(&fixture, operation_id);
@@ -576,7 +581,7 @@ fn write_admission_is_bounded_at_thirty_two_operations() {
         assert!(rows[0].proposal_id.is_none());
     }
     assert!(!fixture.app.issue_lsp_formatting_request(fixture.buffer));
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 32);
+    assert_eq!(fixture.app.lsp_writes.len(), 32);
 }
 
 struct TwoBufferFixture {
@@ -690,7 +695,7 @@ fn send_two_buffer_response(
 fn active_second_buffer_rename_waits_for_prior_sync_then_creates_one_proposal() {
     let mut fixture = two_buffer_fixture();
     let operation_id = deferred_rename_operation(&mut fixture);
-    assert_eq!(fixture.app.pending_lsp_writes.len(), 1);
+    assert_eq!(fixture.app.lsp_writes.len(), 1);
     consume_sync(&fixture.requests);
     fixture.app.drain_lsp_session();
     consume_sync(&fixture.requests);
@@ -742,7 +747,7 @@ fn waiting_rename_cancellation_emits_no_later_wire_request() {
         .app
         .dispatch_ui_intent(CommandDispatchIntent::CancelLanguageOperation { operation_id })
         .expect("cancel waiting rename");
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     consume_sync(&fixture.requests);
     fixture.app.drain_lsp_session();
     consume_sync(&fixture.requests);
@@ -768,7 +773,7 @@ fn waiting_rename_snapshot_edit_rejects_late_request_without_proposal() {
     fixture.app.drain_lsp_session();
     consume_sync(&fixture.requests);
     fixture.app.drain_lsp_session();
-    assert!(fixture.app.pending_lsp_writes.is_empty());
+    assert!(fixture.app.lsp_writes.is_empty());
     assert!(
         fixture
             .app

@@ -21,6 +21,10 @@ This index is the canonical entry point for the Legion IDE documentation set und
 
 ## Canonical documents
 
+- `agents/issue-tracker.md` — local Markdown issue and spec conventions for engineering skills.
+- `agents/triage-labels.md` — the five canonical triage roles and their local status values.
+- `agents/domain.md` — shared glossary and ADR consumer rules, preserving `plans/adrs/`.
+- `../GLOSSARY.md` — domain terms for worktree search, LSP interaction scheduling, and explorer activation.
 - `USER_GUIDE.md` — end-user entry point for the current product paths, support surfaces, and where to go next.
 - `E2E_TESTING_CATALOG.md` — exhaustive current vs expected product behavior map for automated E2E scoring (not a GA claim).
 - `PRIVACY.md` — user-facing privacy policy: Manual zero-egress, opt-in AI, no phone-home, metadata-only support bundles.
@@ -45,6 +49,10 @@ This index is the canonical entry point for the Legion IDE documentation set und
 
 ## Supporting material outside `docs/` (planning and evidence)
 
+- `../plans/adrs/ADR-0057-workflow-depth-and-vim-resolution.md` — app-owned Git/LSP lifecycle interfaces and editor-owned bounded Vim resolution, with the focused verification gate.
+- `../plans/evidence/production/module-depth-2026-10-08.md` — local implementation evidence and remaining external verification for ADR-0057.
+- `../plans/adrs/ADR-0058-search-and-interaction-depth.md` — shared search traversal and app-owned interaction ordering, preserving existing authority and behavior.
+- `../plans/evidence/production/search-and-interaction-depth-2026-10-08.md` — implementation evidence and external gates for ADR-0058.
 - `../LICENSE` — proprietary license (not OSI-licensed; internal distribution only).
 - `../THIRD_PARTY_NOTICES.md` — third-party notices shipped with native packages.
 - `../AGENTS.md` — concise agent/developer invariants and required phase gates. Lives at the repo root so that agents see it first.
