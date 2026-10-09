@@ -17,18 +17,22 @@ describes specification creation and does not negate this later authorization.
 - 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
 - 40: explicit provider core integrated as `77166f7`, with reviewed workspace
-  session metadata persistence in `928275e`; native settings/credential UI and
-  live qualification remain open.
-- 63: reviewed named MCP HTTP core integrated as `ac8087f`; UI, persistence,
-  stdio/server activation and real-peer qualification remain open.
+  session metadata persistence in `928275e` and reviewed native settings UI
+  implementation in `1fb8180` (integrated through `f3f9436`). Native input,
+  profile credential entry/reopen, connection checking and live qualification remain open.
+- 63: reviewed named MCP HTTP core integrated as `ac8087f` and bounded HTTP
+  metadata persistence in `1da8848`; UI, stdio/server activation and real-peer
+  qualification remain open.
 - 88: provisional language/platform inventory integrated as `18ef5f7`; remains
   needs-info pending host/configuration/fixture ratification, without scope reduction.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
 - 04: partial external driver fixes in `177caa5` and reviewed compact-drawer
-  navigation in `00ae938`; remains needs-info pending the next attended attempt.
-  Latest actual attempt found zero Explorer README.md UIA elements before input.
+  navigation in `00ae938`; the latest attended attempt passed foreground/UIA
+  checks but Windows accepted zero of three events from the first drawer click.
+  Reviewed reporting-only diagnostics are integrated in `200f8fb`; the next
+  attended diagnostic run remains pending. No successful native input is claimed.
 - Credential prerequisite: typed missing-key classification and isolated native
   Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
 
@@ -41,16 +45,19 @@ and the Assist proposal was refused with `offline.ai_feature_disabled`.
 The bounded repair addresses asynchronous smoke completion and the offline
 Manual smoke contract; it must not weaken acceptance or enable AI implicitly.
 Raw evidence remains in `D:/legion-ide-2026-tools/pilot-candidate-87580fa/`.
-Native journey attempts ran and remained blocked before input; no native-input
+Native journey attempts ran and remained blocked without accepted input; no native-input
 or open/edit/save acceptance is claimed. Reviewed partial driver repairs address
-wrong helper-window selection and STA desktop access; Explorer UIA investigation
-is the next bounded slice.
+wrong helper-window selection and STA desktop access. The cause of the latest
+SendInput rejection remains undetermined.
 
 A subsequent read-only UIA trace observed the compact Explorer drawer with no
 file entries across 60 samples over 15 seconds. The reviewed driver now opens
-that real control through guarded OS input when needed, but the new navigation
-has not run natively yet. Its archived binary and reports are recorded in ticket04
-evidence. No fresh attendance is inferred from an unanswered availability question.
+that real control through guarded OS input when needed. Its first attended
+navigation attempt timed out while the owner was away; the owner-requested retry
+observed foreground and reached the drawer but SendInput accepted zero events.
+The [diagnostic receipt](../../plans/evidence/ide-2026-native-sendinput-diagnostic.md)
+records both the failure and the reviewed error-reporting change. No fresh
+attendance is inferred from an unanswered availability question.
 
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
@@ -58,6 +65,11 @@ records the exact source and command. This is compile evidence only; native,
 OS-keyring, live-provider/peer and full-workspace/platform qualification are not
 established. The MCP checkpoint's isolated `0xc0000409` test-process abort remains
 unexplained despite its successful diagnostic rerun.
+
+After UI and MCP persistence integration, clean source `1da8848` passed one new
+desktop all-targets compile in 28.39 seconds. The same integration receipt records
+that composed-source check. Focused runtime suites were not repeated; native/live
+gates and the unexplained prior abort remain open.
 
 [Native keyring prerequisite evidence](../../plans/evidence/ide-2026-native-keyring-prerequisite.md)
 records synthetic-only Windows store/read/replace/revoke across fresh processes,

@@ -60,3 +60,28 @@ Canonical acceptance entries remain unchanged. Original planning WIP stays in
 
 The new checkpoint documentation passed `cargo run -p xtask --target-dir
 D:/legion-ide-2026-tools/qualification-target -- docs-hygiene` (exit 0).
+
+## Provider UI and MCP persistence integration follow-up
+
+On 2026-10-09, independently reviewed provider settings UI `1fb8180` was
+integrated through `f3f9436`, reporting-only native driver diagnostics through
+`200f8fb`, and MCP HTTP metadata persistence through
+`1da8848c658bad31fb1e7cc806f48fe52bd244c9`. Merger checks confirmed ancestry,
+scope and clean integration state. No push or native/live run was part of merging.
+
+The coordinator ran once on clean `1da8848`:
+
+```text
+cargo check --locked -p legion-desktop --all-targets --target-dir D:/legion-ide-2026-tools/qualification-target
+```
+
+Result: exit 0, 28.39 seconds. Combined output is retained at
+`D:/legion-ide-2026-notes/provider-ui-mcp-persistence-combined-1da8848.log`.
+This checks compilation of the composed desktop targets after both new slices;
+it is not runtime or native qualification. The focused suites in the
+[provider UI receipt](ticket-040-explicit-provider-core.md) and
+[MCP persistence receipt](ide-2026-ticket063-mcp-persistence.md) were not repeated.
+
+Native UI/profile credential entry/reopen, live MiMo responses, MCP native UI and
+real peers remain unqualified. The earlier unexplained `0xc0000409` remains open.
+No ticket or canonical acceptance checkbox is promoted.
