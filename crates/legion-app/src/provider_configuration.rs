@@ -6,6 +6,63 @@ use legion_storage::{SecretReference, SecretStore};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+/// Outcome of an explicit fixed-prompt check, never a model qualification.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AiProviderConnectionState {
+    /// No explicit check has completed for this configuration revision.
+    #[default]
+    Idle,
+    /// The app owns a live bounded provider request.
+    Checking,
+    /// Result discarded; the existing blocking transport is still draining.
+    Cancelling,
+    /// Cancellation completed after the worker actually returned.
+    Cancelled,
+    /// The configured adapter returned a nonempty response.
+    Succeeded,
+    /// The check was denied, failed, or returned no usable response.
+    Failed,
+}
+
+impl AiProviderConnectionState {
+    /// Metadata-only presentation; provider errors and response text are omitted.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Not checked",
+            Self::Checking => "Checking connection (120-second transport limit)",
+            Self::Cancelling => "Cancellation requested; waiting for transport (120-second limit)",
+            Self::Cancelled => "Cancelled (transport finished)",
+            Self::Succeeded => "Connection responded (model unqualified)",
+            Self::Failed => "Connection check failed",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ProviderConnectionChecks {
+    job: Option<ProviderConnectionCheckJob>,
+    states: HashMap<String, AiProviderConnectionState>,
+}
+
+struct ProviderConnectionCheckJob {
+    profile: AiProviderProfile,
+    revision: uuid::Uuid,
+    worker: std::thread::JoinHandle<bool>,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    // Result handoff is part of the operation. In particular, no other request
+    // may enter before a newly installed Manual ceiling is reconciled.
+    lane: ProductAiLaneReservation,
+}
+
+impl Drop for ProviderConnectionChecks {
+    fn drop(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// A named route through an existing provider adapter, never a credential.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +98,8 @@ pub struct AiProviderProfileProjection {
     pub credential_state: String,
     /// Last explicit check state; configuring a profile makes no network call.
     pub health: String,
+    /// Latest explicit connection check, scoped to the current route revision.
+    pub connection_check: AiProviderConnectionState,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -187,6 +246,215 @@ impl AppComposition {
     pub(crate) fn invalidate_provider_predictions(&mut self) {
         self.ai_provider_revision = uuid::Uuid::now_v7();
         self.assist_inline_prediction_state = Default::default();
+        self.provider_connection_checks.states.clear();
+    }
+
+    /// Explicitly check only the displayed, selected route. Never sends editor
+    /// text, changes mode, retries, or selects an alternate backend.
+    pub fn start_ai_provider_connection_check(
+        &mut self,
+        expected: &AiProviderProfile,
+    ) -> Result<(), AppCompositionError> {
+        if !self.product_mode.allows_assist() {
+            return Err(config_error(
+                "connection checks require Assist or Delegate; Manual makes no connection",
+            ));
+        }
+        self.require_ai_dispatch_policy()?;
+        self.require_idle_provider_configuration()?;
+        if self.ai_provider_configuration.selected.as_deref() != Some(&expected.name)
+            || self.profile(&expected.name)? != expected
+        {
+            return Err(config_error(
+                "provider route changed; refresh before checking connection",
+            ));
+        }
+        #[cfg(not(feature = "ai"))]
+        {
+            Err(config_error(
+                "connection checks are unavailable in this offline build",
+            ))
+        }
+        #[cfg(feature = "ai")]
+        {
+            let result = self.spawn_ai_provider_connection_check(expected);
+            if result.is_err() {
+                self.provider_connection_checks
+                    .states
+                    .insert(expected.name.clone(), AiProviderConnectionState::Failed);
+            }
+            result
+        }
+    }
+
+    #[cfg(feature = "ai")]
+    fn spawn_ai_provider_connection_check(
+        &mut self,
+        expected: &AiProviderProfile,
+    ) -> Result<(), AppCompositionError> {
+        const SYSTEM: &str = "Connection check only. Do not use tools.";
+        const PROMPT: &str = "Reply OK to confirm this configured connection.";
+        const TOKENS: u32 = 8;
+        let backend = self
+            .selected_product_ai_selection()?
+            .0
+            .filter(|backend| matches!(backend, ProductAiLiveBackend::Configured(_)))
+            .ok_or_else(|| config_error("connection checks require an explicit named provider"))?;
+        let context = self.active_documents.require_workspace_context()?;
+        let event = self.next_event_context();
+        let broker = DenyByDefaultBroker::new(
+            self.product_ai_policy_with_org_ceiling(Some(backend.clone())),
+            CapabilityNamespace("app.ai".into()),
+        );
+        let decision = broker
+            .handle(CapabilityRequest::Request {
+                principal_id: context.principal,
+                capability_id: CapabilityId("ai.provider.invoke".into()),
+                workspace_trust_state: context.trust,
+                target_path: None,
+                decision_id: None,
+                context: legion_protocol::CapabilityRequestContext {
+                    network_target: Some(expected.target()),
+                    ai_provider_id: Some(expected.provider_id.clone()),
+                    // Overdeclare fixed framing and role overhead as well as text.
+                    budget_request_tokens: Some(declared_request_tokens(512, TOKENS)),
+                    budget_request_cost_cents: declared_request_cost_cents(backend.clone()),
+                    ..Default::default()
+                },
+                correlation_id: event.correlation_id,
+            })
+            .map_err(|_| config_error("connection check policy evaluation failed"))?;
+        if !matches!(decision, CapabilityResponse::Decision(ref d) if d.granted)
+            && !matches!(decision, CapabilityResponse::Granted(_))
+        {
+            return Err(config_error("connection check denied by provider policy"));
+        }
+        let lane = ProductAiLaneReservation::try_acquire(
+            self.live_product_ai_stream.clone(),
+            "provider.connection.check",
+            &expected.provider_id,
+            &expected.model,
+        )
+        .ok_or_else(|| config_error("provider request lane is busy"))?;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let worker = std::thread::Builder::new()
+            .name("legion-provider-connection-check".into())
+            .spawn(move || {
+                // The existing adapter and fixed snapshot own transport. Retain
+                // only a boolean; never publish response content to the AI rail.
+                !worker_cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                    && complete_product_chat(Some(backend), SYSTEM, PROMPT, TOKENS, 0.0, None)
+                        .is_some()
+            })
+            .map_err(|_| config_error("connection check worker unavailable"))?;
+        self.provider_connection_checks
+            .states
+            .insert(expected.name.clone(), AiProviderConnectionState::Checking);
+        self.provider_connection_checks.job = Some(ProviderConnectionCheckJob {
+            profile: expected.clone(),
+            revision: self.ai_provider_revision,
+            worker,
+            cancelled,
+            lane,
+        });
+        Ok(())
+    }
+
+    /// Includes completed worker handoff until its outcome is reconciled.
+    pub fn ai_provider_connection_check_in_flight(&self) -> bool {
+        self.provider_connection_checks.job.is_some()
+    }
+
+    /// Stop accepting this check's outcome. The profile/key/mode guards remain
+    /// held until the bounded blocking request has actually returned.
+    pub fn cancel_ai_provider_connection_check(
+        &mut self,
+        expected: &AiProviderProfile,
+    ) -> Result<(), AppCompositionError> {
+        let job = self
+            .provider_connection_checks
+            .job
+            .as_ref()
+            .filter(|job| &job.profile == expected && job.revision == self.ai_provider_revision)
+            .ok_or_else(|| config_error("no active connection check for the displayed route"))?;
+        job.cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.provider_connection_checks
+            .states
+            .insert(expected.name.clone(), AiProviderConnectionState::Cancelling);
+        Ok(())
+    }
+
+    /// Keep cancellation visible until a policy-refused transport has drained.
+    pub(crate) fn cancel_provider_connection_check_for_policy(&mut self) {
+        if let Some(job) = &self.provider_connection_checks.job {
+            job.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.provider_connection_checks.states.insert(
+                job.profile.name.clone(),
+                AiProviderConnectionState::Cancelling,
+            );
+        }
+    }
+
+    /// Nonblocking frame pump; applies only the still-selected route's outcome.
+    pub fn poll_ai_provider_connection_check(&mut self) -> bool {
+        if !self
+            .provider_connection_checks
+            .job
+            .as_ref()
+            .is_some_and(|job| job.worker.is_finished())
+        {
+            return false;
+        }
+        let job = self
+            .provider_connection_checks
+            .job
+            .take()
+            .expect("finished connection check");
+        let succeeded = job.worker.join().unwrap_or(false);
+        let cancelled = job.cancelled.load(std::sync::atomic::Ordering::SeqCst);
+        let current = self.product_mode.allows_assist()
+            && self.ai_provider_revision == job.revision
+            && self.ai_provider_configuration.selected.as_deref() == Some(&job.profile.name)
+            && self
+                .profile(&job.profile.name)
+                .is_ok_and(|profile| profile == &job.profile);
+        if current {
+            if cancelled {
+                self.ai_profile_health
+                    .lock()
+                    .expect("provider health lock")
+                    .insert(
+                        job.profile.name.clone(),
+                        "cancelled (transport finished)".into(),
+                    );
+            }
+            self.provider_connection_checks.states.insert(
+                job.profile.name,
+                if cancelled {
+                    AiProviderConnectionState::Cancelled
+                } else if succeeded {
+                    AiProviderConnectionState::Succeeded
+                } else {
+                    AiProviderConnectionState::Failed
+                },
+            );
+        } else {
+            self.provider_connection_checks
+                .states
+                .remove(&job.profile.name);
+            self.ai_profile_health
+                .lock()
+                .expect("provider health lock")
+                .remove(&job.profile.name);
+        }
+        drop(job.lane);
+        if self.org_policy_mode_ceiling_denies(self.product_mode) {
+            self.set_product_mode(AppProductMode::Manual);
+        }
+        true
     }
 
     /// Inject the existing secret-store port; production uses the OS keyring.
@@ -207,7 +475,8 @@ impl AppComposition {
 
     /// Includes cancelled workers whose transport has not actually returned.
     pub fn provider_configuration_busy(&self) -> bool {
-        self.product_ai_stream_in_flight()
+        self.ai_provider_connection_check_in_flight()
+            || self.product_ai_stream_in_flight()
             || self
                 .named_provider_snapshots
                 .load(std::sync::atomic::Ordering::SeqCst)
@@ -368,6 +637,12 @@ impl AppComposition {
                         "inline via chat (unqualified)".into(),
                     ],
                     credential_state: credential_state.into(),
+                    connection_check: self
+                        .provider_connection_checks
+                        .states
+                        .get(&profile.name)
+                        .copied()
+                        .unwrap_or_default(),
                     health: self
                         .ai_profile_health
                         .lock()

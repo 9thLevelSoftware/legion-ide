@@ -127,6 +127,35 @@ pub(crate) fn render_named_provider_profiles(
         *draft = None;
         return;
     };
+    ui.label(theme::label(selected.connection_check.label()));
+    ui.label(theme::muted(
+        "Check sends a fixed diagnostic prompt with an 8-token output limit; provider charges may apply. No editor text is sent.",
+    ));
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Check connection"))
+            .clicked()
+        {
+            actions.push(DesktopAction::CheckAiProviderConnection {
+                expected_profile: selected.profile.clone(),
+            });
+        }
+        if matches!(
+            selected.connection_check,
+            legion_app::AiProviderConnectionState::Checking
+                | legion_app::AiProviderConnectionState::Cancelling
+        ) && ui
+            .add_enabled(
+                selected.connection_check == legion_app::AiProviderConnectionState::Checking,
+                egui::Button::new("Cancel connection check"),
+            )
+            .clicked()
+        {
+            actions.push(DesktopAction::CancelAiProviderConnectionCheck {
+                expected_profile: selected.profile.clone(),
+            });
+        }
+    });
     if draft
         .as_ref()
         .is_none_or(|(route, _)| route != &selected.profile)

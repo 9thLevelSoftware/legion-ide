@@ -1802,6 +1802,26 @@ impl DesktopRuntime {
             DesktopAction::RefreshAiProviderProfiles => {
                 self.finish_provider_settings_action(Ok(()), false)
             }
+            DesktopAction::CheckAiProviderConnection { expected_profile } => {
+                let result = self
+                    .app
+                    .start_ai_provider_connection_check(&expected_profile);
+                self.finish_provider_action(
+                    result,
+                    false,
+                    "Checking the selected provider connection.",
+                )
+            }
+            DesktopAction::CancelAiProviderConnectionCheck { expected_profile } => {
+                let result = self
+                    .app
+                    .cancel_ai_provider_connection_check(&expected_profile);
+                self.finish_provider_action(
+                    result,
+                    false,
+                    "Cancellation requested; waiting for the bounded transport to finish.",
+                )
+            }
             // Legacy route preference; Auto requires an explicitly selected profile.
             DesktopAction::SetPreferredAiProvider { provider_id } => {
                 if self.app.provider_configuration_busy() {
@@ -1960,6 +1980,19 @@ impl DesktopRuntime {
         result: std::result::Result<(), legion_app::AppCompositionError>,
         persist_metadata: bool,
     ) -> Result<DesktopWorkflowOutcome> {
+        self.finish_provider_action(
+            result,
+            persist_metadata,
+            "Provider settings updated; no connection was made.",
+        )
+    }
+
+    fn finish_provider_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::AppCompositionError>,
+        persist_metadata: bool,
+        success_message: &'static str,
+    ) -> Result<DesktopWorkflowOutcome> {
         let outcome = match result {
             Err(error) => DesktopWorkflowOutcome::Error(error.to_string()),
             Ok(()) if persist_metadata && self.save_session_state().is_err() => {
@@ -1973,16 +2006,36 @@ impl DesktopRuntime {
             DesktopWorkflowOutcome::Error(message) => {
                 self.set_status(StatusSeverity::Error, message.clone())
             }
-            _ => self.set_status(
-                StatusSeverity::Info,
-                "Provider settings updated; no connection was made.",
-            ),
+            _ => self.set_status(StatusSeverity::Info, success_message),
         }
         self.ai_provider_profiles = self.app.ai_provider_profiles();
         self.refresh_projection()?;
         self.last_outcome = outcome.clone();
         self.persist_diagnostics_if_configured();
         Ok(outcome)
+    }
+
+    /// Reconcile a check once; ordinary frames never reload the credential store.
+    pub fn poll_ai_provider_connection_check(&mut self) -> bool {
+        if !self.app.poll_ai_provider_connection_check() {
+            return false;
+        }
+        self.ai_provider_profiles = self.app.ai_provider_profiles();
+        if let Some(selected) = self
+            .ai_provider_profiles
+            .iter()
+            .find(|profile| profile.selected)
+        {
+            let state = selected.connection_check;
+            let severity = if state == legion_app::AiProviderConnectionState::Failed {
+                StatusSeverity::Error
+            } else {
+                StatusSeverity::Info
+            };
+            self.set_status(severity, state.label());
+        }
+        let _ = self.refresh_projection();
+        true
     }
 
     /// Dispatch a UI-originated action, surfacing any failure as an error
@@ -5267,6 +5320,13 @@ impl DesktopEframeApp {
             || self.runtime.product_ai_stream_in_flight()
             || self.runtime.search_worker_in_flight()
             || self.runtime.has_pending_route_audits()
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        // Connection checks share app authority but publish metadata only.
+        if self.runtime.poll_ai_provider_connection_check()
+            || self.runtime.app.ai_provider_connection_check_in_flight()
         {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));

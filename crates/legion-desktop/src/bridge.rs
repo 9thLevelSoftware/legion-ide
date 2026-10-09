@@ -1237,6 +1237,16 @@ pub enum DesktopAction {
     },
     /// Refresh metadata/keyring status only; never probe a provider endpoint.
     RefreshAiProviderProfiles,
+    /// Explicitly check the displayed selected route through app authority.
+    CheckAiProviderConnection {
+        /// Exact metadata captured by the rendered provider settings.
+        expected_profile: legion_app::AiProviderProfile,
+    },
+    /// Discard the check outcome while its bounded transport drains.
+    CancelAiProviderConnectionCheck {
+        /// Exact metadata captured by the rendered provider settings.
+        expected_profile: legion_app::AiProviderProfile,
+    },
     /// Select the product AI route preference for Assist / Delegate composition.
     ///
     /// Labels: `auto` (local-first), `ollama`, `anthropic`, `deterministic`.
@@ -3030,6 +3040,8 @@ impl DesktopCommandBridge {
             | DesktopAction::ReplaceAiProfileCredential { .. }
             | DesktopAction::RevokeAiProfileCredential { .. }
             | DesktopAction::RefreshAiProviderProfiles
+            | DesktopAction::CheckAiProviderConnection { .. }
+            | DesktopAction::CancelAiProviderConnectionCheck { .. }
             | DesktopAction::SetPreferredAiProvider { .. } => DesktopBridgeOutput::Noop,
             // PKT-RAIL: ghost text acceptance goes through the existing inline-prediction
             // acceptance path so no direct buffer mutation occurs.

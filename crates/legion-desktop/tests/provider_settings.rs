@@ -89,6 +89,117 @@ fn runtime(root: &std::path::Path, store: Arc<dyn SecretStore + Send + Sync>) ->
 }
 
 #[test]
+fn connection_check_controls_refuse_manual_and_show_cancellation_through_frame_polling() {
+    use legion_app::{AiProviderConnectionState, AppProductMode};
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut route = profile();
+    route.endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let root = tempfile::tempdir().unwrap();
+    let mut runtime = runtime(root.path(), Arc::new(InMemorySecretStore::default()));
+    runtime
+        .handle_action(DesktopAction::ConfigureAiProviderProfile {
+            profile: route.clone(),
+        })
+        .unwrap();
+    runtime
+        .handle_action(DesktopAction::SelectAiProviderProfile {
+            name: route.name.clone(),
+        })
+        .unwrap();
+    runtime
+        .handle_action(DesktopAction::ReplaceAiProfileCredential {
+            expected_profile: route.clone(),
+            credential: SensitiveString("synthetic-health-ui-key".into()),
+        })
+        .unwrap();
+    let mut app = DesktopEframeApp::new(runtime);
+    let frame = providers_page(&mut app);
+    let frame = click_at(&mut app, require(&frame, "Check connection"));
+    assert!(rendered_text(&frame).join("\n").contains("Manual"));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    app.runtime_mut_for_test()
+        .app_mut_for_test()
+        .set_product_mode(AppProductMode::Assist);
+    app.runtime_mut_for_test()
+        .handle_action(DesktopAction::RefreshAiProviderProfiles)
+        .unwrap();
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let peer = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let (mut stream, _) = loop {
+            if let Ok(stream) = listener.accept() {
+                break stream;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut request = [0; 4096];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        started.send(()).unwrap();
+        released
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        let body = r#"{"choices":[{"message":{"content":"private-ui-health-reply"}}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .unwrap();
+    });
+    let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+    let frame = click_at(&mut app, require(&frame, "Check connection"));
+    observed
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert!(
+        rendered_text(&frame)
+            .join("\n")
+            .contains("Checking connection")
+    );
+    let frame = click_at(&mut app, require(&frame, "Cancel connection check"));
+    assert!(
+        rendered_text(&frame)
+            .join("\n")
+            .contains("Cancellation requested")
+    );
+    release.send(()).unwrap();
+    peer.join().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let frame = app.run_headless_full_frame(full_frame_input(Vec::new()));
+        if app
+            .runtime_mut_for_test()
+            .app_mut_for_test()
+            .ai_provider_profiles()[0]
+            .connection_check
+            == AiProviderConnectionState::Cancelled
+        {
+            let text = rendered_text(&frame).join("\n");
+            assert!(text.contains("Cancelled (transport finished)"));
+            assert!(!text.contains("private-ui-health-reply"));
+            assert!(!text.contains("synthetic-health-ui-key"));
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "frame pump must publish completed check"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn named_profile_actions_persist_explicit_selection_without_leaving_manual() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(InMemorySecretStore::default());

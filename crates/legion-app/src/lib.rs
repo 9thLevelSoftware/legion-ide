@@ -87,7 +87,9 @@ use phase4_trust::*;
 use product_ai_completion::*;
 use product_ai_lane::*;
 use product_ai_policy::*;
-pub use provider_configuration::{AiProviderProfile, AiProviderProfileProjection};
+pub use provider_configuration::{
+    AiProviderConnectionState, AiProviderProfile, AiProviderProfileProjection,
+};
 
 /// Where a product AI chat turn's bytes actually go, and what the audit says.
 pub mod ai_route_descriptor;
@@ -14728,6 +14730,7 @@ pub struct AppComposition {
     ai_provider_configuration: provider_configuration::AiProviderConfiguration,
     provider_secret_store: Arc<dyn legion_storage::SecretStore + Send + Sync>,
     ai_profile_health: Arc<Mutex<HashMap<String, String>>>,
+    provider_connection_checks: provider_configuration::ProviderConnectionChecks,
     named_provider_snapshots: Arc<std::sync::atomic::AtomicUsize>,
     /// App-owned authorization revision, independent of editor fingerprints.
     ai_provider_revision: uuid::Uuid,
@@ -15248,6 +15251,7 @@ impl AppComposition {
             ai_provider_configuration: Default::default(),
             provider_secret_store: Arc::new(OsKeyringSecretStore),
             ai_profile_health: Arc::new(Mutex::new(HashMap::new())),
+            provider_connection_checks: Default::default(),
             named_provider_snapshots: Default::default(),
             ai_provider_revision: uuid::Uuid::now_v7(),
             last_product_ai_stream: None,
@@ -15880,6 +15884,12 @@ impl AppComposition {
         // future raises.
         let current = self.product_mode;
         if self.org_policy_mode_ceiling_denies(current) {
+            if self.ai_provider_connection_check_in_flight() {
+                // Do not label a live transport Manual. Discard its result and
+                // apply the installed ceiling when the check actually drains.
+                self.cancel_provider_connection_check_for_policy();
+                return;
+            }
             self.product_mode = AppProductMode::Manual;
             self.phase4_projection_state.assisted_ai_projection = None;
         }
@@ -16344,6 +16354,18 @@ impl AppComposition {
     /// Current app-owned product mode.
     pub fn product_mode(&self) -> AppProductMode {
         self.product_mode
+    }
+
+    /// A retained mode describes draining work, not authority for new work.
+    /// Keep this admission guard separate from mode-only lifecycle checks so
+    /// cancellation, dismissal and kill switches remain available while draining.
+    fn require_ai_dispatch_policy(&self) -> Result<(), AppCompositionError> {
+        if self.org_policy_mode_ceiling_denies(self.product_mode) {
+            return Err(AppCompositionError::AiRuntime(
+                "AI dispatch denied by installed organization mode ceiling".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn require_assist_mode(&self) -> Result<(), AppCompositionError> {
@@ -18041,7 +18063,10 @@ impl AppComposition {
         column: u32,
         new_text: &str,
     ) -> Result<(), AppCompositionError> {
-        if !self.settings.next_edit_prediction_enabled || !self.product_mode.allows_assist() {
+        if !self.settings.next_edit_prediction_enabled
+            || !self.product_mode.allows_assist()
+            || self.org_policy_mode_ceiling_denies(self.product_mode)
+        {
             return Ok(());
         }
         let target = self.next_edit_prediction_target(line, column, new_text);
@@ -21497,6 +21522,7 @@ impl AppComposition {
         max_upload_bytes: u64,
     ) -> Result<(), AppCompositionError> {
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.legion_cloud_lane
             .enable(endpoint, max_cost_cents, max_upload_bytes)
     }
@@ -21514,6 +21540,7 @@ impl AppComposition {
         acknowledgement: &CloudLaneEgressAcknowledgement,
     ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let context = self.active_documents.require_workspace_context()?;
         if request.task_packet.workspace_id != context.workspace_id {
             return Err(AppCompositionError::Remote(
@@ -21577,6 +21604,7 @@ impl AppComposition {
         plan_id: &legion_protocol::DelegatedTaskPlanId,
     ) -> Result<AppDelegatedTaskExecutionOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let Some(contract) = self
             .delegated_task_plan_contracts
             .iter()
@@ -21860,6 +21888,7 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let scope = self.normalize_delegated_task_scope(scope)?;
         self.ensure_no_active_worker()?;
         if self.in_flight_delegated_task.is_some() {
@@ -22943,6 +22972,7 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let scope = self.normalize_delegated_task_scope(scope)?;
         self.ensure_no_active_worker()?;
 
@@ -24877,6 +24907,7 @@ impl AppComposition {
     ) -> Result<AppLegionWorkflowExecution, AppCompositionError> {
         let _ = &provider_mode;
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.ensure_no_active_worker()?;
         let session_index = self
             .legion_workflow_sessions
@@ -26226,6 +26257,7 @@ impl AppComposition {
         &mut self,
         instruction_label: impl Into<String>,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        self.require_ai_dispatch_policy()?;
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::Explain,
             instruction_label,
@@ -26237,6 +26269,7 @@ impl AppComposition {
         &mut self,
         instruction_label: impl Into<String>,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        self.require_ai_dispatch_policy()?;
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
             instruction_label,
@@ -28280,6 +28313,7 @@ impl AppComposition {
         prompt_label: impl Into<String>,
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let prompt_label = bounded_label(prompt_label.into(), DELEGATE_CHAT_PROMPT_MAX_CHARS);
         let lane_reservation = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
@@ -29001,6 +29035,7 @@ impl AppComposition {
         trigger: InlinePredictionTriggerKind,
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
         let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let snapshot = self.editor.current_snapshot(buffer_id)?.clone();
@@ -29069,6 +29104,7 @@ impl AppComposition {
         prediction_id: Option<String>,
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
