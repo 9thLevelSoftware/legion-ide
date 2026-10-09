@@ -47,6 +47,15 @@ The adapter exists at `extracted/extension/adapter/codelldb.exe`. This records
 artifact integrity and availability only: no extension was installed and no
 DAP/MSVC compatibility or native product acceptance is claimed.
 
+The existing `legion-input-driver` crate built successfully with
+`cargo build -p legion-input-driver --release --target-dir D:/legion-ide-2026-tools/native-input-target`.
+Its `--probe-session` handshake returned exit 0, `status = "attached"`,
+`interactive_session = true`, and desktop `Default`; the report is retained at
+`D:/legion-ide-2026-notes/driver-session.toml`. The driver binary is at
+`D:/legion-ide-2026-tools/native-input-target/release/legion-input-driver.exe`.
+This supersedes the missing-driver preflight observation for this selected path.
+No input was injected and no packaged product/native workflow was qualified.
+
 ## Completion limits
 
 Keep implementation, experiments and product acceptance separate. Real provider,
