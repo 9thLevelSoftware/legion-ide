@@ -93,7 +93,7 @@ without replacing their historical evidence. Base integration source was
 `ee6896f1e340113cfa1cddbd873f2bc7cf0cb8e7`. It already includes accepted ticket 05's
 app/storage save-conflict slice, reviewed provider connection-check source,
 bounded ticket 155 contract documentation and ticket 04 component diagnostics.
-Current counts remain 5 resolved / 247 ready-for-agent / 2 needs-info.
+At this source checkpoint, counts were 5 resolved / 247 ready-for-agent / 2 needs-info.
 
 The frozen [MCP settings handoff](ide-2026-ticket063-mcp-settings.md) was verified
 against all 45 manifest entries. Worker patch SHA-256:
@@ -196,3 +196,52 @@ not runtime compatibility or representative/host ratification. Ticket 169 is a
 separate pending documentation handoff. The old offline r4 installer predates
 these provider/MCP changes and is not their executable artifact. No GUI launch,
 live remote call, signing, push, PR or product acceptance is part of this wave.
+
+## Committed default executable and documentation follow-up
+
+The reviewed MCP composition, test and evidence were committed locally as
+`ddba84fe5da05aa81d722e698b004d7629de4ec6`. The integration checkout was clean
+before and after this single default-feature build:
+
+```text
+cargo build -p legion-desktop -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target
+```
+
+Result: exit 0, 36.24 seconds, dev profile (unoptimized with debug information).
+Executable: `D:/legion-ide-2026-tools/qualification-target/debug/legion-desktop.exe`.
+Size: 87,169,536 bytes. SHA-256:
+`ea5527c21f008e074d8844fbf2a9d54343d53692298ae2666a990fc9621baecf`.
+Source tree: `edbd564a6e558e03d4f79eb3a2e43b626b87bd1c`.
+The external binding receipt is
+`D:/legion-ide-2026-notes/wave1-default-desktop-ddba84fe.json`; build output is
+`D:/legion-ide-2026-notes/wave1-default-desktop-build-ddba84fe.log`.
+The executable was not launched, packaged, signed or published. Its existence
+does not qualify the unresolved Windows abort or any native/live outcome.
+
+Root independently reviewed ticket 169's [remote authority contract](../completion/ide-2026-remote-workspace-authority-contract.md):
+PASS for planning only. The two frozen worker SHA-256 values were verified before
+import: contract `25a33a86821d65efb6037dc6300f32ceae1d8185b8e5a796ec2111973223e592`,
+issue `179ccfbff573df1c57e9dd8fe779b56ba3e54f1d92598e63f05f02df63af46dc`.
+Integration restores the issue's original generic verification requirement and
+records the authorized planning acceptance in the contract, four criteria and
+resolved status. These integration edits supersede those worker byte identities;
+the worker remains unchanged. No canonical register or runtime source changes.
+
+The documentation-only resolution raises local counts to 6 resolved / 246
+ready-for-agent / 2 needs-info. Actual host/key/credential/engine/image/tool identities remain explicit
+external prerequisites for tickets 170 onward. This accepts neither S5-05's
+larger protocol package nor A18 product qualification. This later documentation
+commit does not change the executable's source binding or require a rebuild.
+
+The single final composed documentation gate passed after the intended planning
+acceptance/status/count edits:
+
+```text
+cargo run -p xtask -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target -- docs-hygiene
+```
+
+Result: exit 0 (Cargo 0.41 seconds). Log:
+`D:/legion-ide-2026-notes/wave1-final-docs-hygiene-ddba84fe.log`.
+Only this observed result was added afterward; no link or acceptance scope changed
+and the successful validator was not repeated. Canonical registers remain
+unchanged, so their separate validators were not invoked.

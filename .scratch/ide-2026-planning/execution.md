@@ -13,7 +13,7 @@ describes specification creation and does not negate this later authorization.
 
 ## Active work
 
-Current local ticket counts: **5 resolved, 247 ready-for-agent, 2 needs-info**.
+Current local ticket counts: **6 resolved, 246 ready-for-agent, 2 needs-info**.
 The entries below distinguish accepted slices from implementation and diagnostic
 progress. Later narrative sections retain the earlier checkpoint history.
 
@@ -50,9 +50,11 @@ progress. Later narrative sections retain the earlier checkpoint history.
   documentation integrated as `2b2b989` after root review. It remains
   ready-for-agent: authorized API/runtime/limit/ADR work is actionable, while
   actual representative/host qualification is not invented or ratified.
-- 169: newly unblocked by ticket 05 for a bounded remote-workspace authority
-  contract. Its separate documentation lane is awaiting root review and handoff;
-  no status change or acceptance is inferred.
+- 169: resolved for the bounded [remote-workspace authority contract](../../plans/completion/ide-2026-remote-workspace-authority-contract.md)
+  after root independent review and the final documentation gate. This accepts
+  planning only, not S5-05 protocol implementation or A18. Actual hosts, keys,
+  credentials, image/agent/tool identities and runtime evidence remain external
+  prerequisites for tickets 170 onward.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
 - 04: partial external driver fixes in `177caa5` and reviewed compact-drawer
@@ -80,8 +82,11 @@ progress. Later narrative sections retain the earlier checkpoint history.
 The composed provider/MCP regression passed one test covering four active/retired
 MCP and response-order branches. Default desktop all-targets, offline lib/bins,
 dependency policy and no-egui-textedit checks passed once on the composed source.
-The default executable build follows its local source commit; final docs-hygiene
-is reserved for the subsequent ticket 169 documentation handoff. No GUI, live
+MCP composition and its reviewed evidence were committed as
+`ddba84fe5da05aa81d722e698b004d7629de4ec6`. A default-feature desktop executable
+built successfully from that clean source in 36.24 seconds; exact path/hash are
+recorded in the integration evidence. The later ticket 169 documentation batch
+does not change production source or require a rebuild. No GUI, live
 provider/peer, full-workspace/platform or release qualification is inferred.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
