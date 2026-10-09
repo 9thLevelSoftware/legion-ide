@@ -442,6 +442,35 @@ fn git_new_worktree_palette_command_exists() {
 
 // ─── Trust gate tests (PKT-0) ─────────────────────────────────────────────────
 
+#[test]
+fn branch_changes_are_denied_for_untrusted_workspaces() {
+    let repo = TempGitRepo::new();
+    make_initial_commit(&repo);
+
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        repo.path(),
+        legion_protocol::WorkspaceTrustState::Untrusted,
+        legion_protocol::PrincipalId("untrusted-branch-test".to_string()),
+    )
+    .expect("workspace open");
+
+    for intent in [
+        CommandDispatchIntent::SwitchGitBranch {
+            branch: "main".to_string(),
+        },
+        CommandDispatchIntent::CreateGitBranch {
+            branch: "feature/denied".to_string(),
+        },
+    ] {
+        let result = app.dispatch_ui_intent(intent);
+        assert!(
+            matches!(result, Err(AppCompositionError::WorkspaceNotTrusted(_))),
+            "branch mutation in an untrusted workspace must be denied; got {result:?}",
+        );
+    }
+}
+
 /// Untrusted workspace must not be allowed to create worktrees.
 /// An untrusted workspace cannot reach the git layer even if git is available.
 #[test]
