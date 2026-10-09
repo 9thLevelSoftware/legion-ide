@@ -26,8 +26,11 @@ describes specification creation and does not negate this later authorization.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
-- 04: partial external driver fixes reviewed and integrated as `177caa5`; remains needs-info.
+- 04: partial external driver fixes in `177caa5` and reviewed compact-drawer
+  navigation in `00ae938`; remains needs-info pending the next attended attempt.
   Latest actual attempt found zero Explorer README.md UIA elements before input.
+- Credential prerequisite: typed missing-key classification and isolated native
+  Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
 packaged successfully (MSI SHA-256
@@ -43,12 +46,24 @@ or open/edit/save acceptance is claimed. Reviewed partial driver repairs address
 wrong helper-window selection and STA desktop access; Explorer UIA investigation
 is the next bounded slice.
 
+A subsequent read-only UIA trace observed the compact Explorer drawer with no
+file entries across 60 samples over 15 seconds. The reviewed driver now opens
+that real control through guarded OS input when needed, but the new navigation
+has not run natively yet. Its archived binary and reports are recorded in ticket04
+evidence. No fresh attendance is inferred from an unanswered availability question.
+
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
 records the exact source and command. This is compile evidence only; native,
 OS-keyring, live-provider/peer and full-workspace/platform qualification are not
 established. The MCP checkpoint's isolated `0xc0000409` test-process abort remains
 unexplained despite its successful diagnostic rerun.
+
+[Native keyring prerequisite evidence](../../plans/evidence/ide-2026-native-keyring-prerequisite.md)
+records synthetic-only Windows store/read/replace/revoke across fresh processes,
+with cleanup. It is not native profile UI or live authentication acceptance.
+[Windows toolchain inventory](../../plans/evidence/ide-2026-windows-toolchain-inventory.md)
+adds installed compiler/linker/SDK/component identities without changing tools.
 
 ## Verification policy
 
