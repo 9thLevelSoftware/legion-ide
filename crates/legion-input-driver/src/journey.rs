@@ -241,11 +241,11 @@ fn observe(
             };
             let started = std::time::Instant::now();
             eprintln!(
-                "Awaiting user foreground of packaged Legion window {window:?}, pid {}, for at most 60 seconds; no input sent while waiting",
+                "Awaiting exact packaged Legion window {window:?}, pid {}, to become foreground for at most 60 seconds; no input sent while waiting",
                 child.id()
             );
             notes.push(
-                "foreground_mode=user-attended; timeout_seconds=60; automatic_activation=false"
+                "foreground_mode=external-foreground-wait; timeout_seconds=60; driver_automatic_activation=false"
                     .into(),
             );
             let outcome = await_user_foreground(
@@ -265,8 +265,8 @@ fn observe(
             );
             match outcome {
                 AwaitForegroundOutcome::Ready => foregrounded = true,
-                AwaitForegroundOutcome::WindowExited => return Err((3, "product window/process became unavailable during attended foreground wait; no input injected".into())),
-                AwaitForegroundOutcome::TimedOut => return Err((3, "user did not foreground the exact product window within 60 seconds; no input injected".into())),
+                AwaitForegroundOutcome::WindowExited => return Err((3, "product window/process became unavailable during external foreground wait; no input injected".into())),
+                AwaitForegroundOutcome::TimedOut => return Err((3, "exact product window did not become foreground within 60 seconds; no input injected".into())),
             }
         } else {
             for _ in 0..10 {
