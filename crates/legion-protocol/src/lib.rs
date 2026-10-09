@@ -32,6 +32,8 @@ pub mod delegate_loop;
 pub mod extensions;
 /// Context manifest structured-assembly helpers.
 pub mod manifest;
+/// Metadata-only named MCP peer configuration and lifecycle contracts.
+pub mod named_mcp_peer;
 pub mod plan;
 /// Release manifest DTO for the auto-updater (ADR-0042).
 pub mod release_manifest;

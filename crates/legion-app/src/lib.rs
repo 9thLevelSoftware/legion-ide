@@ -35,6 +35,9 @@ mod assist_proposal;
 mod git_inspection;
 mod hot_exit;
 mod lsp_interaction;
+/// App-owned named MCP configuration, activation and local revocation.
+#[cfg(feature = "ai")]
+pub mod named_mcp_peer;
 use acp_host::AcpHostCommand;
 #[cfg(feature = "ai")]
 use acp_host::run_acp_host_proposal;
@@ -14770,6 +14773,8 @@ pub struct AppComposition {
     plan_revision_ledger: PlanRevisionLedger,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
+    #[cfg(feature = "ai")]
+    named_mcp_peers: HashMap<String, named_mcp_peer::NamedMcpPeer>,
     search_projection: SearchProjection,
     search_worker: crate::search::SearchWorker,
     search_generation: u64,
@@ -15256,6 +15261,8 @@ impl AppComposition {
             plan_revision_ledger: PlanRevisionLedger::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
+            #[cfg(feature = "ai")]
+            named_mcp_peers: HashMap::new(),
             search_projection: SearchProjection::idle(),
             search_worker: crate::search::SearchWorker::new(Arc::clone(&workspace)),
             search_generation: 0,
@@ -23579,6 +23586,12 @@ impl AppComposition {
         server_id: McpServerId,
         runtime: Arc<dyn AppAutomateMcpToolRuntime>,
     ) -> Result<(), AppCompositionError> {
+        #[cfg(feature = "ai")]
+        if self.named_mcp_peers.contains_key(&server_id.0) {
+            return Err(AppCompositionError::LegionWorkflow(
+                "named MCP runtime is owned by its configuration/grant lifecycle".into(),
+            ));
+        }
         if server_id.0.trim().is_empty() {
             return Err(AppCompositionError::LegionWorkflow(
                 "MCP server id must be non-empty".to_string(),
@@ -23831,6 +23844,9 @@ impl AppComposition {
         tool_name: &McpToolName,
         request: &DelegatedTaskToolPermissionRequest,
     ) -> Result<AppAutomateMcpToolInvocationReceipt, AppCompositionError> {
+        #[cfg(feature = "ai")]
+        self.ensure_named_peer_runtime(server_id)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
         let runtime = self
             .automate_mcp_tool_runtimes
             .get(&server_id.0)
