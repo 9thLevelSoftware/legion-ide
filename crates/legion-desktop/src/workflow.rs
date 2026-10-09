@@ -2384,16 +2384,6 @@ impl DesktopRuntime {
         paint_ready && streamed_ready
     }
 
-    /// Test-only access to the app-owned debounce queue. The caller supplies a
-    /// future instant so assertions remain deterministic and do not sleep.
-    #[doc(hidden)]
-    pub fn lsp_debounce_events_for_test(
-        &mut self,
-        now: Instant,
-    ) -> Vec<legion_app::LspDebounceEvent> {
-        self.app.tick_lsp_debounces(now)
-    }
-
     /// Drain Git inspections to completion for deterministic tests and golden paths.
     pub fn drain_git_until_idle(&mut self) {
         self.app.drain_git_until_idle();
