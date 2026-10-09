@@ -363,3 +363,19 @@ ambiguous or unreadable observations. Compiled binary hash400d068d above confirm
 Coordinator authorized partial commit and clean same-base1f647cc ff-only merge.
 User availability remains pending; no attended launch authorized yet. Earlier
 successful checks were not repeated. Ticket04 remains needs-info.
+
+## Attended navigation-driver attempt, 2026-10-09
+
+After the owner replied "ready now", the coordinator launched the archived
+reviewed `00ae938` driver, whose SHA-256 matched `400d068d` above. The report is
+`D:/legion-ide-2026-notes/ticket004-native-journey-attended-navigation.toml`.
+The product created HWND `0x6c0ea6`, PID 12444, but the driver did not observe
+that exact window in the foreground within 60 seconds. It blocked before input;
+report exit code is 3 and the outer PowerShell process returned 1.
+
+The report binds the unchanged product executable and reference checkout to the
+hashes recorded above. A subsequent `git status --short` in the reference clone
+was empty. No drawer click, file open, edit or save occurred; the new navigation
+behavior remains unqualified. The coordinator asked whether the window appeared
+and was clicked; no answer was available at this checkpoint. No automatic retry
+was launched. Ticket 04 remains needs-info, with no acceptance promoted.
