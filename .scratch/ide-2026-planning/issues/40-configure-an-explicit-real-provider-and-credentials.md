@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 **What to build:** Add/select/validate a named endpoint/model, securely replace/revoke credentials and display capability/locality/health; no credentials in config, no fallback or Manual calls.
 
-**Blocked by:** [01 — Reconcile the 2026 program delta](01-reconcile-the-2026-program-delta.md).
+**Prerequisite resolved:** [01 — Reconcile the 2026 program delta](01-reconcile-the-2026-program-delta.md). Native wiring and live qualification prerequisites remain open; see the core evidence below.
 
 **Source:** [Approved specification](../spec.md); approved breakdown ticket 40.
 
@@ -33,3 +33,4 @@ Status: ready-for-agent
 ## Comments
 
 - 2026-10-08: User approved the 254-ticket breakdown. Published locally with the approved title, scope and blockers; execution has not started.
+- 2026-10-09: Partial app/provider core implemented at the user-approved AppComposition seam: explicit metadata profiles, route-bound secure-store APIs, truthful refusal without fixtures, bounded MiMo chat wire options, cancellation/drain guards and selected-profile ghost revision invalidation. Owner selected OpenAI-compatible `https://token-plan-sgp.xiaomimimo.com/v1`, model `mimo-v2.6-pro`; this supersedes the direct PAYG candidate. No key or paid/live-call authority supplied. [Focused core evidence and exact checks](../../../plans/evidence/ticket-040-explicit-provider-core.md) records behavioral red/green, compiler repairs/escalation and the three early review fixes. Coordinator reported Euclid final core review PASS, all three prior blockers fixed and no new material findings; partial core commit authorized after integration `f4dbeed`. Ticket remains open: native UI/credential wiring, durable metadata persistence, platform keyring evidence and independent native/live acceptance are separate remaining gates. Acceptance boxes are intentionally unchanged.

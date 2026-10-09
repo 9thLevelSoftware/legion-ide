@@ -444,6 +444,9 @@ fn shared_blocking_client() -> Result<&'static reqwest::blocking::Client, String
             reqwest::blocking::Client::builder()
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
                 .timeout(HTTP_REQUEST_TIMEOUT)
+                // A provider route is authorized once, for one destination.
+                // Redirecting a POST would transmit workspace text elsewhere.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -907,6 +910,8 @@ pub struct OpenAiCompatibleProvider<T = ReqwestProviderHttpTransport> {
     auth_policy: OpenAiCompatibleAuthPolicy,
     metadata_kind: &'static str,
     transport: T,
+    max_completion_tokens: bool,
+    disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -975,7 +980,20 @@ where
             auth_policy,
             metadata_kind,
             transport,
+            max_completion_tokens: false,
+            disable_thinking: false,
         }
+    }
+
+    /// Select explicit chat wire options; never infer these from host/model names.
+    pub fn with_completion_options(
+        mut self,
+        max_completion_tokens: bool,
+        disable_thinking: bool,
+    ) -> Self {
+        self.max_completion_tokens = max_completion_tokens;
+        self.disable_thinking = disable_thinking;
+        self
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -1029,7 +1047,14 @@ where
             }).collect::<Vec<_>>(),
         });
         if let Some(max_tokens) = request.max_tokens {
-            payload["max_tokens"] = json!(max_tokens);
+            payload[if self.max_completion_tokens {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            }] = json!(max_tokens);
+        }
+        if self.disable_thinking {
+            payload["thinking"] = json!({"type": "disabled"});
         }
         if let Some(temperature) = request.temperature {
             payload["temperature"] = json!(temperature);

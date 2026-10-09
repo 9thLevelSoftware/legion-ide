@@ -35,6 +35,7 @@ pub(crate) const PRODUCT_COMPLETION_MAX_TOKENS: u32 = 512;
 #[cfg(feature = "ai")]
 pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str {
     match backend {
+        ProductAiLiveBackend::Configured(_) => "configured profile",
         ProductAiLiveBackend::Ollama => "ollama",
         ProductAiLiveBackend::LlamaCpp => "llama-cpp",
         ProductAiLiveBackend::Anthropic => "anthropic",
@@ -43,11 +44,8 @@ pub(crate) fn live_backend_label(backend: ProductAiLiveBackend) -> &'static str 
 
 /// Product completion bound to the **authorized** live backend only.
 ///
-/// Auto selects Ollama when loopback is reachable, otherwise Anthropic BYOK when a
-/// key exists. Completion never falls through from an Ollama-authorized route to
-/// Anthropic (or the reverse): that would bypass the capability/network decision
-/// built for the selected backend. Offline / no-provider returns `None` for
-/// fixture fallbacks.
+/// Selection occurs once before authorization. Completion never switches a
+/// selected route or replaces failed provider output with a fixture.
 ///
 /// Anthropic uses progressive Messages **SSE** when available (`on_delta` fires as
 /// chunks arrive). Ollama remains a single-chunk completion.
@@ -70,6 +68,87 @@ pub(crate) fn complete_product_chat(
     let backend = backend?;
 
     match backend {
+        ProductAiLiveBackend::Configured(config) => {
+            use legion_ai_providers::{
+                AnthropicMessagesClient, LlamaCppProvider, OpenAiCompatibleProvider,
+                OpenAiResponsesProvider, ReqwestProviderHttpTransport,
+            };
+            let profile = &config.profile;
+            let credential = config.credential.as_ref().map(|s| s.to_string());
+            let client: Box<dyn ModelProvider> = match profile.provider_id.as_str() {
+                "ollama" => Box::new(OllamaProvider::new(&profile.provider_id, &profile.endpoint)),
+                "llama-cpp" => Box::new(LlamaCppProvider::with_transport(
+                    &profile.provider_id,
+                    &profile.endpoint,
+                    credential,
+                    ReqwestProviderHttpTransport,
+                )),
+                "openai" => Box::new(OpenAiResponsesProvider::with_transport(
+                    &profile.provider_id,
+                    &profile.endpoint,
+                    credential,
+                    ReqwestProviderHttpTransport,
+                )),
+                "openai-compatible" => Box::new(
+                    OpenAiCompatibleProvider::with_transport(
+                        &profile.provider_id,
+                        &profile.endpoint,
+                        credential,
+                        ReqwestProviderHttpTransport,
+                    )
+                    .with_completion_options(
+                        profile.max_completion_tokens,
+                        profile.disable_thinking,
+                    ),
+                ),
+                "anthropic" => Box::new(AnthropicMessagesClient::with_transport(
+                    &profile.provider_id,
+                    &profile.endpoint,
+                    credential,
+                    ReqwestProviderHttpTransport,
+                )),
+                _ => return None,
+            };
+            config.set_health("checking");
+            let result = client.complete(ChatCompletionRequest {
+                provider: profile.provider_id.clone(),
+                model: profile.model.clone(),
+                messages: vec![
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: system.into(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: user.into(),
+                    },
+                ],
+                max_tokens: Some(max_tokens),
+                temperature: Some(temperature),
+                metadata: Default::default(),
+            });
+            // Existing adapters echo the requested model. A response confirms
+            // transport only, never independently establishes model identity.
+            if let Ok(response) = result
+                && !response.text.trim().is_empty()
+            {
+                config.set_health("responded (model unqualified)");
+                let text = response.text.trim().to_string();
+                if let Some(cb) = on_delta.as_mut() {
+                    cb(&text);
+                }
+                Some(ProductChatCompletion {
+                    provider_id: profile.provider_id.clone(),
+                    model: profile.model.clone(),
+                    text: text.clone(),
+                    stream_chunks: vec![text],
+                    streamed: false,
+                })
+            } else {
+                config.set_health("unavailable (request failed)");
+                None
+            }
+        }
         ProductAiLiveBackend::Ollama => {
             let model = ollama_model_label();
             let client = OllamaProvider::default();
@@ -259,6 +338,7 @@ pub(crate) struct AssistedEditProposalSource {
     pub(crate) span: (usize, usize),
 }
 
+#[cfg(any(not(feature = "ai"), test))]
 pub(crate) fn deterministic_assisted_edit_proposal() -> AssistedEditProposalSource {
     deterministic_assisted_edit_proposal_because(None)
 }
@@ -407,7 +487,7 @@ No explanation, no second block.";
     // same defect closed in Delegate chat and inline prediction: the broker was
     // asked about one destination and a second probe can answer differently.
     match complete_product_chat(
-        backend,
+        backend.clone(),
         system,
         &user,
         PRODUCT_COMPLETION_MAX_TOKENS,
@@ -665,24 +745,22 @@ fn resolve_assist_placement(
     }
 }
 
-/// The proposal to register when a selected live backend failed to answer.
-///
-/// Deterministic content, and honest about being it. The alternative -- what
-/// this replaces -- is a fixture wearing a provider's name, which is worse than
-/// a failure: a person reviewing it has no way to know the provider never
-/// answered, and the details they would check say the opposite.
+/// Failure metadata with no edit payload when a selected backend cannot answer.
 #[cfg(feature = "ai")]
 pub(crate) fn failed_live_assisted_edit_proposal(
     backend: ProductAiLiveBackend,
 ) -> AssistedEditProposalSource {
     let label = live_backend_label(backend);
-    let mut source = deterministic_assisted_edit_proposal();
-    source.summary = format!("Offline fallback: the {label} provider did not answer");
-    source.details.insert(
-        0,
-        format!("live_backend={label} outcome=failed; this text is the offline fallback"),
-    );
-    source
+    AssistedEditProposalSource {
+        provider_id: label.into(),
+        summary: format!("Selected {label} provider unavailable"),
+        details: vec![format!(
+            "live_backend={label} outcome=failed; no proposal produced"
+        )],
+        replacement: String::new(),
+        anchor: String::new(),
+        span: (0, 0),
+    }
 }
 
 #[cfg(not(feature = "ai"))]
@@ -735,7 +813,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
         "Question: {prompt_label}\nFile: {file_path}\nCitations available: {citation_count}\n\nBuffer excerpt:\n{buffer_excerpt}"
     );
     match complete_product_chat(
-        backend,
+        backend.clone(),
         system,
         &user,
         PRODUCT_COMPLETION_MAX_TOKENS,
@@ -769,7 +847,7 @@ Do not invent file paths. Keep the reply under ~800 characters.";
             bounded_label(
                 match backend {
                     Some(backend) => format!(
-                        "Delegate provider {} did not answer; showing the offline reply instead. route={route_id} labels={}",
+                        "Selected Delegate provider {} unavailable; no reply produced. route={route_id} labels={}",
                         live_backend_label(backend),
                         route_labels.join(",")
                     ),

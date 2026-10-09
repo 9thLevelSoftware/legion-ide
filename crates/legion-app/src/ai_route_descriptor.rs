@@ -7,6 +7,81 @@
 
 use crate::ProductAiLiveBackend;
 
+/// Validate explicit profiles without rewriting their selected destination.
+pub(crate) fn validate_profile_endpoint(endpoint: &str) -> Result<(), crate::AppCompositionError> {
+    let invalid = || {
+        crate::AppCompositionError::AiRuntime("invalid provider endpoint; use HTTPS or loopback HTTP without credentials, query or fragment".into())
+    };
+    if endpoint.is_empty()
+        || endpoint.len() > 512
+        || endpoint
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        || endpoint.contains(['@', '?', '#', '%', '\\'])
+        || !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+    {
+        return Err(invalid());
+    }
+    let authority = endpoint
+        .split_once("://")
+        .ok_or_else(invalid)?
+        .1
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if authority.is_empty() {
+        return Err(invalid());
+    }
+    let parsed = parse_base_url(endpoint, "");
+    let host = &parsed.target.host;
+    // WHATWG URL parsing normalizes abbreviated/octal/hex IPv4 and IPv6
+    // spellings. Refuse those forms rather than authorize a different host
+    // string from the HTTP client's canonical destination.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.to_string() != *host {
+            return Err(invalid());
+        }
+    } else {
+        let last = host.rsplit('.').next().unwrap_or("");
+        if host.to_ascii_lowercase() != *host
+            || last.bytes().all(|b| b.is_ascii_digit())
+            || last.to_ascii_lowercase().starts_with("0x")
+        {
+            return Err(invalid());
+        }
+    }
+    let valid_host = host.parse::<std::net::IpAddr>().is_ok()
+        || (!host.is_empty()
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && !label.starts_with('-')
+                    && !label.ends_with('-')
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            }));
+    let suffix = if authority.starts_with('[') {
+        authority.split_once(']').ok_or_else(invalid)?.1
+    } else {
+        authority.strip_prefix(host).ok_or_else(invalid)?
+    };
+    if !valid_host
+        || (!suffix.is_empty()
+            && !suffix
+                .strip_prefix(':')
+                .is_some_and(|port| port.parse::<u16>().is_ok_and(|p| p > 0)))
+        || (parsed.target.scheme == "http" && !is_loopback_host(host))
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+pub(crate) fn profile_network_target(endpoint: &str) -> legion_protocol::NetworkTarget {
+    parse_base_url(endpoint, "").target
+}
+
 /// The Anthropic base URL this build will actually contact.
 ///
 /// Wraps the `ai`-gated reader so the rest of this module -- which is not gated
@@ -355,6 +430,20 @@ pub(crate) fn route_descriptor_for_backend(
     legion_protocol::ProposalPrivacyLabel,
 ) {
     match backend {
+        Some(ProductAiLiveBackend::Configured(config)) => (
+            config.profile.target(),
+            "profile.explicit",
+            if config.profile.local() {
+                "local.cost.unknown"
+            } else {
+                "remote.metered"
+            },
+            if config.profile.local() {
+                legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+            } else {
+                legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata
+            },
+        ),
         Some(ProductAiLiveBackend::Anthropic) => (
             // Derived from the same base-URL configuration the client uses, not
             // hard-coded. `LEGION_ANTHROPIC_BASE_URL` and its two aliases can
@@ -1177,7 +1266,7 @@ mod delegate_chat_route_honesty_tests {
     fn local_backends_stay_loopback_and_workspace_scoped() {
         let _env = RouteEnv::cleared();
         for backend in [None, Some(ProductAiLiveBackend::Ollama)] {
-            let (target, _health, cost, privacy) = route_descriptor_for_backend(backend);
+            let (target, _health, cost, privacy) = route_descriptor_for_backend(backend.clone());
             assert_eq!(
                 (target.host.as_str(), target.port),
                 ("localhost", Some(11434)),

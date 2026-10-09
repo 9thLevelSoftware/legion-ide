@@ -78,11 +78,13 @@ use local_ai_diagnosis::resolve_anthropic_api_key;
 mod product_ai_completion;
 mod product_ai_lane;
 mod product_ai_policy;
+mod provider_configuration;
 use delegate_workflow::*;
 use phase4_trust::*;
 use product_ai_completion::*;
 use product_ai_lane::*;
 use product_ai_policy::*;
+pub use provider_configuration::{AiProviderProfile, AiProviderProfileProjection};
 
 /// Where a product AI chat turn's bytes actually go, and what the audit says.
 pub mod ai_route_descriptor;
@@ -1940,22 +1942,12 @@ struct ProductChatCompletion {
 }
 
 /// Selected live backend for product composition (policy + routing metadata).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ProductAiLiveBackend {
     Ollama,
     LlamaCpp,
     Anthropic,
-}
-
-/// The backend a preference resolves to.
-///
-/// Discards the credential state, so a caller that will need to explain a
-/// fallback should use [`product_ai_selection`] instead.
-#[cfg(feature = "ai")]
-fn product_ai_selected_live_backend(
-    preference: ProductAiProviderPreference,
-) -> Option<ProductAiLiveBackend> {
-    product_ai_selection(preference).0
+    Configured(Arc<provider_configuration::ConfiguredProvider>),
 }
 
 /// The backend a preference resolves to, and what looking for a key found.
@@ -2025,13 +2017,6 @@ fn product_ai_selected_live_backend_inner(
     }
 }
 
-#[cfg(not(feature = "ai"))]
-fn product_ai_selected_live_backend(
-    _preference: ProductAiProviderPreference,
-) -> Option<ProductAiLiveBackend> {
-    None
-}
-
 /// Without the provider there is no selection and no credential to look for.
 #[cfg(not(feature = "ai"))]
 fn product_ai_selection(
@@ -2047,6 +2032,15 @@ fn product_ai_selection(
 fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> SecurityPolicy {
     let mut policy = SecurityPolicy::default();
     match backend {
+        Some(ProductAiLiveBackend::Configured(config)) => {
+            let target = config.profile.target();
+            let local = config.profile.local();
+            policy.network_policy.air_gap = local;
+            policy.network_policy.local_provider_only = local;
+            policy.network_policy.allowlist = vec![target.host];
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = !local;
+        }
         Some(ProductAiLiveBackend::Ollama) => {
             policy.network_policy.local_provider_only = true;
             policy.network_policy.air_gap = true;
@@ -2131,6 +2125,30 @@ fn product_ai_route_fields(
     legion_protocol::ProposalPrivacyLabel,
 ) {
     match backend {
+        Some(ProductAiLiveBackend::Configured(config)) => (
+            config.profile.provider_id.clone(),
+            config.profile.model.clone(),
+            if config.profile.local() {
+                AssistedAiProviderClass::LocalLoopback
+            } else {
+                AssistedAiProviderClass::ByokRemote
+            },
+            Some(config.profile.target()),
+            vec!["profile.explicit".into()],
+            vec![
+                if config.profile.local() {
+                    "local.cost.unknown"
+                } else {
+                    "remote.metered"
+                }
+                .into(),
+            ],
+            if config.profile.local() {
+                legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+            } else {
+                legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata
+            },
+        ),
         Some(ProductAiLiveBackend::Ollama) => (
             "ollama".to_string(),
             ollama_model_label_offline_safe(),
@@ -2259,7 +2277,7 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
     // destination through the broker, and a second resolution can answer
     // differently and send the excerpt somewhere never approved.
     let completion = complete_product_chat(
-        backend,
+        backend.clone(),
         &system,
         &user,
         INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
@@ -13277,6 +13295,7 @@ struct AssistInlinePredictionState {
     active_request_id: Option<InlinePredictionRequestId>,
     results: Vec<InlinePredictionResult>,
     requests: HashMap<InlinePredictionRequestId, InlinePredictionRequestMetadata>,
+    provider_revisions: HashMap<InlinePredictionRequestId, uuid::Uuid>,
     request_in_flight: bool,
 }
 
@@ -13295,6 +13314,8 @@ impl AssistInlinePredictionState {
         });
         self.requests
             .retain(|_, request| request.buffer_id != buffer_id);
+        self.provider_revisions
+            .retain(|id, _| self.requests.contains_key(id));
     }
 
     fn retain_bounded_history(&mut self) {
@@ -13308,6 +13329,8 @@ impl AssistInlinePredictionState {
                 .collect();
             self.requests
                 .retain(|request_id, _| !removed.contains(request_id));
+            self.provider_revisions
+                .retain(|id, _| !removed.contains(id));
         }
     }
 }
@@ -14650,8 +14673,14 @@ pub struct AppComposition {
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
     product_mode: AppProductMode,
-    /// Preferred product AI route for Assist / Delegate composition (local-first Auto).
+    /// Legacy preference; Auto requires an explicit named product route.
     preferred_ai_provider: ProductAiProviderPreference,
+    ai_provider_configuration: provider_configuration::AiProviderConfiguration,
+    provider_secret_store: Arc<dyn legion_storage::SecretStore + Send + Sync>,
+    ai_profile_health: Arc<Mutex<HashMap<String, String>>>,
+    named_provider_snapshots: Arc<std::sync::atomic::AtomicUsize>,
+    /// App-owned authorization revision, independent of editor fingerprints.
+    ai_provider_revision: uuid::Uuid,
     /// Last product AI stream (Assist proposal / Delegate chat) for rail projection.
     last_product_ai_stream: Option<ProductAiStreamProjection>,
     /// Live progressive stream sink (updated mid-flight from SSE / background jobs).
@@ -14666,11 +14695,7 @@ pub struct AppComposition {
     pending_inline_prediction_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The inline prediction request a worker thread is currently running.
     ///
-    /// Kept so that a worker returning nothing -- an unreachable provider, an
-    /// empty completion -- can still be answered with the deterministic
-    /// prediction, on the app thread, rather than leaving the request with no
-    /// result at all. The synchronous path used to fall through to that fixture
-    /// itself; moving the live call to a worker moved the fallback with it.
+    /// Kept to finish failed requests without substituting a fixture prediction.
     pending_inline_prediction: Option<InlinePredictionRequestMetadata>,
     palette: PaletteState,
     settings: SettingsProjection,
@@ -15168,6 +15193,11 @@ impl AppComposition {
             active_documents: ActiveDocumentController::new(),
             product_mode: AppProductMode::Manual,
             preferred_ai_provider: ProductAiProviderPreference::from_env(),
+            ai_provider_configuration: Default::default(),
+            provider_secret_store: Arc::new(OsKeyringSecretStore),
+            ai_profile_health: Arc::new(Mutex::new(HashMap::new())),
+            named_provider_snapshots: Default::default(),
+            ai_provider_revision: uuid::Uuid::now_v7(),
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
@@ -15825,6 +15855,14 @@ impl AppComposition {
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        if !mode.allows_assist()
+            && self
+                .named_provider_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+        {
+            return;
+        }
         // Org policy bundle mode ceiling (P9.F2.T3) is checked before any other
         // lane. A ceiling that only applied after the worker/stream checks below
         // would let an above-ceiling mode take effect whenever those lanes
@@ -15882,12 +15920,17 @@ impl AppComposition {
 
     /// Select the product AI route preference (`auto` / `ollama` / `anthropic` / `deterministic`).
     pub fn set_preferred_ai_provider(&mut self, preference: ProductAiProviderPreference) {
+        if self.provider_configuration_busy() {
+            return;
+        }
+        self.ai_provider_configuration.selected = None;
+        self.invalidate_provider_predictions();
         self.preferred_ai_provider = preference;
     }
 
     /// Parse and apply a preferred-provider label (UI / env-compatible).
     pub fn set_preferred_ai_provider_label(&mut self, label: impl AsRef<str>) {
-        self.preferred_ai_provider = ProductAiProviderPreference::parse(label.as_ref());
+        self.set_preferred_ai_provider(ProductAiProviderPreference::parse(label.as_ref()));
     }
 
     /// Last product AI stream projection (Assist / Delegate), if any.
@@ -16019,33 +16062,17 @@ impl AppComposition {
                 self.merge_inline_prediction_result(prediction);
                 changed = true;
             } else if let Some(metadata) = self.pending_inline_prediction.take() {
-                // The worker finished with nothing to show -- an unreachable
-                // provider, or a completion that came back empty. Answer with
-                // the deterministic prediction, here on the app thread, rather
-                // than leaving the request with no result: that is what the
-                // synchronous path did, and losing it would trade a frozen UI
-                // for ghost text that silently stops appearing.
+                // A failed selected route is terminal. Never manufacture a
+                // fixture prediction after an authorized live request fails.
                 let failed_request_id = metadata.request_id.clone();
-                match self.invoke_inline_prediction_provider(metadata) {
-                    Ok(prediction) => {
-                        self.merge_inline_prediction_result(prediction);
-                    }
-                    Err(_error) => {
-                        // Nothing to show and nothing to say. Clearing the flag
-                        // is the part that matters -- leaving it set strands the
-                        // Cancel control with nothing to cancel -- but only for
-                        // the request that actually failed, since a newer one
-                        // may already own this state.
-                        if self
-                            .assist_inline_prediction_state
-                            .active_request_id
-                            .as_ref()
-                            == Some(&failed_request_id)
-                        {
-                            self.assist_inline_prediction_state.request_in_flight = false;
-                            self.assist_inline_prediction_state.active_request_id = None;
-                        }
-                    }
+                if self
+                    .assist_inline_prediction_state
+                    .active_request_id
+                    .as_ref()
+                    == Some(&failed_request_id)
+                {
+                    self.assist_inline_prediction_state.request_in_flight = false;
+                    self.assist_inline_prediction_state.active_request_id = None;
                 }
                 changed = true;
             }
@@ -28227,16 +28254,16 @@ impl AppComposition {
         // request was sent and hand the buffer excerpt to Anthropic instead --
         // a destination the broker never approved. One resolution, threaded
         // through, is the only version of this that cannot drift.
-        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
+        let (live_backend, anthropic_key_state) = self.selected_product_ai_selection()?;
         let (route_target, route_health, route_cost, route_privacy) =
-            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
+            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend.clone());
         // Identity from the same backend as the destination. These were
         // hard-coded to the deterministic provider while the target followed the
         // live one, so provider-allowlist policy was evaluated against
         // `deterministic-local` and the audit recorded a local call for traffic
         // going to Anthropic.
         let (route_provider_id, route_model_label, route_provider_class, ..) =
-            product_ai_route_fields(live_backend);
+            product_ai_route_fields(live_backend.clone());
         let route_provider_id_for_decision = route_provider_id.clone();
         let document = SourceDocument::with_versions(
             input.workspace_id,
@@ -28366,7 +28393,7 @@ impl AppComposition {
         };
         let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
-            self.product_ai_policy_with_org_ceiling(live_backend),
+            self.product_ai_policy_with_org_ceiling(live_backend.clone()),
             CapabilityNamespace("app.delegate".to_string()),
         );
         // Authorization only. `route_completion` *invokes* the registry provider
@@ -28406,7 +28433,9 @@ impl AppComposition {
                         ASSIST_PROMPT_MAX_BYTES,
                         crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                     )),
-                    budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
+                    budget_request_cost_cents: live_backend
+                        .clone()
+                        .and_then(declared_request_cost_cents),
                     ..Default::default()
                 },
                 correlation_id: event_context.correlation_id,
@@ -28601,7 +28630,7 @@ impl AppComposition {
             let sink_delta = lane_reservation.delta_writer();
             let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
-                live_backend,
+                live_backend.clone(),
                 self.preferred_ai_provider,
                 anthropic_key_state.clone(),
                 &prompt_label,
@@ -28933,6 +28962,9 @@ impl AppComposition {
         self.assist_inline_prediction_state
             .requests
             .insert(metadata.request_id.clone(), metadata.clone());
+        self.assist_inline_prediction_state
+            .provider_revisions
+            .insert(metadata.request_id.clone(), self.ai_provider_revision);
 
         // A live provider call does not run here.
         //
@@ -28982,6 +29014,19 @@ impl AppComposition {
             ));
         };
         self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Accept)?;
+
+        let request_id = &self.assist_inline_prediction_state.results[index].request_id;
+        if self
+            .assist_inline_prediction_state
+            .provider_revisions
+            .get(request_id)
+            != Some(&self.ai_provider_revision)
+        {
+            self.assist_inline_prediction_state = Default::default();
+            return Err(AppCompositionError::AiRuntime(
+                "Assist inline prediction provider revision changed".to_string(),
+            ));
+        }
 
         let observed = self.inline_prediction_observed_fingerprint(buffer_id)?;
         let freshness = InlinePredictionFreshness::from_fingerprints(

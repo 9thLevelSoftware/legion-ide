@@ -282,7 +282,7 @@ impl AppComposition {
         // The credential answer travels with the selection that produced it,
         // rather than through a process-wide slot a concurrent run can
         // overwrite between one request's selection and its own diagnosis.
-        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
+        let (live_backend, anthropic_key_state) = self.selected_product_ai_selection()?;
         let (
             route_provider_id,
             route_model,
@@ -291,7 +291,7 @@ impl AppComposition {
             route_health,
             route_cost,
             route_privacy,
-        ) = product_ai_route_fields(live_backend);
+        ) = product_ai_route_fields(live_backend.clone());
         // Both halves, here where the projections are first built.
         //
         // `Explain` leaves through the metadata-only path without calling a
@@ -412,7 +412,7 @@ impl AppComposition {
             // while forbidding the selected provider still let the buffer
             // excerpt go out. Mode ceiling and provider ceiling are different
             // questions and passing the first is not passing the second.
-            self.product_ai_policy_with_org_ceiling(live_backend),
+            self.product_ai_policy_with_org_ceiling(live_backend.clone()),
             CapabilityNamespace("app.ai".to_string()),
         );
         // Capability/network decision only — product prose is filled by
@@ -441,6 +441,7 @@ impl AppComposition {
                             crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                         )),
                         budget_request_cost_cents: live_backend
+                            .clone()
                             .and_then(declared_request_cost_cents),
                         ..Default::default()
                     },
@@ -742,7 +743,7 @@ impl AppComposition {
             let worker = move || {
                 let mut on_delta = move |delta: &str| sink_delta.push(delta);
                 let (proposal_source, stream) = resolve_assisted_edit_proposal_text(
-                    live_backend,
+                    live_backend.clone(),
                     preference_for_worker,
                     anthropic_for_worker,
                     &instruction_for_worker,
