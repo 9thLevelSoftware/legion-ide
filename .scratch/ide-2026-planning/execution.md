@@ -14,11 +14,12 @@ describes specification creation and does not negate this later authorization.
 ## Active work
 
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
-- 02: claimed on `codex/ide-2026-ticket-002`; pilot configuration contract.
+- 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
 - 40: claimed on `codex/ide-2026-ticket-040`; explicit provider configuration.
-- Native candidate prerequisite repair: isolated branch
-  `codex/ide-2026-native-smoke-repair`; preserve the failed immutable candidate.
+- 235: resolved and independently reviewed; integrated as `7b69a45`.
+- Native candidate prerequisite repair: independently reviewed and integrated as
+  `07d2187`; rebuilt immutable candidate verification remains pending.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
 packaged successfully (MSI SHA-256
@@ -73,6 +74,16 @@ This supersedes the missing-driver preflight observation for this selected path.
 No input was injected and no packaged product/native workflow was qualified.
 
 ## Completion limits
+
+On 2026-10-09 the owner selected MiMo 2.6 Pro as the initial inexpensive testing
+candidate, clarified an existing Xiaomi subscription, and supplied the dedicated
+Token Plan endpoints. The pilot profile uses the OpenAI-compatible route
+`https://token-plan-sgp.xiaomimimo.com/v1` with model `mimo-v2.6-pro`.
+The supplied alternative is `https://token-plan-sgp.xiaomimimo.com/anthropic`.
+Credentials remain pending through secure storage, with no live inference yet.
+Subscription exhaustion must not silently switch to pay-as-you-go. Official
+protocol details and dated source links are in
+`D:/legion-ide-2026-notes/mimo-testing-candidate.md`.
 
 Keep implementation, experiments and product acceptance separate. Real provider,
 native/AT host, formal-worker, signing/service and human-observation prerequisites
