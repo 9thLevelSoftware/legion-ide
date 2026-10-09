@@ -34,8 +34,13 @@ describes specification creation and does not negate this later authorization.
   Reporting-only diagnostics in `200f8fb` subsequently captured Windows error 5
   (access denied), with successful foreground/UIA checkpoints and zero accepted
   events. A bounded repair preserves existing input-desktop access, with a native
-  non-injecting regression red/green and independent review PASS. The repaired
-  attended run remains pending. No successful native input is claimed.
+  non-injecting regression red/green and independent review PASS. The attended
+  `b88f7e0` run then successfully clicked the drawer and file; it stopped before
+  typing because the driver expected an obsolete debug-style tab label. The
+  corrected typed tab oracle observes Clean in a read-only native probe. The
+  editor still exposes only text fragments, blocking exact full-document UIA
+  observation. Native editing/save remain unqualified; a bounded product
+  accessibility repair is assigned in an isolated worktree.
 - Credential prerequisite: typed missing-key classification and isolated native
   Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
 
@@ -48,19 +53,25 @@ and the Assist proposal was refused with `offline.ai_feature_disabled`.
 The bounded repair addresses asynchronous smoke completion and the offline
 Manual smoke contract; it must not weaken acceptance or enable AI implicitly.
 Raw evidence remains in `D:/legion-ide-2026-tools/pilot-candidate-87580fa/`.
-Native journey attempts ran and remained blocked without accepted input; no native-input
-or open/edit/save acceptance is claimed. Reviewed partial driver repairs address
-wrong helper-window selection and STA desktop access. The cause of the latest
-SendInput rejection remains undetermined.
+Earlier native attempts were blocked without accepted input. The latest
+access-preserving driver accepted the guarded Explorer drawer/file clicks, but
+open/edit/save and full input conformance remain unqualified. Partial repairs
+address helper-window selection, STA startup and accidental access reduction.
 
 A subsequent read-only UIA trace observed the compact Explorer drawer with no
 file entries across 60 samples over 15 seconds. The reviewed driver now opens
 that real control through guarded OS input when needed. Its first attended
-navigation attempt timed out while the owner was away; the owner-requested retry
-observed foreground and reached the drawer but SendInput accepted zero events.
+navigation attempt timed out while the owner was away; an owner-requested retry
+reached the drawer but SendInput accepted zero events. After access preservation,
+guarded clicks succeeded and the run reached the tab-observation stage.
 The [diagnostic receipt](../../plans/evidence/ide-2026-native-sendinput-diagnostic.md)
 records both the failure and the reviewed error-reporting change. No fresh
 attendance is inferred from an unanswered availability question.
+
+[Tab/text oracle evidence](../../plans/evidence/ide-2026-native-tab-text-oracles.md)
+records the obsolete driver label predicate, successful clean-tab observation,
+and the remaining full-document accessibility gap. Direct `--file` probe setup is
+not credited as Explorer or native editing acceptance.
 
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)

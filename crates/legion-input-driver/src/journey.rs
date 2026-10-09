@@ -250,15 +250,11 @@ fn observe(
         guarded_input(window, || inject::click_at(x, y))?;
         thread::sleep(Duration::from_millis(900));
         notes.push("Explorer file selected through OS pointer".into());
-        let names = oracle.names(&root).map_err(blocked)?;
-        let tab_clean = |names: &[String]| {
-            names.iter().any(|name| {
-                name.contains(filename.as_ref())
-                    && name.contains("[buffer ")
-                    && !name.contains(" +")
-            })
-        };
-        if !tab_clean(&names) {
+        if oracle
+            .selected_tab_state(&root, &filename)
+            .map_err(blocked)?
+            != observe::TabState::Clean
+        {
             return Err((
                 3,
                 "clean target tab title is not observable through UIA".into(),
@@ -300,9 +296,10 @@ fn observe(
                     .into(),
             ));
         }
-        let dirty = oracle.names(&root).map_err(blocked)?.iter().any(|name| {
-            name.contains(filename.as_ref()) && name.contains(" +") && name.contains("[buffer ")
-        });
+        let dirty = oracle
+            .selected_tab_state(&root, &filename)
+            .map_err(blocked)?
+            == observe::TabState::Dirty;
         notes.push(format!("marker_visible=true dirty_tab_observed={dirty}"));
         if !dirty {
             return Err((
@@ -316,7 +313,10 @@ fn observe(
         let mut expected = marker.as_bytes().to_vec();
         expected.extend_from_slice(&before.bytes);
         let primary_exact = after.bytes == expected;
-        let primary_clean = tab_clean(&oracle.names(&root).map_err(blocked)?);
+        let primary_clean = oracle
+            .selected_tab_state(&root, &filename)
+            .map_err(blocked)?
+            == observe::TabState::Clean;
         notes.push(format!(
             "ctrl_s_exact_disk={primary_exact} ctrl_s_dirty_cleared={primary_clean}"
         ));
@@ -339,7 +339,11 @@ fn observe(
                 "external disk bytes differ from exact marker plus original bytes".into(),
             ));
         }
-        if !tab_clean(&oracle.names(&root).map_err(blocked)?) {
+        if oracle
+            .selected_tab_state(&root, &filename)
+            .map_err(blocked)?
+            != observe::TabState::Clean
+        {
             return Err((3, "saved clean tab is not observable".into()));
         }
         let changed = git(&["diff", "--name-only"])?;

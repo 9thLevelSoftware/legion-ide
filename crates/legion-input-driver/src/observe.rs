@@ -22,6 +22,43 @@
 
 use std::path::Path;
 
+/// Published properties of a UIA TabItem, read independently of product state.
+#[derive(Clone, Debug)]
+pub struct TabObservation {
+    pub name: String,
+    pub selected: bool,
+    pub visible: bool,
+    pub description: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabState {
+    Clean,
+    Dirty,
+}
+
+/// Require one exact visible selected tab; unknown descriptions are not clean.
+pub fn selected_tab_state(target: &str, tabs: &[TabObservation]) -> Result<TabState, String> {
+    let matches: Vec<_> = tabs
+        .iter()
+        .filter(|tab| tab.name == target && tab.visible)
+        .collect();
+    let [tab] = matches.as_slice() else {
+        return Err(format!(
+            "target {target:?} must identify one visible UIA TabItem; found {}",
+            matches.len()
+        ));
+    };
+    if !tab.selected {
+        return Err("exact target UIA TabItem is not selected".into());
+    }
+    match tab.description.as_str() {
+        "" => Ok(TabState::Clean),
+        "Unsaved changes" => Ok(TabState::Dirty),
+        _ => Err("selected target UIA TabItem has an unknown full description".into()),
+    }
+}
+
 /// External navigation seam: prefer the visible exact file, otherwise click the
 /// unique compact Explorer drawer once and wait at most three seconds. Callers
 /// supply visible UIA elements and a foreground-guarded OS pointer operation.
@@ -386,6 +423,67 @@ pub struct UiaOracle {
 
 #[cfg(windows)]
 impl UiaOracle {
+    /// Read the real tab strip's role, selection and full-description properties.
+    /// Explorer rows and debug projection strings cannot satisfy this oracle.
+    pub fn selected_tab_state(
+        &self,
+        root: &IUIAutomationElement,
+        target: &str,
+    ) -> Result<TabState, String> {
+        use windows::Win32::UI::Accessibility::{
+            IUIAutomationElement6, IUIAutomationSelectionItemPattern, UIA_SelectionItemPatternId,
+            UIA_TabItemControlTypeId,
+        };
+        use windows::core::Interface;
+        let mut tabs = Vec::new();
+        for element in self.subtree(root)? {
+            // SAFETY: all values are read from a live external UIA element.
+            unsafe {
+                if element.CurrentControlType().map_err(|e| e.to_string())?
+                    != UIA_TabItemControlTypeId
+                {
+                    continue;
+                }
+                let name = element
+                    .CurrentName()
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                if name != target {
+                    continue;
+                }
+                let visible = !element
+                    .CurrentIsOffscreen()
+                    .map_err(|e| e.to_string())?
+                    .as_bool();
+                if !visible {
+                    continue;
+                }
+                let pattern = element
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .map_err(|e| format!("target tab selection unavailable: {e}"))?;
+                let selected = pattern
+                    .CurrentIsSelected()
+                    .map_err(|e| e.to_string())?
+                    .as_bool();
+                let description = element
+                    .cast::<IUIAutomationElement6>()
+                    .map_err(|e| format!("target tab full-description interface unavailable: {e}"))?
+                    .CurrentFullDescription()
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                tabs.push(TabObservation {
+                    name,
+                    selected,
+                    visible,
+                    description,
+                });
+            }
+        }
+        selected_tab_state(target, &tabs)
+    }
+
     /// Select the unique complete TextPattern matching the externally read file.
     /// Ambiguous, truncated and unavailable document oracles are blocked.
     pub fn exact_document_element(
@@ -508,9 +606,10 @@ impl UiaOracle {
                 .map_err(|err| format!("element array length failed: {err}"))?;
             let mut elements = Vec::new();
             for index in 0..length {
-                if let Ok(element) = found.GetElement(index) {
-                    elements.push(element);
-                }
+                let element = found
+                    .GetElement(index)
+                    .map_err(|err| format!("UIA subtree element {index} unavailable: {err}"))?;
+                elements.push(element);
             }
             Ok(elements)
         }

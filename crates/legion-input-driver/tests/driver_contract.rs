@@ -17,6 +17,68 @@ use std::{
 };
 
 #[test]
+fn selected_tab_oracle_reads_clean_dirty_and_saved_accessibility_states() {
+    use observe::{TabObservation, TabState, selected_tab_state};
+    let mut tab = TabObservation {
+        name: "README.md".into(),
+        selected: true,
+        visible: true,
+        description: String::new(),
+    };
+    assert_eq!(
+        selected_tab_state("README.md", &[tab.clone()]).unwrap(),
+        TabState::Clean
+    );
+    tab.description = "Unsaved changes".into();
+    assert_eq!(
+        selected_tab_state("README.md", &[tab.clone()]).unwrap(),
+        TabState::Dirty
+    );
+    tab.description.clear();
+    assert_eq!(
+        selected_tab_state("README.md", &[tab]).unwrap(),
+        TabState::Clean
+    );
+}
+
+#[test]
+fn selected_tab_oracle_blocks_ambiguity_inactive_hidden_and_unknown_states() {
+    use observe::{TabObservation, selected_tab_state};
+    let tab = TabObservation {
+        name: "README.md".into(),
+        selected: true,
+        visible: true,
+        description: String::new(),
+    };
+    assert!(selected_tab_state("README.md", &[]).is_err());
+    assert!(selected_tab_state("README.md", &[tab.clone(), tab.clone()]).is_err());
+    for invalid in [
+        TabObservation {
+            name: "README.md.bak".into(),
+            ..tab.clone()
+        },
+        TabObservation {
+            name: "* README.md [buffer 1]".into(),
+            ..tab.clone()
+        },
+        TabObservation {
+            selected: false,
+            ..tab.clone()
+        },
+        TabObservation {
+            visible: false,
+            ..tab.clone()
+        },
+        TabObservation {
+            description: "unknown status".into(),
+            ..tab.clone()
+        },
+    ] {
+        assert!(selected_tab_state("README.md", &[invalid]).is_err());
+    }
+}
+
+#[test]
 fn explorer_navigation_reveals_recorded_compact_tree_once_and_prefers_visible_target() {
     use std::{cell::Cell, time::Duration};
     // Names from the coordinator's read-only 29-element packaged-window sample.
