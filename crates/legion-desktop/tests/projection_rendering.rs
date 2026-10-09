@@ -3941,7 +3941,7 @@ fn projection_rendering_provider_credentials_live_in_settings_ai_providers_secti
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(
         &full,
-        "Preferred AI provider: auto. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
+        "Provider preference: auto. Auto requires an explicitly selected named profile; it does not discover or fall back to another provider."
     ));
     assert!(accesskit_has_label(
         &full,
@@ -3986,10 +3986,13 @@ fn projection_rendering_empty_ai_providers_uses_plain_product_copy() {
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "AI Providers");
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
-    assert!(accesskit_has_label(&full, "No AI provider configured"));
     assert!(accesskit_has_label(
         &full,
-        "Choose an AI provider available on this computer or add an Anthropic API key."
+        "No compatibility provider available"
+    ));
+    assert!(accesskit_has_label(
+        &full,
+        "Add a named profile for an exact endpoint and model, or choose a compatibility preference below."
     ));
     let settings_text = accesskit_dialog_text(&full, "Settings");
     for internal in [

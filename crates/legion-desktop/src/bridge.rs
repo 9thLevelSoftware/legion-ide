@@ -1213,6 +1213,30 @@ pub enum DesktopAction {
         /// Provider identifier whose key should be removed.
         provider_id: String,
     },
+    /// Add or update non-secret named route metadata through app authority.
+    ConfigureAiProviderProfile {
+        /// Exact endpoint/model and adapter options; never contains a key.
+        profile: legion_app::AiProviderProfile,
+    },
+    /// Explicitly select a configured route without connecting or changing mode.
+    SelectAiProviderProfile {
+        /// Existing profile name.
+        name: String,
+    },
+    /// Replace the secure key only if the displayed route still matches.
+    ReplaceAiProfileCredential {
+        /// Profile metadata captured by the rendered credential form.
+        expected_profile: legion_app::AiProviderProfile,
+        /// New key, redacted in diagnostics and zeroized after use.
+        credential: SensitiveString,
+    },
+    /// Revoke the secure key only if the displayed route still matches.
+    RevokeAiProfileCredential {
+        /// Profile metadata captured by the rendered credential form.
+        expected_profile: legion_app::AiProviderProfile,
+    },
+    /// Refresh metadata/keyring status only; never probe a provider endpoint.
+    RefreshAiProviderProfiles,
     /// Select the product AI route preference for Assist / Delegate composition.
     ///
     /// Labels: `auto` (local-first), `ollama`, `anthropic`, `deterministic`.
@@ -3001,6 +3025,11 @@ impl DesktopCommandBridge {
             // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
             DesktopAction::SetProviderApiKey { .. }
             | DesktopAction::DeleteProviderApiKey { .. }
+            | DesktopAction::ConfigureAiProviderProfile { .. }
+            | DesktopAction::SelectAiProviderProfile { .. }
+            | DesktopAction::ReplaceAiProfileCredential { .. }
+            | DesktopAction::RevokeAiProfileCredential { .. }
+            | DesktopAction::RefreshAiProviderProfiles
             | DesktopAction::SetPreferredAiProvider { .. } => DesktopBridgeOutput::Noop,
             // PKT-RAIL: ghost text acceptance goes through the existing inline-prediction
             // acceptance path so no direct buffer mutation occurs.

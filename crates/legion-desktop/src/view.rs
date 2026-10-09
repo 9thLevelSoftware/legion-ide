@@ -383,6 +383,10 @@ pub struct DesktopProjectionViewState {
         Vec<crate::view::proposal_review::DesktopCheckpointTimelineRow>,
     /// Preferred product AI route label (`auto` / `ollama` / `anthropic` / `deterministic`).
     pub preferred_ai_provider: String,
+    /// Cached app-produced named route and secure-store metadata.
+    pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
+    /// App refusal gate while a provider operation is still draining.
+    pub provider_configuration_busy: bool,
     /// Accumulated product AI stream chunks for the assistant rail (Assist / Delegate).
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream (`provider/model/operation`).
@@ -414,6 +418,8 @@ impl Default for DesktopProjectionViewState {
             review_hunk_selected_index: 0,
             durable_checkpoint_timeline_rows: Vec::new(),
             preferred_ai_provider: "auto".to_string(),
+            ai_provider_profiles: Vec::new(),
+            provider_configuration_busy: false,
             product_ai_stream_chunks: Vec::new(),
             product_ai_stream_label: String::new(),
             product_ai_streamed: false,
@@ -1119,6 +1125,10 @@ pub struct DesktopProjectionViewModel {
     pub empty_or_degraded_flags: Vec<String>,
     /// Preferred product AI route label mirrored from app composition.
     pub preferred_ai_provider: String,
+    /// App-produced named routes, refreshed on explicit settings actions.
+    pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
+    /// Whether configuration controls must wait for the app-owned operation.
+    pub provider_configuration_busy: bool,
     /// Product AI stream chunks for progressive assistant-rail rendering.
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream.
@@ -1298,6 +1308,8 @@ impl DesktopProjectionViewModel {
             sandbox_rows,
             empty_or_degraded_flags: flags,
             preferred_ai_provider: state.preferred_ai_provider.clone(),
+            ai_provider_profiles: state.ai_provider_profiles.clone(),
+            provider_configuration_busy: state.provider_configuration_busy,
             product_ai_stream_chunks: state.product_ai_stream_chunks.clone(),
             product_ai_stream_label: state.product_ai_stream_label.clone(),
             product_ai_streamed: state.product_ai_streamed,
@@ -1332,6 +1344,11 @@ pub struct ProjectionView {
     selected_activity: ActivitySurface,
     utility_surface: Option<UtilitySurface>,
     settings_section: SettingsSection,
+    ai_profile_credential_draft: Option<(
+        legion_app::AiProviderProfile,
+        crate::bridge::SensitiveString,
+    )>,
+    ai_profile_metadata_draft: Option<legion_app::AiProviderProfile>,
     utility_overlay_origin: Option<egui::Id>,
     utility_overlay_needs_focus: bool,
     utility_overlay_focus_bounds: Option<(egui::Id, egui::Id)>,
@@ -1547,6 +1564,8 @@ impl ProjectionView {
             selected_activity: ActivitySurface::Explorer,
             utility_surface: None,
             settings_section: SettingsSection::Appearance,
+            ai_profile_credential_draft: None,
+            ai_profile_metadata_draft: None,
             utility_overlay_origin: None,
             utility_overlay_needs_focus: false,
             utility_overlay_focus_bounds: None,
@@ -2032,6 +2051,11 @@ impl ProjectionView {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
         render_utility_overlay(ui.ctx(), snapshot, &model, self, &mut actions);
+        if self.utility_surface != Some(UtilitySurface::Settings)
+            || self.settings_section != SettingsSection::AiProviders
+        {
+            self.ai_profile_credential_draft = None;
+        }
         if let Some(origin) = self.mode_confirmation_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
@@ -6996,10 +7020,21 @@ fn render_settings_panel(
             }
         }
         if view.settings_section == SettingsSection::AiProviders {
+            interactive_fields::render_named_provider_profiles(
+                ui,
+                &model.ai_provider_profiles,
+                model.provider_configuration_busy,
+                &mut view.ai_profile_credential_draft,
+                &mut view.ai_profile_metadata_draft,
+                actions,
+            );
+            if !model.ai_provider_profiles.iter().any(|p| p.selected)
+                && view.ai_profile_metadata_draft.is_none()
+            {
             if snapshot.assisted_ai_projection.providers.is_empty() {
-                ui.label(theme::body_strong("No AI provider configured"));
+                ui.label(theme::body_strong("No compatibility provider available"));
                 ui.label(theme::muted(
-                    "Choose an AI provider available on this computer or add an Anthropic API key.",
+                    "Add a named profile for an exact endpoint and model, or choose a compatibility preference below.",
                 ));
             } else {
                 for provider in snapshot.assisted_ai_projection.providers.iter().take(6) {
@@ -7008,7 +7043,7 @@ fn render_settings_panel(
                         &provider.provider_label,
                     );
                     let availability = match provider.availability {
-                        AssistedAiProviderAvailabilityState::Available => "Ready",
+                        AssistedAiProviderAvailabilityState::Available => "Adapter available (model unqualified)",
                         AssistedAiProviderAvailabilityState::Disabled => "Disabled",
                         AssistedAiProviderAvailabilityState::Refused => "Blocked by policy",
                         AssistedAiProviderAvailabilityState::Unavailable => "Unavailable",
@@ -7026,6 +7061,7 @@ fn render_settings_panel(
                 actions,
             );
             interactive_fields::render_anthropic_byok_form(ui, actions);
+            }
         }
         if view.settings_section == SettingsSection::Editor {
             let mut line_numbers_visible = model.settings.line_numbers_visible;

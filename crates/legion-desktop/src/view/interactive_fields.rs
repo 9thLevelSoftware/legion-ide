@@ -10,7 +10,189 @@ use std::borrow::Cow;
 use crate::bridge::{DesktopAction, SensitiveString};
 use crate::theme;
 
-/// Render preferred-provider selection (local-first Auto / Ollama / Anthropic / fixture).
+/// Render app-produced named routes and collect route-bound credential decisions.
+pub(crate) fn render_named_provider_profiles(
+    ui: &mut egui::Ui,
+    profiles: &[legion_app::AiProviderProfileProjection],
+    busy: bool,
+    draft: &mut Option<(legion_app::AiProviderProfile, SensitiveString)>,
+    metadata_draft: &mut Option<legion_app::AiProviderProfile>,
+    actions: &mut Vec<DesktopAction>,
+) {
+    ui.label(theme::muted(
+        "Selecting or configuring a profile makes no connection. Manual keeps AI off.",
+    ));
+    if super::soft_button(ui, "Refresh profile status").clicked() {
+        actions.push(DesktopAction::RefreshAiProviderProfiles);
+    }
+    if ui
+        .add_enabled(!busy, egui::Button::new("Add profile"))
+        .clicked()
+    {
+        *draft = None;
+        *metadata_draft = Some(legion_app::AiProviderProfile {
+            name: String::new(),
+            provider_id: "openai-compatible".into(),
+            endpoint: String::new(),
+            model: String::new(),
+            max_completion_tokens: true,
+            disable_thinking: false,
+        });
+    }
+    if let Some(metadata) = metadata_draft {
+        *draft = None;
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.label(theme::muted(
+                "Save adds or updates this name. Selection is a separate action.",
+            ));
+            profile_metadata_field(ui, "Profile name", &mut metadata.name, 64);
+            egui::ComboBox::from_id_salt("named-profile-adapter")
+                .selected_text(&metadata.provider_id)
+                .show_ui(ui, |ui| {
+                    for adapter in [
+                        "openai-compatible",
+                        "openai",
+                        "anthropic",
+                        "ollama",
+                        "llama-cpp",
+                    ] {
+                        ui.selectable_value(&mut metadata.provider_id, adapter.into(), adapter);
+                    }
+                });
+            profile_metadata_field(ui, "Base endpoint", &mut metadata.endpoint, 2048);
+            profile_metadata_field(ui, "Model", &mut metadata.model, 128);
+            if metadata.provider_id == "openai-compatible" {
+                ui.checkbox(
+                    &mut metadata.max_completion_tokens,
+                    "Use max_completion_tokens (includes reasoning)",
+                );
+                ui.checkbox(
+                    &mut metadata.disable_thinking,
+                    "Disable thinking (endpoint must support this)",
+                );
+            } else {
+                metadata.max_completion_tokens = false;
+                metadata.disable_thinking = false;
+            }
+            if super::soft_button(ui, "Save profile").clicked() {
+                actions.push(DesktopAction::ConfigureAiProviderProfile {
+                    profile: metadata.clone(),
+                });
+            }
+        });
+        if super::soft_button(ui, "Close profile form").clicked() {
+            *metadata_draft = None;
+        }
+        return;
+    }
+    for projected in profiles {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(theme::body_strong(&projected.profile.name));
+            if ui
+                .add_enabled(
+                    !busy && !projected.selected,
+                    egui::Button::new("Select profile"),
+                )
+                .clicked()
+            {
+                *draft = None;
+                actions.push(DesktopAction::SelectAiProviderProfile {
+                    name: projected.profile.name.clone(),
+                });
+            }
+            if projected.selected {
+                ui.label(theme::muted("Selected"));
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Edit profile"))
+                .clicked()
+            {
+                *draft = None;
+                *metadata_draft = Some(projected.profile.clone());
+            }
+        });
+        ui.label(theme::muted(format!(
+            "{} · {}",
+            projected.profile.provider_id, projected.locality
+        )));
+        ui.label(theme::label(&projected.profile.endpoint));
+        ui.label(theme::label(&projected.profile.model));
+        ui.label(theme::muted(projected.capabilities.join(" · ")));
+        ui.label(theme::muted(format!(
+            "Last refreshed health: {}",
+            projected.health
+        )));
+    }
+    let Some(selected) = profiles.iter().find(|p| p.selected) else {
+        *draft = None;
+        return;
+    };
+    if draft
+        .as_ref()
+        .is_none_or(|(route, _)| route != &selected.profile)
+        || busy
+    {
+        *draft = Some((selected.profile.clone(), SensitiveString(String::new())));
+    }
+    let (_, credential) = draft.as_mut().expect("selected credential draft");
+    ui.label(theme::muted(format!(
+        "Credential: {} · operating system keyring",
+        selected.credential_state
+    )));
+    ui.add_enabled_ui(!busy, |ui| {
+        let mut field = egui::TextEdit::singleline(&mut credential.0)
+            .password(true)
+            .hint_text("New profile key")
+            .char_limit(8192)
+            .id_salt((
+                "named-profile-key",
+                &selected.profile.name,
+                &selected.profile.endpoint,
+                &selected.profile.model,
+            ))
+            .desired_width(320.0)
+            .min_size(egui::vec2(32.0, 32.0))
+            .show(ui);
+        // Password undo history contains raw strings; do not retain it between frames.
+        field.state.clear_undoer();
+        field.state.store(ui.ctx(), field.response.id);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !credential.trim().is_empty(),
+                    egui::Button::new("Replace profile key"),
+                )
+                .clicked()
+            {
+                actions.push(DesktopAction::ReplaceAiProfileCredential {
+                    expected_profile: selected.profile.clone(),
+                    credential: std::mem::replace(credential, SensitiveString(String::new())),
+                });
+            }
+            if super::soft_button(ui, "Revoke profile key").clicked() {
+                *credential = SensitiveString(String::new());
+                actions.push(DesktopAction::RevokeAiProfileCredential {
+                    expected_profile: selected.profile.clone(),
+                });
+            }
+        });
+    });
+}
+
+fn profile_metadata_field(ui: &mut egui::Ui, label: &str, value: &mut String, limit: usize) {
+    ui.horizontal(|ui| {
+        let labelled = ui.label(label);
+        ui.add(
+            egui::TextEdit::singleline(value)
+                .char_limit(limit)
+                .desired_width(350.0)
+                .id_salt(("named-profile-metadata", label)),
+        )
+        .labelled_by(labelled.id);
+    });
+}
+
+/// Render compatibility preferences only when no named route is selected.
 pub(crate) fn render_preferred_provider_picker(
     ui: &mut egui::Ui,
     active_preference: &str,
@@ -18,17 +200,13 @@ pub(crate) fn render_preferred_provider_picker(
 ) {
     ui.add_space(4.0);
     ui.label(theme::muted(format!(
-        "Preferred AI provider: {active_preference}. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
+        "Provider preference: {active_preference}. Auto requires an explicitly selected named profile; it does not discover or fall back to another provider."
     )));
     ui.horizontal_wrapped(|ui| {
         for (label, id) in [
-            ("Auto (local-first)", "auto"),
+            ("Auto (named profile required)", "auto"),
             ("Ollama", "ollama"),
-            // Offered because a preference nothing can select is the same as
-            // no preference. `Auto` prefers Ollama when both are reachable, so
-            // without a button a llama.cpp user has no way to choose the server
-            // they deliberately started -- the parser accepts the label and the
-            // product never produces it.
+            // Keep explicit compatibility routes selectable until a named profile is selected.
             ("llama.cpp", "llama-cpp"),
             ("Anthropic", "anthropic"),
             ("Fixture", "deterministic"),

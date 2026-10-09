@@ -960,6 +960,8 @@ impl SelectedProblemKey {
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
+    // Secure-store status is read on open/explicit settings actions, never paint.
+    ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
     shell: Shell,
     bridge: DesktopCommandBridge,
     view: ProjectionView,
@@ -1139,11 +1141,24 @@ impl DesktopRuntime {
 
     /// Open the configured workspace and optional initial file.
     pub fn open(config: DesktopLaunchConfig) -> Result<Self> {
+        Self::open_with_app(config, AppComposition::new())
+    }
+
+    /// Open using an injected secure-storage port, including during session restore.
+    /// Production `open` uses the operating system keyring; isolated contracts can
+    /// supply synthetic storage without reading or modifying personal credentials.
+    pub fn open_with_provider_secret_store(
+        config: DesktopLaunchConfig,
+        store: Arc<dyn SecretStore + Send + Sync>,
+    ) -> Result<Self> {
+        Self::open_with_app(config, AppComposition::with_provider_secret_store(store))
+    }
+
+    fn open_with_app(config: DesktopLaunchConfig, mut app: AppComposition) -> Result<Self> {
         let session_record = match &config.session_state {
             Some(path) => DesktopSessionStore::load(path)?,
             None => None,
         };
-        let mut app = AppComposition::new();
         app.open_workspace(
             &config.workspace_root,
             WorkspaceTrustState::Trusted,
@@ -1259,6 +1274,7 @@ impl DesktopRuntime {
             .extend(status_details.iter().cloned());
 
         let mut runtime = Self {
+            ai_provider_profiles: app.ai_provider_profiles(),
             app,
             shell: Shell::new(snapshot),
             bridge: DesktopCommandBridge::new(),
@@ -1753,18 +1769,48 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 Ok(outcome)
             }
-            // Product AI route preference (local-first Auto / Ollama / Anthropic / fixture).
+            DesktopAction::ConfigureAiProviderProfile { profile } => {
+                let result = self.app.configure_ai_provider_profile(profile);
+                self.finish_provider_settings_action(result, true)
+            }
+            DesktopAction::SelectAiProviderProfile { name } => {
+                let result = self.app.select_ai_provider_profile(&name);
+                self.finish_provider_settings_action(result, true)
+            }
+            DesktopAction::ReplaceAiProfileCredential {
+                expected_profile,
+                credential,
+            } => {
+                let result = self
+                    .require_displayed_provider_profile(&expected_profile)
+                    .and_then(|()| {
+                        self.app
+                            .replace_ai_profile_credential(&expected_profile.name, &credential)
+                    });
+                drop(credential);
+                self.finish_provider_settings_action(result, false)
+            }
+            DesktopAction::RevokeAiProfileCredential { expected_profile } => {
+                let result = self
+                    .require_displayed_provider_profile(&expected_profile)
+                    .and_then(|()| {
+                        self.app
+                            .revoke_ai_profile_credential(&expected_profile.name)
+                    });
+                self.finish_provider_settings_action(result, false)
+            }
+            DesktopAction::RefreshAiProviderProfiles => {
+                self.finish_provider_settings_action(Ok(()), false)
+            }
+            // Legacy route preference; Auto requires an explicitly selected profile.
             DesktopAction::SetPreferredAiProvider { provider_id } => {
+                if self.app.provider_configuration_busy() {
+                    return self.finish_provider_settings_action(Err(legion_app::AppCompositionError::AiRuntime(
+                        "Provider configuration is busy; stop or finish the current operation first.".into(),
+                    )), false);
+                }
                 self.app.set_preferred_ai_provider_label(&provider_id);
-                let active = self.app.preferred_ai_provider().as_str();
-                self.set_status(
-                    StatusSeverity::Info,
-                    format!("Preferred AI provider set to: {active}"),
-                );
-                self.refresh_projection()?;
-                self.last_outcome = DesktopWorkflowOutcome::Noop;
-                self.persist_diagnostics_if_configured();
-                Ok(DesktopWorkflowOutcome::Noop)
+                self.finish_provider_settings_action(Ok(()), true)
             }
             // PKT-PROV: store a BYOK API key in the OS keyring.
             DesktopAction::SetProviderApiKey {
@@ -1889,6 +1935,54 @@ impl DesktopRuntime {
                 Ok(outcome)
             }
         }
+    }
+
+    fn require_displayed_provider_profile(
+        &self,
+        expected: &legion_app::AiProviderProfile,
+    ) -> std::result::Result<(), legion_app::AppCompositionError> {
+        if self
+            .app
+            .ai_provider_profiles()
+            .iter()
+            .any(|p| &p.profile == expected)
+        {
+            Ok(())
+        } else {
+            Err(legion_app::AppCompositionError::AiRuntime(
+                "Provider profile changed; refresh settings before changing credentials.".into(),
+            ))
+        }
+    }
+
+    fn finish_provider_settings_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::AppCompositionError>,
+        persist_metadata: bool,
+    ) -> Result<DesktopWorkflowOutcome> {
+        let outcome = match result {
+            Err(error) => DesktopWorkflowOutcome::Error(error.to_string()),
+            Ok(()) if persist_metadata && self.save_session_state().is_err() => {
+                DesktopWorkflowOutcome::Error(
+                    "Provider settings changed for this session but could not be saved. Retry saving before closing.".into(),
+                )
+            }
+            Ok(()) => DesktopWorkflowOutcome::Noop,
+        };
+        match &outcome {
+            DesktopWorkflowOutcome::Error(message) => {
+                self.set_status(StatusSeverity::Error, message.clone())
+            }
+            _ => self.set_status(
+                StatusSeverity::Info,
+                "Provider settings updated; no connection was made.",
+            ),
+        }
+        self.ai_provider_profiles = self.app.ai_provider_profiles();
+        self.refresh_projection()?;
+        self.last_outcome = outcome.clone();
+        self.persist_diagnostics_if_configured();
+        Ok(outcome)
     }
 
     /// Dispatch a UI-originated action, surfacing any failure as an error
@@ -2830,6 +2924,8 @@ impl DesktopRuntime {
             review_hunk_selected_index: self.review_hunk_selected_index,
             durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
             preferred_ai_provider: self.app.preferred_ai_provider().as_str().to_string(),
+            ai_provider_profiles: self.ai_provider_profiles.clone(),
+            provider_configuration_busy: self.app.provider_configuration_busy(),
             product_ai_stream_chunks: self
                 .app
                 .last_product_ai_stream()
