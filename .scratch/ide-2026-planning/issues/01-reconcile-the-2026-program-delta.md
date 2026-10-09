@@ -1,6 +1,6 @@
 # 01: Reconcile the 2026 program delta
 
-Status: ready-for-agent
+Status: claimed
 
 **What to build:** Map the 36 decisions and new outcomes onto existing canonical requirements; preserve IDs and expose unmapped or conflicting obligations without recreating the completion register.
 
@@ -31,3 +31,4 @@ Status: ready-for-agent
 ## Comments
 
 - 2026-10-08: User approved the 254-ticket breakdown. Published locally with the approved title, scope and blockers; execution has not started.
+- 2026-10-08: Claimed for implementation on `codex/ide-2026-integration`; isolated worker branch owns reconciliation.
