@@ -842,9 +842,56 @@ impl DockLayout {
     }
 }
 
+/// Maximum complete small-document text published to accessibility.
+/// This is deliberately below the text snapshot's 5 MiB compatibility cache.
+pub const EDITOR_ACCESSIBILITY_MAX_TEXT_BYTES: usize = 1024 * 1024;
+
+/// Authoritative availability of the active buffer's exact small-document preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorAccessibilityCoverage {
+    /// The preview is the entire bounded, non-degraded snapshot.
+    CompleteSmallBuffer,
+    /// Degraded/streaming buffers must never publish whole-source text.
+    Degraded,
+    /// No exact preview is available.
+    PreviewUnavailable,
+    /// The preview exceeds the accessibility text budget.
+    TextBudgetExceeded,
+}
+
+/// App-produced metadata for the existing small-buffer preview, not a new text owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorAccessibilityProjection {
+    /// Buffer owning this text and its editability policy.
+    pub buffer_id: BufferId,
+    /// Exact snapshot represented by the preview.
+    pub snapshot_id: SnapshotId,
+    /// Version of that snapshot.
+    pub buffer_version: BufferVersion,
+    /// Exact full snapshot UTF-8 byte length, not viewport length.
+    pub byte_len: usize,
+    /// Whether editor policy permits buffer edits, independently of saving.
+    pub editable: bool,
+    /// Complete versus unavailable source coverage.
+    pub coverage: EditorAccessibilityCoverage,
+    /// Primary directed caret, never reconstructed from normalized selection ranges.
+    pub primary_selection: Option<EditorAccessibilitySelection>,
+}
+
+/// Exact byte endpoints of the primary editor-owned directed caret.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorAccessibilitySelection {
+    /// Fixed anchor; equal to focus for an anchorless caret.
+    pub anchor_byte: usize,
+    /// Active caret head.
+    pub focus_byte: usize,
+}
+
 /// Active editor-buffer projection received by the UI from application state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActiveBufferProjection {
+    /// App-owned identity, editability, and coverage of the existing bounded preview.
+    pub accessibility: Option<EditorAccessibilityProjection>,
     /// Owning workspace identifier if a workspace is open.
     pub workspace_id: Option<WorkspaceId>,
     /// Active editor buffer identifier.
@@ -878,6 +925,7 @@ impl ActiveBufferProjection {
     /// Construct an empty active-buffer projection.
     pub fn empty() -> Self {
         Self {
+            accessibility: None,
             workspace_id: None,
             buffer_id: None,
             file_id: None,

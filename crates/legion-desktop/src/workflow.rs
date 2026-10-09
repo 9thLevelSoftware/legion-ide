@@ -5542,20 +5542,25 @@ impl DesktopEframeApp {
         // after that was swallowed as an activation.
         let traversal_tab = input.key_pressed(egui::Key::Tab)
             && (!input.modifiers.any() || input.modifiers.shift_only());
+        let focused_now = ui.memory(|memory| memory.focused());
         let accesskit_focus = input.events.iter().any(|event| {
             matches!(
                 event,
                 egui::Event::AccessKitActionRequest(request)
                     if request.action == egui::accesskit::Action::Focus
+                        && request.target_tree == egui::accesskit::TreeId::ROOT
+                        && focused_now.is_some_and(|focused| {
+                            request.target_node == focused.accesskit_id()
+                        })
             )
         });
         if traversal_tab || accesskit_focus {
             self.focus_navigation_pending = true;
         }
-        let focused_now = ui.memory(|memory| memory.focused());
         if accesskit_focus && focused_now.is_some() {
             // The focus request is the navigation. Paint already applied it,
-            // including when the same control was already focused.
+            // including when the same control was already focused. Ignored
+            // requests to non-focusable nodes cannot claim an unrelated button.
             self.focus_arrived_by_tab = true;
             self.focus_owner = focused_now;
             self.focus_navigation_pending = false;

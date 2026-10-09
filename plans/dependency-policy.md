@@ -145,6 +145,19 @@ qualification. No new external or workspace dependency is authorized.
 
 `legion-desktop` is the active Phase 2 crate authorized to host GUI renderer dependencies and project/workspace projection helpers. Phase 2 may use `eframe` and `egui` for the Windows-first desktop foundation proof, including their renderer/windowing/accessibility integration stack such as `egui-winit`, `egui-wgpu`, `winit`, `wgpu`, and `accesskit` when pulled in by or needed for the adapter. Slint is an explicit fallback candidate for native panel rendering if Phase 2 evidence shows the egui path cannot satisfy IME, clipboard, focus, accessibility, or high-DPI requirements. Tauri/WRY/TAO and GPUI are not approved for the core editor shell in Phase 2; Tauri/WRY remain auxiliary-only unless a later ADR supersedes ADR-0002, and GPUI remains a long-term architecture influence until its official Windows-first support is suitable for this project.
 
+Ticket 004's coordinator-approved bounded small-document accessibility repair
+permits `legion-desktop` to use the existing workspace-pinned
+`unicode-segmentation = 1.13.2` solely to describe selectable units in cached
+AccessKit text runs from the app's exact small-buffer preview. This is separate
+from the S1-04 text primitive increment above: editor/text authority still owns
+editing and navigation boundaries. The existing `accesskit_consumer = 0.36`
+package may be a desktop dev-dependency for headless rendered text-range
+contracts. Neither declaration adds an internal crate edge or a runtime
+ownership surface. ADR-0032's custom-canvas boundary and ADR-0015's absolute
+degraded-source restriction continue to apply; publication has finite text,
+node and character-metadata budgets. Evidence is recorded in
+`plans/evidence/ide-2026-ticket004-editor-accessibility-prerequisite.md`.
+
 S1-04h's streaming text-layout continuation uses the existing `egui::epaint`
 route and adds no direct `epaint` dependency to any workspace crate. The
 generic renderer boundary still permits renderer declarations in the

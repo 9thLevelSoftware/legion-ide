@@ -4047,6 +4047,7 @@ dependencies = [
 name = "legion-desktop"
 version = "0.1.0"
 dependencies = [
+ "accesskit_consumer 0.36.0",
  "anyhow",
  "eframe",
  "egui",
@@ -4066,6 +4067,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "unicode-segmentation",
  "uuid",
  "zeroize",
 ]

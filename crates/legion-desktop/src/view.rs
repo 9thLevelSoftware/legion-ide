@@ -15,6 +15,7 @@ mod components;
 mod debug_inspector;
 /// Applying persisted dock splitter fractions, and observing new ones.
 pub mod dock_geometry;
+mod editor_accessibility;
 #[cfg(feature = "ai")]
 pub mod ghost_text;
 pub mod rail_icons;
@@ -1370,6 +1371,7 @@ pub struct ProjectionView {
     pending_mode_confirmation_needs_focus: bool,
     mode_confirmation_restore_focus: Option<egui::Id>,
     streamed_layout_cache: StreamedLayoutCachePool,
+    editor_accessibility: editor_accessibility::EditorAccessibility,
     typescript_toolchain_draft: TypeScriptToolchainDraft,
     typescript_toolchain_projection: Option<TypeScriptToolchainProjection>,
     typescript_toolchain_workspace: Option<WorkspaceId>,
@@ -1584,6 +1586,7 @@ impl ProjectionView {
             pending_mode_confirmation_needs_focus: false,
             mode_confirmation_restore_focus: None,
             streamed_layout_cache: StreamedLayoutCachePool::default(),
+            editor_accessibility: editor_accessibility::EditorAccessibility::default(),
             typescript_toolchain_draft: TypeScriptToolchainDraft::default(),
             typescript_toolchain_projection: None,
             typescript_toolchain_workspace: None,
@@ -1982,6 +1985,7 @@ impl ProjectionView {
                         &mut actions,
                         source,
                         &mut self.streamed_layout_cache,
+                        &mut self.editor_accessibility,
                     ),
                     CenterSurface::Canvas => canvas_workspace::render_canvas_workspace(
                         ui,
@@ -2904,9 +2908,18 @@ fn render_code_canvas(
     actions: &mut Vec<DesktopAction>,
     source: Option<&dyn DesktopLineSource>,
     streamed_cache: &mut StreamedLayoutCachePool,
+    accessibility: &mut editor_accessibility::EditorAccessibility,
 ) -> egui::Rect {
     render_advanced_center_surface(ui, snapshot, model, actions);
-    render_editor_canvas(ui, snapshot, model, actions, source, streamed_cache)
+    render_editor_canvas(
+        ui,
+        snapshot,
+        model,
+        actions,
+        source,
+        streamed_cache,
+        accessibility,
+    )
 }
 
 fn render_advanced_center_surface(
@@ -3700,6 +3713,7 @@ fn render_editor_canvas(
     actions: &mut Vec<DesktopAction>,
     source: Option<&dyn DesktopLineSource>,
     streamed_cache: &mut StreamedLayoutCachePool,
+    accessibility: &mut editor_accessibility::EditorAccessibility,
 ) -> egui::Rect {
     render_tab_strip(ui, snapshot, actions);
     if ui.available_height() >= 250.0 {
@@ -3726,6 +3740,11 @@ fn render_editor_canvas(
             let code_rect = egui::Rect::from_min_max(
                 full_rect.min,
                 egui::pos2(full_rect.right() - minimap_width, full_rect.bottom()),
+            );
+            accessibility.publish(
+                ui,
+                &snapshot.active_buffer_projection,
+                code_rect.intersect(ui.clip_rect()),
             );
             let mut code_ui = ui.new_child(
                 egui::UiBuilder::new()

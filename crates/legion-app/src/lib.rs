@@ -11665,8 +11665,42 @@ impl ProjectionBuilder {
             .is_some_and(|vp| vp.large_file_status.is_some());
 
         let dirty = editor.is_dirty(buffer_id)?;
+        let descriptor = editor.current_snapshot(buffer_id)?;
+        let primary_selection = editor
+            .directed_carets(buffer_id)?
+            .first()
+            .map(|caret| {
+                Ok::<_, EditorError>(legion_ui::ui::EditorAccessibilitySelection {
+                    anchor_byte: editor
+                        .buffer_byte_offset(buffer_id, caret.anchor.unwrap_or(caret.head))?,
+                    focus_byte: editor.buffer_byte_offset(buffer_id, caret.head)?,
+                })
+            })
+            .transpose()?;
+        let coverage = if degraded {
+            legion_ui::ui::EditorAccessibilityCoverage::Degraded
+        } else if active_text.is_none() {
+            legion_ui::ui::EditorAccessibilityCoverage::PreviewUnavailable
+        } else if descriptor.byte_len > legion_ui::ui::EDITOR_ACCESSIBILITY_MAX_TEXT_BYTES {
+            legion_ui::ui::EditorAccessibilityCoverage::TextBudgetExceeded
+        } else {
+            legion_ui::ui::EditorAccessibilityCoverage::CompleteSmallBuffer
+        };
 
         Ok(ActiveBufferProjection {
+            accessibility: Some(legion_ui::ui::EditorAccessibilityProjection {
+                buffer_id,
+                snapshot_id: descriptor.snapshot_id,
+                buffer_version: descriptor.buffer_version,
+                byte_len: descriptor.byte_len,
+                // EditorEngine has no read-only buffer policy: both Normal and
+                // Degraded buffers accept editor transactions. Workspace trust,
+                // file permissions and save preconditions govern disk writes,
+                // not editing the in-memory buffer (apply_edits_with_caret_policy).
+                editable: true,
+                coverage,
+                primary_selection,
+            }),
             workspace_id: active.workspace_id(),
             buffer_id: Some(buffer_id),
             file_id: active.active_file_id,

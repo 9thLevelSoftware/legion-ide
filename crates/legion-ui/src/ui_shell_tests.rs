@@ -739,6 +739,7 @@ fn shell_parses_commands_into_dispatch_intents_without_editor_ownership() {
             selection: None,
         },
         active_buffer_projection: ActiveBufferProjection {
+            accessibility: None,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
             file_id: Some(FileId(9)),
@@ -1042,6 +1043,7 @@ fn shell_snapshot_large_file_projection_carries_only_viewport_slices() {
             selection: None,
         },
         active_buffer_projection: ActiveBufferProjection {
+            accessibility: None,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
             file_id: Some(FileId(9)),
@@ -1123,6 +1125,7 @@ fn shell_proposal_intents_do_not_mutate_editor_or_workspace_projection() {
             selection: None,
         },
         active_buffer_projection: ActiveBufferProjection {
+            accessibility: None,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
             file_id: Some(FileId(9)),
@@ -1198,6 +1201,7 @@ fn control_trust_command_intents_remain_projection_only() {
             selection: None,
         },
         active_buffer_projection: ActiveBufferProjection {
+            accessibility: None,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
             file_id: Some(FileId(9)),

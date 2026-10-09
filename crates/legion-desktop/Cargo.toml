@@ -39,8 +39,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 zeroize = "1"
+unicode-segmentation = { workspace = true }
 
 [dev-dependencies]
+accesskit_consumer = "0.36"
 legion-agent = { workspace = true }
 legion-debug = { workspace = true }
 legion-sandbox = { workspace = true }

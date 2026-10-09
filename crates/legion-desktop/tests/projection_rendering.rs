@@ -215,6 +215,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
     };
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -428,6 +429,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Degraded").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -500,6 +502,7 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Streaming").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(7)),
@@ -561,6 +564,7 @@ fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Highlighted").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -655,6 +659,7 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Assist").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -728,6 +733,7 @@ enum UiStateMatrixExpectation {
 
 fn state_matrix_active_buffer(snapshot: &mut legion_ui::ShellProjectionSnapshot, dirty: bool) {
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),

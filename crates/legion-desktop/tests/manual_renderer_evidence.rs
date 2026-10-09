@@ -111,6 +111,7 @@ fn deterministic_renderer_evidence_covers_core_editor_states() {
     ] {
         let mut active_snapshot = Shell::empty("Evidence Active").projection_snapshot();
         active_snapshot.active_buffer_projection = ActiveBufferProjection {
+            accessibility: None,
             state: ActiveBufferProjectionState::Full,
             workspace_id: Some(WorkspaceId(1)),
             buffer_id: Some(BufferId(2)),
