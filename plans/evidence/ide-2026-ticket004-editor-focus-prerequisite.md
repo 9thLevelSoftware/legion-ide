@@ -108,3 +108,47 @@ Candidate r3 and its failures remain preserved. The r4 plan is outside the
 checkout at `D:/legion-ide-2026-notes/ticket004-candidate-r4-plan.md`. Native
 typing/save, scenario recovery, full/CJK input, large-document accessibility,
 other platforms, human pilots and signing remain separate gates.
+
+## R4 native follow-up during parallel execution
+
+The frozen r4 candidate at `fb9982f01562be9121b6d0d578792b9be8789948`
+passed unsigned MSI 0.0.4 checksum, metadata, version, extraction and Manual
+headless smoke validation (`result = "passed"`, `smoke_exit = 0`). The package
+receipt is `D:/legion-ide-2026-candidate-r4/target/native-package/output/VALIDATION-SUMMARY.toml`.
+The staged executable SHA-256 is
+`5eea9adedf8444e8b4c2030d828487ec391bd01b420a7cb9075537ab5ee8d0db`.
+These are packaging checks, not native editing acceptance.
+
+A fresh external session in `D:/legion-ide-2026-notes/ticket004-native-r4-wave1/`
+was used with the unchanged reference checkout. Computer Use selected and
+activated the exact returned r4 window, opened the real Explorer drawer, selected
+README, closed the drawer and clicked the editor. The process was PID 65804,
+HWND `0x19163e` (Computer Use window 1644094). No human attendance is inferred.
+
+The pinned read-only oracle helper (SHA-256
+`9efa98980ca34bddf0fd37282965de97972fbc63195fad9a9f840cb56ec82395`)
+confirmed exact foreground, complete baseline text, Clean tab and an exact
+in-client editor hit. However, native `GetFocusedElement` still returned the
+window root; the document reported both `HasKeyboardFocus = false` and
+`IsKeyboardFocusable = false`. This occurred after both an indexed editor click
+and a separate screenshot-coordinate canvas click. The two distinct observations
+are retained as `editor-focus.log` and `editor-coordinate-focus.log` in that
+external evidence directory. The Computer Use focus label is not substituted for
+these Windows UIA properties. The strict journey guard was not weakened and no
+typing/save journey was attempted.
+
+The additional renderer regression
+`compact_drawer_open_close_then_canvas_click_retains_document_focus` reproduces
+the 960-by-720 compact layout and drawer sequence at the existing full-frame
+test seam. It passed on its first run, including three idle frames. Thus the
+compact renderer test does not reproduce the native discrepancy; it is additional
+component coverage, not a demonstrated repair. No runtime code was changed.
+
+```text
+cargo test -p legion-desktop --test editor_keyboard_focus compact_drawer_open_close_then_canvas_click_retains_document_focus --target-dir D:/legion-ide-2026-tools/qualification-target -j 2
+```
+
+The user stopped Computer Use with Escape during a subsequent evidence snapshot.
+No further desktop input was issued, and the diagnostic window may remain open.
+Ticket 04 remains unaccepted. The renderer-to-native focus discrepancy requires
+further diagnosis; the independent save/provider/MCP implementation lanes continue.

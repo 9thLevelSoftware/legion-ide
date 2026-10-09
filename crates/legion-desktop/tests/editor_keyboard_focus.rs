@@ -406,3 +406,57 @@ fn real_explorer_open_then_editor_click_publishes_document_focus_and_routes_typi
         "typing remains editor-owned until save"
     );
 }
+
+#[test]
+fn compact_drawer_open_close_then_canvas_click_retains_document_focus() {
+    fn compact_frame(app: &mut DesktopEframeApp, events: Vec<egui::Event>) -> egui::FullOutput {
+        let mut input = frame(events);
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(960.0, 720.0),
+        ));
+        app.run_headless_full_frame(input)
+    }
+    fn compact_click(app: &mut DesktopEframeApp, pos: egui::Pos2) -> egui::FullOutput {
+        compact_frame(app, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            compact_frame(
+                app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        compact_frame(app, vec![])
+    }
+    let workspace = tempfile::tempdir().unwrap();
+    let path = workspace.path().join("note.txt");
+    std::fs::write(&path, "seed\nsecond").unwrap();
+    let runtime = DesktopRuntime::open(DesktopLaunchConfig::new(
+        workspace.path().to_path_buf(),
+        None,
+    ))
+    .unwrap();
+    let mut app = DesktopEframeApp::new(runtime);
+    let bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 720.0));
+    let initial = compact_frame(&mut app, vec![]);
+    let toggle = labelled_rect(&initial, "Explorer drawer", bounds);
+    let drawer = compact_click(&mut app, toggle.center());
+    let file = labelled_rect(&drawer, "note.txt", bounds);
+    let opened = compact_click(&mut app, file.center());
+    let close = labelled_rect(&opened, "Close Explorer drawer", bounds);
+    let closed = compact_click(&mut app, close.center());
+    let (id, rect) = document(&closed);
+    let focused = compact_click(&mut app, rect.center());
+    assert_editor_focus(&focused, id);
+    for _ in 0..3 {
+        let idle = compact_frame(&mut app, vec![]);
+        assert_editor_focus(&idle, id);
+    }
+}
