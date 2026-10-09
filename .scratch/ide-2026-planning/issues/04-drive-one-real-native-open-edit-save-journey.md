@@ -32,6 +32,10 @@ Status: needs-info
 
 ## Comments
 
+- 2026-10-09: Euclid navigation delta PASS; coordinator confirmed compiled hash400d068d and authorized partial commit/clean same-base1f647cc integration merge. User availability pending, no launch. Reviewed binary will be archived under the resulting commit ID without overwriting existing files. Ticket04 remains needs-info; no acceptance promotion or repeated successful checks.
+
+- 2026-10-09: New bounded navigation slice after coordinator's read-only stable compact UIA tree (29 elements/27 names, Explorer drawer present, README absent). Merged integration1f647cc preserving ticket088. Driver now prefers a unique visible exact target, otherwise clicks the unique real Explorer drawer via guarded atomic UIA-bounds pointer and waits up to3 seconds for the target; missing/ambiguous results block. Two focused recorded-tree/no-input regressions red→green; build passed. Post-click behavior remains simulated test evidence, not a native observation. Five-file delta awaits independent review; no native run until coordinator announces availability, no commit. Status needs-info unchanged.
+
 - 2026-10-09: Final independent review PASS, no blockers, including session access delta and documentation. Coordinator authorized partial commit/integration; status remains needs-info and latest Explorer UIA blocker unchanged. No acceptance promotion.
 
 - 2026-10-09: Final COM-fixed actual attempt passed main-window/focus/COM then blocked before input: exact Explorer README.md UIA label found 0, driver report exit 3 versus outer PowerShell exit 1. Clone clean. After two supported driver repairs, new UIA/product blocker escalated; all native attempts stopped. Widget-tree investigation deferred to next bounded slice. Merged integration 77166f7 ff-only preserving WIP; partial deliverable awaits session delta/final doc review before commit. Status needs-info; no workflow/input/full-scenario acceptance.

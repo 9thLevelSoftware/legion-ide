@@ -228,11 +228,21 @@ fn observe(
         let oracle = observe::UiaOracle::open().map_err(blocked)?;
         let root = oracle.element_from_window(window).map_err(blocked)?;
         let filename = target.file_name().unwrap().to_string_lossy();
-        let file = oracle.named_element(&root, &filename).map_err(blocked)?;
-        let rect = oracle.bounding_rectangle(&file).map_err(blocked)?;
-        guarded_input(window, || {
-            inject::click_at((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
-        })?;
+        let navigation_started = std::time::Instant::now();
+        let file = observe::navigate_explorer_target(
+            &filename,
+            || oracle.explorer_navigation_elements(&root, &filename),
+            |drawer| {
+                let (x, y) = oracle.clickable_center(&drawer)?;
+                guarded_input(window, || inject::click_at(x, y)).map_err(|(_, error)| error)?;
+                notes.push("Explorer drawer clicked once through guarded atomic OS pointer; waiting up to 3 seconds for exact visible target".into());
+                Ok(())
+            },
+            || navigation_started.elapsed(),
+            || thread::sleep(Duration::from_millis(100)),
+        ).map_err(blocked)?;
+        let (x, y) = oracle.clickable_center(&file).map_err(blocked)?;
+        guarded_input(window, || inject::click_at(x, y))?;
         thread::sleep(Duration::from_millis(900));
         notes.push("Explorer file selected through OS pointer".into());
         let names = oracle.names(&root).map_err(blocked)?;

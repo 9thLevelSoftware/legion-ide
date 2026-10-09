@@ -22,6 +22,52 @@
 
 use std::path::Path;
 
+/// External navigation seam: prefer the visible exact file, otherwise click the
+/// unique compact Explorer drawer once and wait at most three seconds. Callers
+/// supply visible UIA elements and a foreground-guarded OS pointer operation.
+pub fn navigate_explorer_target<T>(
+    target: &str,
+    mut visible_elements: impl FnMut() -> Result<Vec<(String, T)>, String>,
+    mut click_drawer: impl FnMut(T) -> Result<(), String>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut pause: impl FnMut(),
+) -> Result<T, String> {
+    fn unique_index<T>(elements: &[(String, T)], name: &str) -> Result<Option<usize>, String> {
+        let matches: Vec<_> = elements
+            .iter()
+            .enumerate()
+            .filter(|(_, (label, _))| label == name)
+            .map(|(index, _)| index)
+            .collect();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [index] => Ok(Some(*index)),
+            _ => Err(format!(
+                "Explorer label {name:?} must identify exactly one visible element; found {}",
+                matches.len()
+            )),
+        }
+    }
+    let mut elements = visible_elements()?;
+    if let Some(index) = unique_index(&elements, target)? {
+        return Ok(elements.swap_remove(index).1);
+    }
+    let drawer = unique_index(&elements, "Explorer drawer")?
+        .ok_or_else(|| format!("Explorer target {target:?} absent and unique visible Explorer drawer unavailable; no navigation input sent"))?;
+    click_drawer(elements.swap_remove(drawer).1)?;
+    let deadline = elapsed() + std::time::Duration::from_secs(3);
+    while elapsed() < deadline {
+        let mut elements = visible_elements()?;
+        if let Some(index) = unique_index(&elements, target)? {
+            return Ok(elements.swap_remove(index).1);
+        }
+        pause();
+    }
+    Err(format!(
+        "timed out after Explorer drawer click waiting for unique visible target {target:?}; no target input sent"
+    ))
+}
+
 /// External top-level window metadata, with no product-side hooks.
 #[derive(Clone, Debug)]
 pub struct ProductWindowCandidate {
@@ -379,25 +425,48 @@ impl UiaOracle {
             .collect()
     }
 
-    /// Locate an exact accessible file label before a tab has been opened.
-    pub fn named_element(
+    /// Read visible exact target/drawer labels in one external UIA snapshot.
+    /// Property-read failures block navigation rather than fabricating absence.
+    pub fn explorer_navigation_elements(
         &self,
         root: &IUIAutomationElement,
         name: &str,
-    ) -> Result<IUIAutomationElement, String> {
+    ) -> Result<Vec<(String, IUIAutomationElement)>, String> {
         let mut matches = Vec::new();
         for element in self.subtree(root)? {
-            if unsafe { element.CurrentName() }.is_ok_and(|value| value.to_string() == name) {
-                matches.push(element);
+            let label = unsafe { element.CurrentName() }
+                .map_err(|error| error.to_string())?
+                .to_string();
+            if (label == name || label == "Explorer drawer")
+                && !unsafe { element.CurrentIsOffscreen() }
+                    .map_err(|error| error.to_string())?
+                    .as_bool()
+            {
+                matches.push((label, element));
             }
         }
-        if matches.len() != 1 {
-            return Err(format!(
-                "Explorer label {name:?} must identify exactly one accessible element; found {}",
-                matches.len()
-            ));
+        Ok(matches)
+    }
+
+    /// Current visible/enabled UIA bounds are the sole source of click coordinates.
+    pub fn clickable_center(&self, element: &IUIAutomationElement) -> Result<(i32, i32), String> {
+        if unsafe { element.CurrentIsOffscreen() }
+            .map_err(|error| error.to_string())?
+            .as_bool()
+            || !unsafe { element.CurrentIsEnabled() }
+                .map_err(|error| error.to_string())?
+                .as_bool()
+        {
+            return Err("UIA navigation element is offscreen or disabled; no input sent".into());
         }
-        Ok(matches.remove(0))
+        let rect = self.bounding_rectangle(element)?;
+        if rect.right <= rect.left || rect.bottom <= rect.top {
+            return Err("UIA navigation element has no positive bounds; no input sent".into());
+        }
+        Ok((
+            ((i64::from(rect.left) + i64::from(rect.right)) / 2) as i32,
+            ((i64::from(rect.top) + i64::from(rect.bottom)) / 2) as i32,
+        ))
     }
     /// Initialise COM for this thread and create the UI Automation client.
     pub fn open() -> Result<Self, String> {

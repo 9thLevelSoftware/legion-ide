@@ -2,8 +2,9 @@
 
 Date: 2026-10-09. Worker: `codex/ide-2026-ticket-004`, base f8b375a.
 Status: incomplete, blocked by zero matching Explorer README.md UIA elements
-before input. Partial driver deliverable independently reviewed PASS; ticket04
-remains needs-info. No canonical acceptance promotion.
+before input. Earlier partial driver deliverable independently reviewed PASS;
+the bounded compact-Explorer navigation delta below awaits review and a separately
+coordinated native run. Ticket04 remains needs-info. No acceptance promotion.
 
 The scope is one real open/edit/save journey. It is distinct from full
 SC-MANUAL-OPEN-TYPE-SAVE qualification, six-class COMP-PLAT-002 conformance and the
@@ -306,3 +307,59 @@ unaccepted. No canonical acceptance promotion, push, cleanup or further launch.
 Final independent review PASS with no blocking findings, relayed by coordinator
 on 2026-10-09, covers the session access delta and final documentation. Coordinator
 authorized the partial commit and clean same-base ff-only integration merge.
+
+## Compact Explorer navigation delta after read-only tree diagnosis
+
+Resumed from the clean ticket004 branch and merged integration
+1f647cc589779e4ee4b42707c3f9f3034bf1caa0 ff-only; ticket088 worktree preserved.
+Coordinator supplied read-only UIA evidence at
+`D:/legion-ide-2026-notes/ticket004-uia-observer/reports/uia-observation-1791522205266947100.jsonl`:
+60 samples over approximately 15 seconds, stable 29 elements/27 named elements,
+zero exact README.md matches, with `Explorer drawer`, `Bottom panel drawer`,
+TERMINAL/PROBLEMS and no file entries. This observation injected no input; clone
+remained clean. Product source render_compact_drawer_strip in view.rs confirms a
+real `Explorer drawer` button toggles the compact layout. No startup tree change
+was observed. This supports a missing navigation step, not a new product acceptance
+result or a claim that the prior zero-match report was false.
+
+Driver-only change: first use a unique exact visible target without toggling any
+drawer. If absent, require exactly one visible `Explorer drawer`, read its current
+enabled/visible positive UIA bounds, and click once using the existing guarded
+atomic OS pointer batch. Poll the external tree every 100 ms for at most three
+seconds after that click; require a unique exact visible target. Missing controls,
+ambiguity, UIA property failures and timeout block further navigation. Re-read
+current target bounds before its guarded click. No arbitrary coordinates, scroll,
+directory traversal, direct dispatch, --file shortcut or product change added.
+All later exact-document, dirty/save, disk/Git and per-input foreground guards stay
+unchanged. A drawer click is input and is recorded if it occurs; no such click has
+been performed in this slice.
+
+Focused checks planned before edits at the existing external driver seam:
+
+- `cargo test -p legion-input-driver --test driver_contract explorer_navigation_ --target-dir D:/legion-ide-2026-tools/native-input-target`: red on missing navigation API, then green on the affected rerun, 2 passed/23 filtered. Recorded-tree regression verifies one drawer click, bounded polling and visible-target preference. Negative regression covers missing/ambiguous exact labels, focus-loss no-send, post-click ambiguity and timeout without another click. These use recorded/modelled trees and input stubs; post-click target appearance is not an observed native result.
+- `cargo build -p legion-input-driver --target-dir D:/legion-ide-2026-tools/native-input-target`: passed once after the source delta. No previously successful runtime checks repeated.
+- Changed Rust formatting and `git diff --check` are the final source/doc checks; no broad gates or new qualification run.
+
+New debug driver SHA256:
+400d068d7e87cd78d0c3e3101b50d2056d55027506bc6ee4e5e3d08cfba7fadb,
+at D:/legion-ide-2026-tools/native-input-target/debug/legion-input-driver.exe;
+source is integration1f647cc plus this uncommitted navigation patch.
+Coordinator archived the prior177caa5 binary as
+D:/legion-ide-2026-tools/legion-input-driver-177caa5-adb9111c.exe, SHA256
+adb9111c841bdb0cb2a6d48d12e90f2e48a787bba9e2c2b6bd344e43c6eb6a75.
+Identity note: D:/legion-ide-2026-notes/ticket004-final-driver-identity.md.
+That old hash was measured after the final COM-fixed run, not embedded in earlier
+reports; do not attribute it to earlier driver revisions.
+
+Review scope: journey.rs, observe.rs, driver_contract.rs, this evidence and issue04.
+Build/source ready; independent delta review and coordinator-announced user
+availability are required before the next native run. No commit or OS run in this
+slice; ticket04 remains needs-info with no full scenario/input/pilot qualification.
+
+Euclid independent navigation delta review PASS, relayed by coordinator on
+2026-10-09: exact visible unique labels, current enabled positive bounds, guarded
+atomic clicks, single drawer toggle/three-second deadline and fail-closed missing,
+ambiguous or unreadable observations. Compiled binary hash400d068d above confirmed.
+Coordinator authorized partial commit and clean same-base1f647cc ff-only merge.
+User availability remains pending; no attended launch authorized yet. Earlier
+successful checks were not repeated. Ticket04 remains needs-info.

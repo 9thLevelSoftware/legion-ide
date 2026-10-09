@@ -16,6 +16,141 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[test]
+fn explorer_navigation_reveals_recorded_compact_tree_once_and_prefers_visible_target() {
+    use std::{cell::Cell, time::Duration};
+    // Names from the coordinator's read-only 29-element packaged-window sample.
+    let recorded = [
+        "Legion IDE",
+        "",
+        "System",
+        "System",
+        "Minimize",
+        "Maximize",
+        "Close",
+        "Legion",
+        "Manual",
+        "Assist",
+        "Delegate",
+        "Legion Workflows",
+        "Command",
+        "",
+        "Manual",
+        "Explorer drawer",
+        "Bottom panel drawer",
+        "TERMINAL",
+        "PROBLEMS (0)",
+        "ACTIVITY",
+        "DIAGNOSTICS",
+        "Terminal / Runtime",
+        "disabled",
+        "Terminal workflow disabled",
+        "Open terminal",
+        "No terminal activity",
+        "<no open tabs>",
+        "<none>",
+        "<no active buffer>",
+    ];
+    let polls = Cell::new(0);
+    let mut clicked = Vec::new();
+    let target = observe::navigate_explorer_target(
+        "README.md",
+        || {
+            let mut tree: Vec<_> = recorded
+                .iter()
+                .map(|name| (name.to_string(), *name))
+                .collect();
+            if polls.get() >= 2 {
+                tree.push(("README.md".into(), "file"));
+            }
+            Ok(tree)
+        },
+        |element| {
+            clicked.push(element);
+            Ok(())
+        },
+        || Duration::from_millis(polls.get() * 100),
+        || polls.set(polls.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(target, "file");
+    assert_eq!(clicked, ["Explorer drawer"]);
+    assert_eq!(polls.get(), 2);
+    let visible = observe::navigate_explorer_target(
+        "README.md",
+        || {
+            Ok(vec![
+                ("README.md".into(), "file"),
+                ("Explorer drawer".into(), "drawer"),
+            ])
+        },
+        |_| panic!("already visible target must not toggle the drawer"),
+        || Duration::ZERO,
+        || panic!("already visible target must not wait"),
+    )
+    .unwrap();
+    assert_eq!(visible, "file");
+}
+
+#[test]
+fn explorer_navigation_blocks_ambiguity_missing_controls_focus_loss_and_timeout() {
+    use std::{cell::Cell, time::Duration};
+    for names in [
+        vec![],
+        vec!["README.md", "README.md", "Explorer drawer"],
+        vec!["Explorer drawer", "Explorer drawer"],
+        vec!["README.md.backup"],
+    ] {
+        let result = observe::navigate_explorer_target(
+            "README.md",
+            || Ok(names.iter().map(|name| (name.to_string(), *name)).collect()),
+            |_| panic!("ambiguous or missing exact controls must send no input"),
+            || Duration::ZERO,
+            || panic!("invalid initial tree must not wait"),
+        );
+        assert!(result.is_err(), "{names:?}");
+    }
+    let lost = observe::navigate_explorer_target(
+        "README.md",
+        || Ok(vec![("Explorer drawer".into(), "drawer")]),
+        |_| focus::guarded_batch(42, 99, || panic!("focus loss must send no input")),
+        || Duration::ZERO,
+        || panic!("focus loss must stop immediately"),
+    );
+    assert!(lost.unwrap_err().contains("foreground"));
+    let seconds = Cell::new(0);
+    let clicks = Cell::new(0);
+    let timeout = observe::navigate_explorer_target(
+        "README.md",
+        || Ok(vec![("Explorer drawer".into(), "drawer")]),
+        |_| {
+            clicks.set(clicks.get() + 1);
+            Ok(())
+        },
+        || Duration::from_secs(seconds.get()),
+        || seconds.set(seconds.get() + 1),
+    );
+    assert!(timeout.unwrap_err().contains("timed out"));
+    assert_eq!(seconds.get(), 3);
+    assert_eq!(clicks.get(), 1);
+    let reads = Cell::new(0);
+    let ambiguous_after = observe::navigate_explorer_target(
+        "README.md",
+        || {
+            reads.set(reads.get() + 1);
+            Ok(if reads.get() == 1 {
+                vec![("Explorer drawer".into(), "drawer")]
+            } else {
+                vec![("README.md".into(), "a"), ("README.md".into(), "b")]
+            })
+        },
+        |_| Ok(()),
+        || Duration::ZERO,
+        || panic!("new ambiguity must block immediately"),
+    );
+    assert!(ambiguous_after.unwrap_err().contains("found 2"));
+}
+
 #[path = "../src/focus.rs"]
 mod focus;
 
