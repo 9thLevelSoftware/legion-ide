@@ -8,7 +8,7 @@
 
 use std::{thread, time::Duration};
 
-use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GetLastError, HANDLE, HGLOBAL, SetLastError, WIN32_ERROR};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -43,10 +43,16 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
         .map_err(|_| "INPUT is larger than SendInput can describe".to_string())?;
     // SAFETY: `inputs` is a live slice of fully initialised `INPUT` values and
     // `size` is the size of that type.
-    let sent = unsafe { SendInput(inputs, size) };
+    let (sent, last_error) = unsafe {
+        // Capture the diagnostic immediately: later Win32 calls can replace it.
+        // A zero code does not rule out UIPI or another input restriction.
+        SetLastError(WIN32_ERROR(0));
+        let sent = SendInput(inputs, size);
+        (sent, GetLastError().0)
+    };
     if sent as usize != inputs.len() {
         return Err(format!(
-            "SendInput accepted {sent} of {} events; the input desktop rejected the rest",
+            "SendInput accepted {sent} of {} events; win32_last_error={last_error}; input_struct_bytes={size}; cause undetermined (UIPI is not identified by this error code)",
             inputs.len()
         ));
     }

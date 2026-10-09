@@ -224,9 +224,14 @@ fn observe(
                 "product cannot be foregrounded; no input injected".into(),
             ));
         }
+        notes.push(
+            "exact_product_foreground_observed=true; per-input foreground guards remain required"
+                .into(),
+        );
         thread::sleep(Duration::from_millis(500));
         let oracle = observe::UiaOracle::open().map_err(blocked)?;
         let root = oracle.element_from_window(window).map_err(blocked)?;
+        notes.push("uia_bootstrap_and_product_root_observed=true".into());
         let filename = target.file_name().unwrap().to_string_lossy();
         let navigation_started = std::time::Instant::now();
         let file = observe::navigate_explorer_target(
