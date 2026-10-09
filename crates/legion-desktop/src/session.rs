@@ -98,6 +98,23 @@ impl DesktopSessionStore {
 }
 
 fn validate_record(record: &WorkspaceSessionRecord) -> Result<(), DesktopSessionError> {
+    if let Some(json) = &record.workbench_settings.named_mcp_peer_configuration_json {
+        #[cfg(feature = "ai")]
+        legion_app::AppComposition::validate_named_mcp_peer_configuration_json(json).map_err(
+            |_| {
+                DesktopSessionError::InvalidRecord(
+                    "invalid named MCP configuration metadata".into(),
+                )
+            },
+        )?;
+        #[cfg(not(feature = "ai"))]
+        {
+            let _ = json;
+            return Err(DesktopSessionError::InvalidRecord(
+                "named MCP configuration unavailable in this build".into(),
+            ));
+        }
+    }
     if record.schema_version == 0 {
         return Err(DesktopSessionError::InvalidRecord(
             "schema_version must be non-zero".to_string(),
@@ -107,6 +124,17 @@ fn validate_record(record: &WorkspaceSessionRecord) -> Result<(), DesktopSession
         return Err(DesktopSessionError::InvalidRecord(
             "session_id must be non-empty".to_string(),
         ));
+    }
+    if let Some(json) = record
+        .workbench_settings
+        .ai_provider_configuration_json
+        .as_deref()
+    {
+        legion_app::AppComposition::validate_ai_provider_configuration_json(json).map_err(
+            |_| {
+                DesktopSessionError::InvalidRecord("invalid provider configuration metadata".into())
+            },
+        )?;
     }
     Ok(())
 }

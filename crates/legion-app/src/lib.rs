@@ -35,6 +35,9 @@ mod assist_proposal;
 mod git_inspection;
 mod hot_exit;
 mod lsp_interaction;
+/// App-owned named MCP configuration, activation and local revocation.
+#[cfg(feature = "ai")]
+pub mod named_mcp_peer;
 use acp_host::AcpHostCommand;
 #[cfg(feature = "ai")]
 use acp_host::run_acp_host_proposal;
@@ -78,11 +81,15 @@ use local_ai_diagnosis::resolve_anthropic_api_key;
 mod product_ai_completion;
 mod product_ai_lane;
 mod product_ai_policy;
+mod provider_configuration;
 use delegate_workflow::*;
 use phase4_trust::*;
 use product_ai_completion::*;
 use product_ai_lane::*;
 use product_ai_policy::*;
+pub use provider_configuration::{
+    AiProviderConnectionState, AiProviderProfile, AiProviderProfileProjection,
+};
 
 /// Where a product AI chat turn's bytes actually go, and what the audit says.
 pub mod ai_route_descriptor;
@@ -1940,22 +1947,12 @@ struct ProductChatCompletion {
 }
 
 /// Selected live backend for product composition (policy + routing metadata).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 enum ProductAiLiveBackend {
     Ollama,
     LlamaCpp,
     Anthropic,
-}
-
-/// The backend a preference resolves to.
-///
-/// Discards the credential state, so a caller that will need to explain a
-/// fallback should use [`product_ai_selection`] instead.
-#[cfg(feature = "ai")]
-fn product_ai_selected_live_backend(
-    preference: ProductAiProviderPreference,
-) -> Option<ProductAiLiveBackend> {
-    product_ai_selection(preference).0
+    Configured(Arc<provider_configuration::ConfiguredProvider>),
 }
 
 /// The backend a preference resolves to, and what looking for a key found.
@@ -2025,13 +2022,6 @@ fn product_ai_selected_live_backend_inner(
     }
 }
 
-#[cfg(not(feature = "ai"))]
-fn product_ai_selected_live_backend(
-    _preference: ProductAiProviderPreference,
-) -> Option<ProductAiLiveBackend> {
-    None
-}
-
 /// Without the provider there is no selection and no credential to look for.
 #[cfg(not(feature = "ai"))]
 fn product_ai_selection(
@@ -2047,6 +2037,15 @@ fn product_ai_selection(
 fn product_ai_security_policy(backend: Option<ProductAiLiveBackend>) -> SecurityPolicy {
     let mut policy = SecurityPolicy::default();
     match backend {
+        Some(ProductAiLiveBackend::Configured(config)) => {
+            let target = config.profile.target();
+            let local = config.profile.local();
+            policy.network_policy.air_gap = local;
+            policy.network_policy.local_provider_only = local;
+            policy.network_policy.allowlist = vec![target.host];
+            policy.ai_provider_policy.allow_local_provider = true;
+            policy.ai_provider_policy.allow_remote_provider = !local;
+        }
         Some(ProductAiLiveBackend::Ollama) => {
             policy.network_policy.local_provider_only = true;
             policy.network_policy.air_gap = true;
@@ -2131,6 +2130,30 @@ fn product_ai_route_fields(
     legion_protocol::ProposalPrivacyLabel,
 ) {
     match backend {
+        Some(ProductAiLiveBackend::Configured(config)) => (
+            config.profile.provider_id.clone(),
+            config.profile.model.clone(),
+            if config.profile.local() {
+                AssistedAiProviderClass::LocalLoopback
+            } else {
+                AssistedAiProviderClass::ByokRemote
+            },
+            Some(config.profile.target()),
+            vec!["profile.explicit".into()],
+            vec![
+                if config.profile.local() {
+                    "local.cost.unknown"
+                } else {
+                    "remote.metered"
+                }
+                .into(),
+            ],
+            if config.profile.local() {
+                legion_protocol::ProposalPrivacyLabel::WorkspaceMetadata
+            } else {
+                legion_protocol::ProposalPrivacyLabel::ExternalEgressMetadata
+            },
+        ),
         Some(ProductAiLiveBackend::Ollama) => (
             "ollama".to_string(),
             ollama_model_label_offline_safe(),
@@ -2259,7 +2282,7 @@ No markdown fences, no quotes, no explanation. Prefer a single line. Max ~{max_b
     // destination through the broker, and a second resolution can answer
     // differently and send the excerpt somewhere never approved.
     let completion = complete_product_chat(
-        backend,
+        backend.clone(),
         &system,
         &user,
         INLINE_PREDICTION_COMPLETION_MAX_TOKENS,
@@ -6395,6 +6418,17 @@ impl ActiveDocumentController {
     }
 
     fn bind_opened_file(&mut self, opened: &OpenedFileText, buffer_id: BufferId) {
+        if self.open_tabs.contains(&buffer_id)
+            && let Some(metadata) = self.metadata_for_buffer(buffer_id).cloned()
+        {
+            // Reopening activates the retained editor text; it does not reload it.
+            // Keep that text's save baseline, even for a currently clean buffer:
+            // adopting freshly read disk metadata would authorize a later save
+            // to overwrite external changes the buffer has never incorporated.
+            self.activate_metadata(buffer_id, &metadata);
+            self.close_dirty_prompt = None;
+            return;
+        }
         let identity = opened.identity.clone();
         let metadata = ActiveFileMetadata {
             identity: identity.clone(),
@@ -11644,8 +11678,42 @@ impl ProjectionBuilder {
             .is_some_and(|vp| vp.large_file_status.is_some());
 
         let dirty = editor.is_dirty(buffer_id)?;
+        let descriptor = editor.current_snapshot(buffer_id)?;
+        let primary_selection = editor
+            .directed_carets(buffer_id)?
+            .first()
+            .map(|caret| {
+                Ok::<_, EditorError>(legion_ui::ui::EditorAccessibilitySelection {
+                    anchor_byte: editor
+                        .buffer_byte_offset(buffer_id, caret.anchor.unwrap_or(caret.head))?,
+                    focus_byte: editor.buffer_byte_offset(buffer_id, caret.head)?,
+                })
+            })
+            .transpose()?;
+        let coverage = if degraded {
+            legion_ui::ui::EditorAccessibilityCoverage::Degraded
+        } else if active_text.is_none() {
+            legion_ui::ui::EditorAccessibilityCoverage::PreviewUnavailable
+        } else if descriptor.byte_len > legion_ui::ui::EDITOR_ACCESSIBILITY_MAX_TEXT_BYTES {
+            legion_ui::ui::EditorAccessibilityCoverage::TextBudgetExceeded
+        } else {
+            legion_ui::ui::EditorAccessibilityCoverage::CompleteSmallBuffer
+        };
 
         Ok(ActiveBufferProjection {
+            accessibility: Some(legion_ui::ui::EditorAccessibilityProjection {
+                buffer_id,
+                snapshot_id: descriptor.snapshot_id,
+                buffer_version: descriptor.buffer_version,
+                byte_len: descriptor.byte_len,
+                // EditorEngine has no read-only buffer policy: both Normal and
+                // Degraded buffers accept editor transactions. Workspace trust,
+                // file permissions and save preconditions govern disk writes,
+                // not editing the in-memory buffer (apply_edits_with_caret_policy).
+                editable: true,
+                coverage,
+                primary_selection,
+            }),
             workspace_id: active.workspace_id(),
             buffer_id: Some(buffer_id),
             file_id: active.active_file_id,
@@ -11885,6 +11953,8 @@ fn workbench_settings_record_from_projection(
         next_edit_prediction_enabled: settings.next_edit_prediction_enabled,
         telemetry: settings.telemetry.clone(),
         terminal_shell_selection: settings.terminal_shell_selection.clone(),
+        ai_provider_configuration_json: None,
+        named_mcp_peer_configuration_json: None,
         schema_version: settings.schema_version,
     }
 }
@@ -13277,6 +13347,7 @@ struct AssistInlinePredictionState {
     active_request_id: Option<InlinePredictionRequestId>,
     results: Vec<InlinePredictionResult>,
     requests: HashMap<InlinePredictionRequestId, InlinePredictionRequestMetadata>,
+    provider_revisions: HashMap<InlinePredictionRequestId, uuid::Uuid>,
     request_in_flight: bool,
 }
 
@@ -13295,6 +13366,8 @@ impl AssistInlinePredictionState {
         });
         self.requests
             .retain(|_, request| request.buffer_id != buffer_id);
+        self.provider_revisions
+            .retain(|id, _| self.requests.contains_key(id));
     }
 
     fn retain_bounded_history(&mut self) {
@@ -13308,6 +13381,8 @@ impl AssistInlinePredictionState {
                 .collect();
             self.requests
                 .retain(|request_id, _| !removed.contains(request_id));
+            self.provider_revisions
+                .retain(|id, _| !removed.contains(id));
         }
     }
 }
@@ -14650,8 +14725,15 @@ pub struct AppComposition {
     proposal_coordinator: AppProposalCoordinator,
     active_documents: ActiveDocumentController,
     product_mode: AppProductMode,
-    /// Preferred product AI route for Assist / Delegate composition (local-first Auto).
+    /// Legacy preference; Auto requires an explicit named product route.
     preferred_ai_provider: ProductAiProviderPreference,
+    ai_provider_configuration: provider_configuration::AiProviderConfiguration,
+    provider_secret_store: Arc<dyn legion_storage::SecretStore + Send + Sync>,
+    ai_profile_health: Arc<Mutex<HashMap<String, String>>>,
+    provider_connection_checks: provider_configuration::ProviderConnectionChecks,
+    named_provider_snapshots: Arc<std::sync::atomic::AtomicUsize>,
+    /// App-owned authorization revision, independent of editor fingerprints.
+    ai_provider_revision: uuid::Uuid,
     /// Last product AI stream (Assist proposal / Delegate chat) for rail projection.
     last_product_ai_stream: Option<ProductAiStreamProjection>,
     /// Live progressive stream sink (updated mid-flight from SSE / background jobs).
@@ -14666,11 +14748,7 @@ pub struct AppComposition {
     pending_inline_prediction_cancelled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// The inline prediction request a worker thread is currently running.
     ///
-    /// Kept so that a worker returning nothing -- an unreachable provider, an
-    /// empty completion -- can still be answered with the deterministic
-    /// prediction, on the app thread, rather than leaving the request with no
-    /// result at all. The synchronous path used to fall through to that fixture
-    /// itself; moving the live call to a worker moved the fallback with it.
+    /// Kept to finish failed requests without substituting a fixture prediction.
     pending_inline_prediction: Option<InlinePredictionRequestMetadata>,
     palette: PaletteState,
     settings: SettingsProjection,
@@ -14744,6 +14822,8 @@ pub struct AppComposition {
     plan_revision_ledger: PlanRevisionLedger,
     automate_workflow: AutomateWorkflowState,
     automate_mcp_tool_runtimes: HashMap<String, Arc<dyn AppAutomateMcpToolRuntime>>,
+    #[cfg(feature = "ai")]
+    named_mcp_peers: HashMap<String, named_mcp_peer::NamedMcpPeer>,
     search_projection: SearchProjection,
     search_worker: crate::search::SearchWorker,
     search_generation: u64,
@@ -15168,6 +15248,12 @@ impl AppComposition {
             active_documents: ActiveDocumentController::new(),
             product_mode: AppProductMode::Manual,
             preferred_ai_provider: ProductAiProviderPreference::from_env(),
+            ai_provider_configuration: Default::default(),
+            provider_secret_store: Arc::new(OsKeyringSecretStore),
+            ai_profile_health: Arc::new(Mutex::new(HashMap::new())),
+            provider_connection_checks: Default::default(),
+            named_provider_snapshots: Default::default(),
+            ai_provider_revision: uuid::Uuid::now_v7(),
             last_product_ai_stream: None,
             live_product_ai_stream: Arc::new(LiveProductAiStreamSink::default()),
             pending_assist_proposal: None,
@@ -15225,6 +15311,8 @@ impl AppComposition {
             plan_revision_ledger: PlanRevisionLedger::new(),
             automate_workflow: AutomateWorkflowState::default(),
             automate_mcp_tool_runtimes: HashMap::new(),
+            #[cfg(feature = "ai")]
+            named_mcp_peers: HashMap::new(),
             search_projection: SearchProjection::idle(),
             search_worker: crate::search::SearchWorker::new(Arc::clone(&workspace)),
             search_generation: 0,
@@ -15791,13 +15879,19 @@ impl AppComposition {
     /// so an unsigned or tampered bundle cannot be installed here.
     pub fn set_org_policy_bundle(&mut self, bundle: legion_security::VerifiedPolicyBundle) {
         self.org_policy_bundle = Some(bundle);
-        // Re-assert the ceiling against the mode already in effect: installing a
-        // bundle that forbids the current mode must lower it, not merely block
-        // future raises.
-        let current = self.product_mode;
-        if self.org_policy_mode_ceiling_denies(current) {
-            self.product_mode = AppProductMode::Manual;
-            self.phase4_projection_state.assisted_ai_projection = None;
+        self.install_mode_policy_ceiling();
+    }
+
+    // New dispatch is denied by the installed ceiling immediately. Reconcile
+    // the visible mode through all live drains, including retired MCP workers.
+    fn install_mode_policy_ceiling(&mut self) {
+        if self.org_policy_mode_ceiling_denies(self.product_mode) {
+            if self.ai_provider_connection_check_in_flight() {
+                self.cancel_provider_connection_check_for_policy();
+            }
+            // The setter also revokes pending MCP gates before checking the
+            // common drain counter and the provider's result-handoff lane.
+            self.set_product_mode(AppProductMode::Manual);
         }
     }
 
@@ -15825,6 +15919,18 @@ impl AppComposition {
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        #[cfg(feature = "ai")]
+        if !mode.allows_assist() {
+            self.request_named_mcp_operation_drain();
+        }
+        if !mode.allows_assist()
+            && self
+                .named_provider_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != 0
+        {
+            return;
+        }
         // Org policy bundle mode ceiling (P9.F2.T3) is checked before any other
         // lane. A ceiling that only applied after the worker/stream checks below
         // would let an above-ceiling mode take effect whenever those lanes
@@ -15882,12 +15988,17 @@ impl AppComposition {
 
     /// Select the product AI route preference (`auto` / `ollama` / `anthropic` / `deterministic`).
     pub fn set_preferred_ai_provider(&mut self, preference: ProductAiProviderPreference) {
+        if self.provider_configuration_busy() {
+            return;
+        }
+        self.ai_provider_configuration.selected = None;
+        self.invalidate_provider_predictions();
         self.preferred_ai_provider = preference;
     }
 
     /// Parse and apply a preferred-provider label (UI / env-compatible).
     pub fn set_preferred_ai_provider_label(&mut self, label: impl AsRef<str>) {
-        self.preferred_ai_provider = ProductAiProviderPreference::parse(label.as_ref());
+        self.set_preferred_ai_provider(ProductAiProviderPreference::parse(label.as_ref()));
     }
 
     /// Last product AI stream projection (Assist / Delegate), if any.
@@ -16019,33 +16130,17 @@ impl AppComposition {
                 self.merge_inline_prediction_result(prediction);
                 changed = true;
             } else if let Some(metadata) = self.pending_inline_prediction.take() {
-                // The worker finished with nothing to show -- an unreachable
-                // provider, or a completion that came back empty. Answer with
-                // the deterministic prediction, here on the app thread, rather
-                // than leaving the request with no result: that is what the
-                // synchronous path did, and losing it would trade a frozen UI
-                // for ghost text that silently stops appearing.
+                // A failed selected route is terminal. Never manufacture a
+                // fixture prediction after an authorized live request fails.
                 let failed_request_id = metadata.request_id.clone();
-                match self.invoke_inline_prediction_provider(metadata) {
-                    Ok(prediction) => {
-                        self.merge_inline_prediction_result(prediction);
-                    }
-                    Err(_error) => {
-                        // Nothing to show and nothing to say. Clearing the flag
-                        // is the part that matters -- leaving it set strands the
-                        // Cancel control with nothing to cancel -- but only for
-                        // the request that actually failed, since a newer one
-                        // may already own this state.
-                        if self
-                            .assist_inline_prediction_state
-                            .active_request_id
-                            .as_ref()
-                            == Some(&failed_request_id)
-                        {
-                            self.assist_inline_prediction_state.request_in_flight = false;
-                            self.assist_inline_prediction_state.active_request_id = None;
-                        }
-                    }
+                if self
+                    .assist_inline_prediction_state
+                    .active_request_id
+                    .as_ref()
+                    == Some(&failed_request_id)
+                {
+                    self.assist_inline_prediction_state.request_in_flight = false;
+                    self.assist_inline_prediction_state.active_request_id = None;
                 }
                 changed = true;
             }
@@ -16263,6 +16358,18 @@ impl AppComposition {
     /// Current app-owned product mode.
     pub fn product_mode(&self) -> AppProductMode {
         self.product_mode
+    }
+
+    /// A retained mode describes draining work, not authority for new work.
+    /// Keep this admission guard separate from mode-only lifecycle checks so
+    /// cancellation, dismissal and kill switches remain available while draining.
+    fn require_ai_dispatch_policy(&self) -> Result<(), AppCompositionError> {
+        if self.org_policy_mode_ceiling_denies(self.product_mode) {
+            return Err(AppCompositionError::AiRuntime(
+                "AI dispatch denied by installed organization mode ceiling".into(),
+            ));
+        }
+        Ok(())
     }
 
     fn require_assist_mode(&self) -> Result<(), AppCompositionError> {
@@ -17960,7 +18067,10 @@ impl AppComposition {
         column: u32,
         new_text: &str,
     ) -> Result<(), AppCompositionError> {
-        if !self.settings.next_edit_prediction_enabled || !self.product_mode.allows_assist() {
+        if !self.settings.next_edit_prediction_enabled
+            || !self.product_mode.allows_assist()
+            || self.org_policy_mode_ceiling_denies(self.product_mode)
+        {
             return Ok(());
         }
         let target = self.next_edit_prediction_target(line, column, new_text);
@@ -21416,6 +21526,7 @@ impl AppComposition {
         max_upload_bytes: u64,
     ) -> Result<(), AppCompositionError> {
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.legion_cloud_lane
             .enable(endpoint, max_cost_cents, max_upload_bytes)
     }
@@ -21433,6 +21544,7 @@ impl AppComposition {
         acknowledgement: &CloudLaneEgressAcknowledgement,
     ) -> Result<LegionCloudLaneTaskStatus, AppCompositionError> {
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let context = self.active_documents.require_workspace_context()?;
         if request.task_packet.workspace_id != context.workspace_id {
             return Err(AppCompositionError::Remote(
@@ -21496,6 +21608,7 @@ impl AppComposition {
         plan_id: &legion_protocol::DelegatedTaskPlanId,
     ) -> Result<AppDelegatedTaskExecutionOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let Some(contract) = self
             .delegated_task_plan_contracts
             .iter()
@@ -21779,6 +21892,7 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let scope = self.normalize_delegated_task_scope(scope)?;
         self.ensure_no_active_worker()?;
         if self.in_flight_delegated_task.is_some() {
@@ -22862,6 +22976,7 @@ impl AppComposition {
         use legion_protocol::DelegatedTaskLoopBudget;
 
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let scope = self.normalize_delegated_task_scope(scope)?;
         self.ensure_no_active_worker()?;
 
@@ -23551,6 +23666,12 @@ impl AppComposition {
         server_id: McpServerId,
         runtime: Arc<dyn AppAutomateMcpToolRuntime>,
     ) -> Result<(), AppCompositionError> {
+        #[cfg(feature = "ai")]
+        if self.named_mcp_peers.contains_key(&server_id.0) {
+            return Err(AppCompositionError::LegionWorkflow(
+                "named MCP runtime is owned by its configuration/grant lifecycle".into(),
+            ));
+        }
         if server_id.0.trim().is_empty() {
             return Err(AppCompositionError::LegionWorkflow(
                 "MCP server id must be non-empty".to_string(),
@@ -23803,6 +23924,9 @@ impl AppComposition {
         tool_name: &McpToolName,
         request: &DelegatedTaskToolPermissionRequest,
     ) -> Result<AppAutomateMcpToolInvocationReceipt, AppCompositionError> {
+        #[cfg(feature = "ai")]
+        self.ensure_named_peer_runtime(server_id)
+            .map_err(|error| AppCompositionError::LegionWorkflow(error.to_string()))?;
         let runtime = self
             .automate_mcp_tool_runtimes
             .get(&server_id.0)
@@ -24787,6 +24911,7 @@ impl AppComposition {
     ) -> Result<AppLegionWorkflowExecution, AppCompositionError> {
         let _ = &provider_mode;
         self.require_automate_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.ensure_no_active_worker()?;
         let session_index = self
             .legion_workflow_sessions
@@ -26136,6 +26261,7 @@ impl AppComposition {
         &mut self,
         instruction_label: impl Into<String>,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        self.require_ai_dispatch_policy()?;
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::Explain,
             instruction_label,
@@ -26147,6 +26273,7 @@ impl AppComposition {
         &mut self,
         instruction_label: impl Into<String>,
     ) -> Result<AppAiRunOutcome, AppCompositionError> {
+        self.require_ai_dispatch_policy()?;
         self.run_assisted_ai_operation(
             legion_protocol::AssistedAiOperationClass::ProposeEdit,
             instruction_label,
@@ -28190,6 +28317,7 @@ impl AppComposition {
         prompt_label: impl Into<String>,
     ) -> Result<AppDelegateChatOutcome, AppCompositionError> {
         self.require_delegate_mode()?;
+        self.require_ai_dispatch_policy()?;
         let prompt_label = bounded_label(prompt_label.into(), DELEGATE_CHAT_PROMPT_MAX_CHARS);
         let lane_reservation = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
@@ -28227,16 +28355,16 @@ impl AppComposition {
         // request was sent and hand the buffer excerpt to Anthropic instead --
         // a destination the broker never approved. One resolution, threaded
         // through, is the only version of this that cannot drift.
-        let (live_backend, anthropic_key_state) = product_ai_selection(self.preferred_ai_provider);
+        let (live_backend, anthropic_key_state) = self.selected_product_ai_selection()?;
         let (route_target, route_health, route_cost, route_privacy) =
-            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend);
+            crate::ai_route_descriptor::route_descriptor_for_backend(live_backend.clone());
         // Identity from the same backend as the destination. These were
         // hard-coded to the deterministic provider while the target followed the
         // live one, so provider-allowlist policy was evaluated against
         // `deterministic-local` and the audit recorded a local call for traffic
         // going to Anthropic.
         let (route_provider_id, route_model_label, route_provider_class, ..) =
-            product_ai_route_fields(live_backend);
+            product_ai_route_fields(live_backend.clone());
         let route_provider_id_for_decision = route_provider_id.clone();
         let document = SourceDocument::with_versions(
             input.workspace_id,
@@ -28366,7 +28494,7 @@ impl AppComposition {
         };
         let route_target_for_decision = route_target;
         let broker = DenyByDefaultBroker::new(
-            self.product_ai_policy_with_org_ceiling(live_backend),
+            self.product_ai_policy_with_org_ceiling(live_backend.clone()),
             CapabilityNamespace("app.delegate".to_string()),
         );
         // Authorization only. `route_completion` *invokes* the registry provider
@@ -28406,7 +28534,9 @@ impl AppComposition {
                         ASSIST_PROMPT_MAX_BYTES,
                         crate::product_ai_completion::PRODUCT_COMPLETION_MAX_TOKENS,
                     )),
-                    budget_request_cost_cents: live_backend.and_then(declared_request_cost_cents),
+                    budget_request_cost_cents: live_backend
+                        .clone()
+                        .and_then(declared_request_cost_cents),
                     ..Default::default()
                 },
                 correlation_id: event_context.correlation_id,
@@ -28601,7 +28731,7 @@ impl AppComposition {
             let sink_delta = lane_reservation.delta_writer();
             let mut on_delta = move |delta: &str| sink_delta.push(delta);
             let (label, stream) = resolve_delegate_chat_reply(
-                live_backend,
+                live_backend.clone(),
                 self.preferred_ai_provider,
                 anthropic_key_state.clone(),
                 &prompt_label,
@@ -28909,6 +29039,7 @@ impl AppComposition {
         trigger: InlinePredictionTriggerKind,
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
         let context = self.active_documents.save_context_for_buffer(buffer_id)?;
         let snapshot = self.editor.current_snapshot(buffer_id)?.clone();
@@ -28933,6 +29064,9 @@ impl AppComposition {
         self.assist_inline_prediction_state
             .requests
             .insert(metadata.request_id.clone(), metadata.clone());
+        self.assist_inline_prediction_state
+            .provider_revisions
+            .insert(metadata.request_id.clone(), self.ai_provider_revision);
 
         // A live provider call does not run here.
         //
@@ -28974,6 +29108,7 @@ impl AppComposition {
         prediction_id: Option<String>,
     ) -> Result<AssistInlinePredictionProjection, AppCompositionError> {
         self.require_assist_mode()?;
+        self.require_ai_dispatch_policy()?;
         self.active_documents.ensure_active_buffer(buffer_id)?;
         let Some(index) = self.resolve_inline_prediction_index(buffer_id, prediction_id.as_deref())
         else {
@@ -28982,6 +29117,19 @@ impl AppComposition {
             ));
         };
         self.validate_inline_prediction_lifecycle(index, InlinePredictionLifecycleAction::Accept)?;
+
+        let request_id = &self.assist_inline_prediction_state.results[index].request_id;
+        if self
+            .assist_inline_prediction_state
+            .provider_revisions
+            .get(request_id)
+            != Some(&self.ai_provider_revision)
+        {
+            self.assist_inline_prediction_state = Default::default();
+            return Err(AppCompositionError::AiRuntime(
+                "Assist inline prediction provider revision changed".to_string(),
+            ));
+        }
 
         let observed = self.inline_prediction_observed_fingerprint(buffer_id)?;
         let freshness = InlinePredictionFreshness::from_fingerprints(
@@ -29928,6 +30076,13 @@ impl AppComposition {
     ) -> Result<WorkspaceSessionRecord, AppCompositionError> {
         let mut record = capture_workspace_session_record(&self.active_documents, &self.editor)?;
         record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
+        record.workbench_settings.ai_provider_configuration_json =
+            Some(self.ai_provider_configuration_json()?);
+        #[cfg(feature = "ai")]
+        {
+            record.workbench_settings.named_mcp_peer_configuration_json =
+                Some(self.named_mcp_peer_configuration_json()?);
+        }
         record.language_toolchain_settings = self.language_toolchain_settings.clone();
         record.memory_snapshot_json = Some(
             serde_json::to_string(
@@ -29945,7 +30100,52 @@ impl AppComposition {
         &mut self,
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
+        // Restore cannot carry consent forward or partially cancel a live operation.
+        if self.active_worker.is_some() || self.provider_configuration_busy() {
+            return Err(AppCompositionError::AiRuntime(
+                "session restore requires idle application".into(),
+            ));
+        }
+        #[cfg(feature = "ai")]
+        let restored_mcp = self.prepare_named_mcp_peer_restore(
+            record
+                .workbench_settings
+                .named_mcp_peer_configuration_json
+                .as_deref(),
+        )?;
+        #[cfg(not(feature = "ai"))]
+        if record
+            .workbench_settings
+            .named_mcp_peer_configuration_json
+            .is_some()
+        {
+            return Err(AppCompositionError::AiRuntime(
+                "named MCP configuration unavailable in this build".into(),
+            ));
+        }
+        // Preflight fallible payload restoration before committing provider/settings
+        // metadata. A malformed session must not partially replace the active route.
+        let restored_memory = record
+            .memory_snapshot_json
+            .as_ref()
+            .map(|json| {
+                let snapshot: MemoryServiceSnapshot = serde_json::from_str(json)
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+                MemoryService::from_snapshot(snapshot)
+                    .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))
+            })
+            .transpose()?;
+        self.restore_ai_provider_configuration_json(
+            record
+                .workbench_settings
+                .ai_provider_configuration_json
+                .as_deref()
+                .unwrap_or(r#"{"profiles":[],"selected":null}"#),
+        )?;
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        #[cfg(feature = "ai")]
+        self.commit_named_mcp_peer_restore(restored_mcp);
+        self.set_product_mode(AppProductMode::Manual);
         // Restore metadata only. Stored paths remain an unapproved draft until
         // the operator explicitly configures the toolchain again.
         self.clear_typescript_toolchain();
@@ -29955,11 +30155,8 @@ impl AppComposition {
             .set_user_shell_selection(TerminalShellSelection::from_label(
                 &record.workbench_settings.terminal_shell_selection,
             ));
-        if let Some(memory_snapshot_json) = &record.memory_snapshot_json {
-            let snapshot: MemoryServiceSnapshot = serde_json::from_str(memory_snapshot_json)
-                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
-            self.memory_service = MemoryService::from_snapshot(snapshot)
-                .map_err(|error| AppCompositionError::AiRuntime(error.to_string()))?;
+        if let Some(memory) = restored_memory {
+            self.memory_service = memory;
         }
         let mut restored_file_ids = Vec::new();
         let mut skipped_tabs = Vec::new();

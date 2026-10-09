@@ -16,6 +16,543 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[test]
+fn selected_tab_oracle_reads_clean_dirty_and_saved_accessibility_states() {
+    use observe::{TabObservation, TabState, selected_tab_state};
+    let mut tab = TabObservation {
+        name: "README.md".into(),
+        selected: true,
+        visible: true,
+        description: String::new(),
+    };
+    assert_eq!(
+        selected_tab_state("README.md", &[tab.clone()]).unwrap(),
+        TabState::Clean
+    );
+    tab.description = "Unsaved changes".into();
+    assert_eq!(
+        selected_tab_state("README.md", &[tab.clone()]).unwrap(),
+        TabState::Dirty
+    );
+    tab.description.clear();
+    assert_eq!(
+        selected_tab_state("README.md", &[tab]).unwrap(),
+        TabState::Clean
+    );
+}
+
+#[test]
+fn selected_tab_oracle_blocks_ambiguity_inactive_hidden_and_unknown_states() {
+    use observe::{TabObservation, selected_tab_state};
+    let tab = TabObservation {
+        name: "README.md".into(),
+        selected: true,
+        visible: true,
+        description: String::new(),
+    };
+    assert!(selected_tab_state("README.md", &[]).is_err());
+    assert!(selected_tab_state("README.md", &[tab.clone(), tab.clone()]).is_err());
+    for invalid in [
+        TabObservation {
+            name: "README.md.bak".into(),
+            ..tab.clone()
+        },
+        TabObservation {
+            name: "* README.md [buffer 1]".into(),
+            ..tab.clone()
+        },
+        TabObservation {
+            selected: false,
+            ..tab.clone()
+        },
+        TabObservation {
+            visible: false,
+            ..tab.clone()
+        },
+        TabObservation {
+            description: "unknown status".into(),
+            ..tab.clone()
+        },
+    ] {
+        assert!(selected_tab_state("README.md", &[invalid]).is_err());
+    }
+}
+
+fn explorer_control(
+    name: &str,
+    control_type: i32,
+    value: &'static str,
+) -> observe::ExplorerElement<&'static str> {
+    observe::ExplorerElement {
+        name: name.into(),
+        control_type,
+        visible: true,
+        value,
+    }
+}
+
+fn restored_controls() -> Vec<observe::ExplorerElement<&'static str>> {
+    // r3 trace: tab, breadcrumb and Excerpts SwitchTab button all named README.md.
+    vec![
+        explorer_control("README.md", 50019, "tab"),
+        explorer_control("README.md", 50020, "breadcrumb"),
+        explorer_control("README.md", 50000, "excerpt"),
+        explorer_control("Explorer drawer", 50000, "toggle"),
+    ]
+}
+
+#[test]
+fn explorer_scope_opens_once_and_ignores_restored_global_filename_controls() {
+    use std::{cell::Cell, time::Duration};
+    let polls = Cell::new(0);
+    let mut clicks = Vec::new();
+    let file = observe::navigate_explorer_target(
+        "README.md",
+        || {
+            let mut controls = restored_controls();
+            if polls.get() >= 2 {
+                controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
+            }
+            observe::explorer_navigation_snapshot("README.md", controls, |scope| {
+                assert_eq!(*scope, "dialog");
+                Ok(vec![explorer_control("README.md", 50000, "explorer-row")])
+            })
+        },
+        |control| {
+            clicks.push(control);
+            Ok(())
+        },
+        || Duration::from_millis(polls.get() * 100),
+        || polls.set(polls.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(file, "explorer-row");
+    assert_eq!(clicks, ["toggle"]);
+    assert_eq!(polls.get(), 2);
+    let open = observe::navigate_explorer_target(
+        "README.md",
+        || {
+            let mut controls = restored_controls();
+            controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
+            observe::explorer_navigation_snapshot("README.md", controls, |_| {
+                Ok(vec![explorer_control("README.md", 50000, "open-row")])
+            })
+        },
+        |_| panic!("open scoped drawer must not toggle"),
+        || Duration::ZERO,
+        || panic!("target already available"),
+    )
+    .unwrap();
+    assert_eq!(open, "open-row");
+}
+
+#[test]
+fn explorer_scope_refuses_unscoped_ambiguous_missing_unreadable_and_focus_loss() {
+    use std::{cell::Cell, time::Duration};
+    for controls in [
+        vec![explorer_control("README.md", 50000, "unscoped")],
+        vec![
+            explorer_control("Explorer drawer", 50000, "a"),
+            explorer_control("Explorer drawer", 50000, "b"),
+        ],
+        vec![
+            explorer_control("Explorer drawer", 50032, "a"),
+            explorer_control("Explorer drawer", 50032, "b"),
+        ],
+    ] {
+        assert!(
+            observe::navigate_explorer_target(
+                "README.md",
+                || observe::explorer_navigation_snapshot("README.md", controls.clone(), |_| Ok(
+                    vec![]
+                )),
+                |_| panic!("invalid scope must send no input"),
+                || Duration::ZERO,
+                || panic!("invalid initial scope must stop")
+            )
+            .is_err()
+        );
+    }
+    for rows in [
+        vec![],
+        vec![
+            explorer_control("README.md", 50019, "tab"),
+            explorer_control("README.md", 50020, "text"),
+        ],
+        vec![
+            explorer_control("README.md", 50000, "a"),
+            explorer_control("README.md", 50000, "b"),
+        ],
+        vec![explorer_control("README.md.bak", 50000, "wrong")],
+        vec![observe::ExplorerElement {
+            visible: false,
+            ..explorer_control("README.md", 50000, "hidden")
+        }],
+    ] {
+        assert!(
+            observe::navigate_explorer_target(
+                "README.md",
+                || observe::explorer_navigation_snapshot(
+                    "README.md",
+                    vec![explorer_control("Explorer drawer", 50032, "dialog")],
+                    |_| Ok(rows.clone())
+                ),
+                |_| panic!("invalid open drawer must not toggle"),
+                || Duration::ZERO,
+                || panic!("invalid initial rows must stop")
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        observe::explorer_navigation_snapshot(
+            "README.md",
+            vec![explorer_control("Explorer drawer", 50032, "dialog")],
+            |_| Err("UIA read failed".into())
+        )
+        .is_err()
+    );
+    let lost = observe::navigate_explorer_target(
+        "README.md",
+        || observe::explorer_navigation_snapshot("README.md", restored_controls(), |_| Ok(vec![])),
+        |_| focus::guarded_batch(42, 99, || panic!("focus loss must send no input")),
+        || Duration::ZERO,
+        || panic!("focus loss must stop"),
+    );
+    assert!(lost.unwrap_err().contains("foreground"));
+    let seconds = Cell::new(0);
+    let clicks = Cell::new(0);
+    let timeout = observe::navigate_explorer_target(
+        "README.md",
+        || observe::explorer_navigation_snapshot("README.md", restored_controls(), |_| Ok(vec![])),
+        |_| {
+            clicks.set(clicks.get() + 1);
+            Ok(())
+        },
+        || Duration::from_secs(seconds.get()),
+        || seconds.set(seconds.get() + 1),
+    );
+    assert!(timeout.unwrap_err().contains("timed out"));
+    assert_eq!((seconds.get(), clicks.get()), (3, 1));
+}
+
+#[path = "../src/focus.rs"]
+mod focus;
+
+#[test]
+fn explorer_close_requires_scoped_unique_button_and_observed_absence_before_editor_input() {
+    use std::{cell::Cell, time::Duration};
+    let snapshot = |open, buttons: Vec<_>| {
+        let mut controls = restored_controls();
+        // A same-name control outside the drawer must not be used to close it.
+        controls.push(explorer_control(
+            "Close Explorer drawer",
+            50000,
+            "unscoped-close",
+        ));
+        if open {
+            controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
+        }
+        observe::explorer_navigation_snapshot("README.md", controls, |_| Ok(buttons.clone()))
+    };
+    let close = explorer_control("Close Explorer drawer", 50000, "scoped-close");
+    let ticks = Cell::new(0);
+    let mut clicks = Vec::new();
+    observe::close_explorer_drawer(
+        || snapshot(ticks.get() < 2, vec![close.clone()]),
+        |button| {
+            clicks.push(button);
+            Ok(())
+        },
+        || Duration::from_millis(ticks.get() * 100),
+        || ticks.set(ticks.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(clicks, ["scoped-close"]);
+    assert_eq!(
+        ticks.get(),
+        2,
+        "editor input must wait for observed drawer absence"
+    );
+    observe::close_explorer_drawer(
+        || snapshot(false, vec![]),
+        |_| panic!("absent drawer must not toggle"),
+        || Duration::ZERO,
+        || panic!("absent drawer needs no wait"),
+    )
+    .unwrap();
+    for buttons in [
+        vec![],
+        vec![close.clone(), close.clone()],
+        vec![explorer_control(
+            "Close Explorer drawer",
+            50020,
+            "wrong-role",
+        )],
+    ] {
+        assert!(
+            observe::close_explorer_drawer(
+                || snapshot(true, buttons.clone()),
+                |_| panic!("missing/ambiguous scoped close must send no input"),
+                || Duration::ZERO,
+                || panic!("invalid close must stop"),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        observe::close_explorer_drawer(
+            || snapshot(true, vec![close.clone()]),
+            |_| focus::guarded_batch(42, 99, || panic!("focus loss must send no input")),
+            || Duration::ZERO,
+            || panic!("focus loss must stop"),
+        )
+        .is_err()
+    );
+    let seconds = Cell::new(0);
+    let count = Cell::new(0);
+    assert!(
+        observe::close_explorer_drawer(
+            || snapshot(true, vec![close.clone()]),
+            |_| {
+                count.set(count.get() + 1);
+                Ok(())
+            },
+            || Duration::from_secs(seconds.get()),
+            || seconds.set(seconds.get() + 1),
+        )
+        .unwrap_err()
+        .contains("timed out")
+    );
+    assert_eq!((seconds.get(), count.get()), (3, 1));
+}
+
+#[cfg(windows)]
+#[path = "../src/inject.rs"]
+#[allow(dead_code)]
+mod inject;
+
+#[test]
+fn journey_editor_focus_requires_observation_and_blocks_timeout_or_read_failure() {
+    use std::{cell::Cell, time::Duration};
+    let ticks = Cell::new(0);
+    observe::wait_for_editor_focus(
+        || Ok(ticks.get() == 2),
+        || Duration::from_millis(ticks.get() * 100),
+        || ticks.set(ticks.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(ticks.get(), 2);
+    let seconds = Cell::new(0);
+    assert!(
+        observe::wait_for_editor_focus(
+            || Ok(false),
+            || Duration::from_secs(seconds.get()),
+            || seconds.set(seconds.get() + 1),
+        )
+        .is_err()
+    );
+    assert_eq!(seconds.get(), 3);
+    assert!(
+        observe::wait_for_editor_focus(
+            || Err("UIA focus unavailable".into()),
+            || Duration::ZERO,
+            || panic!("read failure must stop"),
+        )
+        .is_err()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn pointer_click_delivers_move_down_up_in_one_external_batch() {
+    let mut batches = Vec::new();
+    inject::click_at_with_sender(10, 10, |events| {
+        batches.push(events.len());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(batches, vec![3]);
+}
+
+#[test]
+fn document_oracle_rejects_partial_or_extra_text_and_preserves_unicode() {
+    assert!(observe::document_text_matches(
+        "# Legion\r\nbody\r\n",
+        "# Legion\nbody\n"
+    ));
+    assert!(!observe::document_text_matches(
+        "# Legion\nbody\n",
+        "# Legion\nwrong\n"
+    ));
+    assert!(!observe::document_text_matches(
+        "marker body",
+        "prefix marker body extra"
+    ));
+    assert!(!observe::document_text_matches("é", "e\u{301}"));
+}
+
+#[test]
+fn unattended_journey_default_preserves_existing_foreground_mode() {
+    let args = [
+        "--open-edit-save-run",
+        "--product",
+        "missing.exe",
+        "--workspace",
+        ".",
+        "--target",
+        "README.md",
+        "--report",
+        "unused.toml",
+    ]
+    .map(str::to_string);
+    assert!(matches!(
+        cli::parse(&args).unwrap(),
+        cli::Command::OpenEditSave {
+            await_foreground: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn attended_wait_requires_target_and_stops_on_exit_or_sixty_second_deadline() {
+    use focus::{AwaitForegroundOutcome as Outcome, ForegroundObservation as Observation};
+    use std::{cell::Cell, time::Duration};
+    let polls = Cell::new(0);
+    let ready = focus::await_user_foreground(
+        || {
+            if polls.get() == 0 {
+                Observation::Other
+            } else {
+                Observation::Target
+            }
+        },
+        || Duration::from_millis(polls.get() * 100),
+        || polls.set(polls.get() + 1),
+    );
+    assert_eq!(ready, Outcome::Ready);
+    assert_eq!(polls.get(), 1);
+
+    let exited = focus::await_user_foreground(
+        || Observation::WindowExited,
+        || Duration::ZERO,
+        || panic!("exited window must not keep waiting"),
+    );
+    assert_eq!(exited, Outcome::WindowExited);
+
+    let seconds = Cell::new(0);
+    let timed_out = focus::await_user_foreground(
+        || Observation::Other,
+        || Duration::from_secs(seconds.get()),
+        || seconds.set(seconds.get() + 1),
+    );
+    assert_eq!(timed_out, Outcome::TimedOut);
+    assert_eq!(seconds.get(), 60);
+}
+
+#[test]
+fn attended_journey_flag_is_opt_in_and_rejected_outside_journey() {
+    let dir = temp_dir("attended-missing-package");
+    let report = dir.join("attended.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--await-foreground",
+            "--product",
+            "missing-product.exe",
+            "--workspace",
+            ".",
+            "--target",
+            "README.md",
+            "--report",
+        ])
+        .arg(&report)
+        .output()
+        .expect("run public attended CLI without a product");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(report)
+            .unwrap()
+            .contains("status = \"blocked\"")
+    );
+    let rejected = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--probe-session",
+            "--await-foreground",
+            "--report",
+            "unused.toml",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("--await-foreground requires --open-edit-save-run")
+    );
+}
+
+#[test]
+fn focus_loss_blocks_external_input_batch_without_sending_text() {
+    let mut received = String::new();
+    let outcome = focus::guarded_batch(1_u64, 2_u64, || {
+        received.push_str("marker");
+        Ok(())
+    });
+    assert!(outcome.is_err());
+    assert!(
+        received.is_empty(),
+        "non-target application must receive no input"
+    );
+}
+
+#[test]
+fn native_journey_requires_explicit_workspace_and_target_without_launching_product() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--product",
+            "missing-product.exe",
+            "--report",
+            "unused.toml",
+        ])
+        .output()
+        .expect("run external driver parser");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --workspace and --target"));
+}
+
+#[test]
+fn native_journey_missing_package_records_blocked_without_claiming_scenario_acceptance() {
+    let dir = temp_dir("journey-missing-package");
+    let report_path = dir.join("journey.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--product",
+            "missing-product.exe",
+            "--workspace",
+            ".",
+            "--target",
+            "README.md",
+            "--report",
+        ])
+        .arg(&report_path)
+        .output()
+        .expect("run external driver without an available product");
+    assert_eq!(output.status.code(), Some(3));
+    let text = fs::read_to_string(report_path).expect("blocked report exists");
+    assert!(text.contains("status = \"blocked\""));
+    assert!(text.contains("complete_scenario = false"));
+    assert!(text.contains("full_input_conformance = false"));
+    assert!(!text.contains("native_window_created=true"));
+}
+
 // The driver is a binary crate. Including its host-independent modules by path
 // is what lets these assertions run against the same source the binary uses,
 // rather than against a copy that could drift away from it.
@@ -25,12 +562,279 @@ mod cli;
 #[path = "../src/observe.rs"]
 #[allow(dead_code)]
 mod observe;
+
+#[path = "../src/journey.rs"]
+#[allow(dead_code)]
+mod journey;
+
+#[test]
+fn journey_click_bounds_refuse_clipped_centers_outside_client_or_drawer() {
+    use observe::contained_click_center;
+    let client = [80, 160, 1040, 880];
+    let drawer = [100, 210, 410, 750];
+    assert_eq!(
+        contained_click_center([110, 320, 186, 344], client, Some(drawer)).unwrap(),
+        (148, 332)
+    );
+    // IsOffscreen=false did not exclude clipped text in the native trace.
+    for rect in [
+        [110, 900, 186, 924],
+        [110, 748, 186, 772],
+        [1040, 200, 1060, 220],
+        [110, 320, 110, 344],
+    ] {
+        assert!(contained_click_center(rect, client, Some(drawer)).is_err());
+    }
+    assert!(contained_click_center([110, 900, 186, 924], client, None).is_err());
+    assert!(contained_click_center([110, 320, 186, 344], client, Some([0, 0, 0, 0])).is_err());
+    assert_eq!(
+        contained_click_center([-1000, -600, -900, -500], [-1100, -700, -100, -50], None).unwrap(),
+        (-950, -550)
+    );
+}
+
+#[test]
+fn journey_click_hit_test_blocks_occlusion_mismatch_and_read_failure_without_coordinates() {
+    let rect = [110, 320, 186, 344];
+    let client = [80, 160, 1040, 880];
+    assert_eq!(
+        observe::verified_click_center(rect, client, None, |point| {
+            assert_eq!(point, (148, 332));
+            Ok(true)
+        })
+        .unwrap(),
+        (148, 332)
+    );
+    for hit in [Ok(false), Err("UIA point read failed".to_string())] {
+        assert!(observe::verified_click_center(rect, client, None, |_| hit).is_err());
+    }
+    assert!(
+        observe::verified_click_center([0, 0, 20, 20], client, None, |_| panic!(
+            "outside product client must stop before hit testing"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn verified_zero_explorer_scope_requires_point_hit_and_preserves_other_geometry_refusals() {
+    use observe::{ScopeBounds, verified_scoped_click_center};
+    let target = [343, 552, 422, 570];
+    let client = [235, 258, 1195, 978];
+    let scope = ScopeBounds {
+        rectangle: [0; 4],
+        verified_explorer_drawer: true,
+    };
+    let result = verified_scoped_click_center(target, client, Some(scope), |point| {
+        assert_eq!(point, (382, 561));
+        Ok(true)
+    })
+    .unwrap();
+    assert_eq!(result.center, (382, 561));
+    assert!(result.explorer_scope_geometry_unavailable);
+    for hit in [Ok(false), Err("point read failed".to_string())] {
+        assert!(verified_scoped_click_center(target, client, Some(scope), |_| hit).is_err());
+    }
+    for invalid in [
+        ScopeBounds {
+            verified_explorer_drawer: false,
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [1, 1, 1, 1],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [0, 0, 10, 0],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [500, 600, 400, 700],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [235, 258, 350, 978],
+            ..scope
+        },
+    ] {
+        assert!(
+            verified_scoped_click_center(target, client, Some(invalid), |_| panic!(
+                "invalid scope must stop before hit query"
+            ))
+            .is_err()
+        );
+    }
+    for invalid_client in [[0; 4], [235, 258, 350, 978], [1195, 978, 235, 258]] {
+        assert!(
+            verified_scoped_click_center(target, invalid_client, Some(scope), |_| panic!(
+                "invalid client must stop before hit query"
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        verified_scoped_click_center([0; 4], client, Some(scope), |_| panic!(
+            "invalid target must stop"
+        ))
+        .is_err()
+    );
+    let available = verified_scoped_click_center(
+        target,
+        client,
+        Some(ScopeBounds {
+            rectangle: client,
+            ..scope
+        }),
+        |_| Ok(true),
+    )
+    .unwrap();
+    assert!(!available.explorer_scope_geometry_unavailable);
+}
+
+#[test]
+fn journey_session_is_fresh_external_and_passed_through_public_product_cli() {
+    let base = temp_dir("isolated-journey-session");
+    let workspace = base.join("workspace");
+    fs::create_dir_all(workspace.join(".legion")).unwrap();
+    let default_session = workspace.join(".legion/session.json");
+    fs::write(&default_session, b"existing restored session").unwrap();
+    let output = journey::reserve_journey_output(&workspace, &base.join("run.toml")).unwrap();
+    assert!(
+        !output.session_state.exists(),
+        "normal product launch must see no session to restore"
+    );
+    assert!(
+        !output
+            .session_state
+            .starts_with(workspace.canonicalize().unwrap())
+    );
+    assert_eq!(
+        fs::read(default_session).unwrap(),
+        b"existing restored session"
+    );
+    let command = journey::product_command(
+        std::path::Path::new("packaged.exe"),
+        &workspace,
+        &output.session_state,
+    );
+    let args: Vec<_> = command.get_args().map(|arg| arg.to_os_string()).collect();
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("--workspace"),
+            workspace.into_os_string(),
+            std::ffi::OsString::from("--session-state"),
+            output.session_state.into_os_string()
+        ]
+    );
+}
+
+#[test]
+fn journey_session_refuses_workspace_paths_and_existing_reports_or_sidecars() {
+    let base = temp_dir("journey-session-refusal");
+    let workspace = base.join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let inside = workspace.join("run.toml");
+    assert!(journey::reserve_journey_output(&workspace, &inside).is_err());
+    assert_eq!(
+        fs::read_dir(&workspace).unwrap().count(),
+        0,
+        "refusal must not write into clone"
+    );
+    let existing = base.join("existing.toml");
+    fs::write(&existing, b"old evidence").unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &existing).is_err());
+    assert_eq!(fs::read(&existing).unwrap(), b"old evidence");
+    let report = base.join("run.toml");
+    let first = journey::reserve_journey_output(&workspace, &report).unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &report).is_err());
+    assert!(!first.session_state.exists());
+    let occupied = base.join("occupied.toml.session");
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("session.json"), b"prior state").unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &base.join("occupied.toml")).is_err());
+    assert_eq!(
+        fs::read(occupied.join("session.json")).unwrap(),
+        b"prior state"
+    );
+    assert!(!base.join("occupied.toml").exists());
+}
+
+#[test]
+fn product_window_selection_waits_past_observed_helper_and_rejects_ambiguity() {
+    use observe::{ProductWindowCandidate, select_product_window};
+    let helper = ProductWindowCandidate {
+        handle: 0x51d6a,
+        process_id: 31936,
+        visible: true,
+        title: String::new(),
+        width: 0,
+        height: 0,
+        owner: 0,
+    };
+    let mut main = ProductWindowCandidate {
+        handle: 0x491dc8,
+        process_id: 31936,
+        visible: false,
+        title: "Legion IDE".into(),
+        width: 960,
+        height: 720,
+        owner: 0,
+    };
+    assert_eq!(
+        select_product_window(31936, &[helper.clone(), main.clone()]),
+        None
+    );
+    main.visible = true;
+    assert_eq!(
+        select_product_window(31936, &[helper, main.clone()]),
+        Some(0x491dc8)
+    );
+    let mut other = main.clone();
+    other.process_id = 18568;
+    assert_eq!(select_product_window(31936, &[other]), None);
+    let mut duplicate = main.clone();
+    duplicate.handle = 0x123;
+    assert_eq!(
+        select_product_window(31936, &[main.clone(), duplicate]),
+        None
+    );
+    main.width = 0;
+    assert_eq!(select_product_window(31936, &[main.clone()]), None);
+    main.width = 960;
+    main.title = "Winit Thread Event Target".into();
+    assert_eq!(select_product_window(31936, &[main.clone()]), None);
+    main.title = "Legion IDE".into();
+    main.owner = 0x123;
+    assert_eq!(select_product_window(31936, &[main]), None);
+}
 #[path = "../src/report.rs"]
 #[allow(dead_code)]
 mod report;
 #[path = "../src/session.rs"]
 #[allow(dead_code)]
 mod session;
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an interactive Windows input desktop; run isolated with --ignored"]
+fn attached_input_desktop_allows_native_sta_com_initialization() {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    assert!(matches!(
+        session::probe_input_desktop(),
+        DesktopAttachment::Attached { .. }
+    ));
+    // This isolated filtered test opens no product/UIA client and sends no input.
+    // The real attachment must retain the rights needed by native STA bootstrap.
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if result.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    assert!(
+        result.is_ok(),
+        "STA initialization after desktop attachment: {result:?}"
+    );
+}
 
 use report::{ClassObservation, ClassOutcome, ConformanceReport};
 use session::DesktopAttachment;

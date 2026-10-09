@@ -6,6 +6,9 @@ mod assistant_rail;
 mod brand_mark;
 /// Call-hierarchy rows for the language section: direction and degraded marking.
 mod call_hierarchy;
+/// Native settings for named HTTP MCP peers.
+#[cfg(feature = "ai")]
+pub mod mcp_settings;
 /// Snapshot-backed status, language, trust, and assistant rows.
 mod status_rows;
 use status_rows::*;
@@ -15,6 +18,7 @@ mod components;
 mod debug_inspector;
 /// Applying persisted dock splitter fractions, and observing new ones.
 pub mod dock_geometry;
+pub(crate) mod editor_accessibility;
 #[cfg(feature = "ai")]
 pub mod ghost_text;
 pub mod rail_icons;
@@ -383,6 +387,13 @@ pub struct DesktopProjectionViewState {
         Vec<crate::view::proposal_review::DesktopCheckpointTimelineRow>,
     /// Preferred product AI route label (`auto` / `ollama` / `anthropic` / `deterministic`).
     pub preferred_ai_provider: String,
+    /// Cached app-produced named route and secure-store metadata.
+    pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
+    /// App refusal gate while a provider operation is still draining.
+    pub provider_configuration_busy: bool,
+    /// App-owned named MCP settings metadata; never loads credentials on paint.
+    #[cfg(feature = "ai")]
+    pub mcp_settings_peers: Vec<mcp_settings::McpSettingsPeerProjection>,
     /// Accumulated product AI stream chunks for the assistant rail (Assist / Delegate).
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream (`provider/model/operation`).
@@ -414,6 +425,10 @@ impl Default for DesktopProjectionViewState {
             review_hunk_selected_index: 0,
             durable_checkpoint_timeline_rows: Vec::new(),
             preferred_ai_provider: "auto".to_string(),
+            ai_provider_profiles: Vec::new(),
+            provider_configuration_busy: false,
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: Vec::new(),
             product_ai_stream_chunks: Vec::new(),
             product_ai_stream_label: String::new(),
             product_ai_streamed: false,
@@ -1119,6 +1134,13 @@ pub struct DesktopProjectionViewModel {
     pub empty_or_degraded_flags: Vec<String>,
     /// Preferred product AI route label mirrored from app composition.
     pub preferred_ai_provider: String,
+    /// App-produced named routes, refreshed on explicit settings actions.
+    pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
+    /// Whether configuration controls must wait for the app-owned operation.
+    pub provider_configuration_busy: bool,
+    /// Named MCP peer settings, with explicit desktop selection.
+    #[cfg(feature = "ai")]
+    pub mcp_settings_peers: Vec<mcp_settings::McpSettingsPeerProjection>,
     /// Product AI stream chunks for progressive assistant-rail rendering.
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream.
@@ -1298,6 +1320,10 @@ impl DesktopProjectionViewModel {
             sandbox_rows,
             empty_or_degraded_flags: flags,
             preferred_ai_provider: state.preferred_ai_provider.clone(),
+            ai_provider_profiles: state.ai_provider_profiles.clone(),
+            provider_configuration_busy: state.provider_configuration_busy,
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: state.mcp_settings_peers.clone(),
             product_ai_stream_chunks: state.product_ai_stream_chunks.clone(),
             product_ai_stream_label: state.product_ai_stream_label.clone(),
             product_ai_streamed: state.product_ai_streamed,
@@ -1332,6 +1358,13 @@ pub struct ProjectionView {
     selected_activity: ActivitySurface,
     utility_surface: Option<UtilitySurface>,
     settings_section: SettingsSection,
+    #[cfg(feature = "ai")]
+    mcp_settings_draft: mcp_settings::McpSettingsDraft,
+    ai_profile_credential_draft: Option<(
+        legion_app::AiProviderProfile,
+        crate::bridge::SensitiveString,
+    )>,
+    ai_profile_metadata_draft: Option<legion_app::AiProviderProfile>,
     utility_overlay_origin: Option<egui::Id>,
     utility_overlay_needs_focus: bool,
     utility_overlay_focus_bounds: Option<(egui::Id, egui::Id)>,
@@ -1353,6 +1386,7 @@ pub struct ProjectionView {
     pending_mode_confirmation_needs_focus: bool,
     mode_confirmation_restore_focus: Option<egui::Id>,
     streamed_layout_cache: StreamedLayoutCachePool,
+    editor_accessibility: editor_accessibility::EditorAccessibility,
     typescript_toolchain_draft: TypeScriptToolchainDraft,
     typescript_toolchain_projection: Option<TypeScriptToolchainProjection>,
     typescript_toolchain_workspace: Option<WorkspaceId>,
@@ -1422,6 +1456,7 @@ enum SettingsSection {
     Editor,
     LanguageTools,
     AiProviders,
+    McpPeers,
     Extensions,
     Notifications,
     Privacy,
@@ -1429,11 +1464,12 @@ enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Editor,
         Self::LanguageTools,
         Self::AiProviders,
+        Self::McpPeers,
         Self::Extensions,
         Self::Notifications,
         Self::Privacy,
@@ -1446,6 +1482,7 @@ impl SettingsSection {
             Self::Editor => "Editor",
             Self::LanguageTools => "Language Tools",
             Self::AiProviders => "AI Providers",
+            Self::McpPeers => "MCP Peers",
             Self::Extensions => "Extensions",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
@@ -1547,6 +1584,10 @@ impl ProjectionView {
             selected_activity: ActivitySurface::Explorer,
             utility_surface: None,
             settings_section: SettingsSection::Appearance,
+            #[cfg(feature = "ai")]
+            mcp_settings_draft: mcp_settings::McpSettingsDraft::default(),
+            ai_profile_credential_draft: None,
+            ai_profile_metadata_draft: None,
             utility_overlay_origin: None,
             utility_overlay_needs_focus: false,
             utility_overlay_focus_bounds: None,
@@ -1565,6 +1606,7 @@ impl ProjectionView {
             pending_mode_confirmation_needs_focus: false,
             mode_confirmation_restore_focus: None,
             streamed_layout_cache: StreamedLayoutCachePool::default(),
+            editor_accessibility: editor_accessibility::EditorAccessibility::default(),
             typescript_toolchain_draft: TypeScriptToolchainDraft::default(),
             typescript_toolchain_projection: None,
             typescript_toolchain_workspace: None,
@@ -1963,6 +2005,7 @@ impl ProjectionView {
                         &mut actions,
                         source,
                         &mut self.streamed_layout_cache,
+                        &mut self.editor_accessibility,
                     ),
                     CenterSurface::Canvas => canvas_workspace::render_canvas_workspace(
                         ui,
@@ -2032,6 +2075,17 @@ impl ProjectionView {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
         render_utility_overlay(ui.ctx(), snapshot, &model, self, &mut actions);
+        #[cfg(feature = "ai")]
+        if self.utility_surface != Some(UtilitySurface::Settings)
+            || self.settings_section != SettingsSection::McpPeers
+        {
+            self.mcp_settings_draft.clear_sensitive();
+        }
+        if self.utility_surface != Some(UtilitySurface::Settings)
+            || self.settings_section != SettingsSection::AiProviders
+        {
+            self.ai_profile_credential_draft = None;
+        }
         if let Some(origin) = self.mode_confirmation_restore_focus.take() {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
@@ -2880,9 +2934,18 @@ fn render_code_canvas(
     actions: &mut Vec<DesktopAction>,
     source: Option<&dyn DesktopLineSource>,
     streamed_cache: &mut StreamedLayoutCachePool,
+    accessibility: &mut editor_accessibility::EditorAccessibility,
 ) -> egui::Rect {
     render_advanced_center_surface(ui, snapshot, model, actions);
-    render_editor_canvas(ui, snapshot, model, actions, source, streamed_cache)
+    render_editor_canvas(
+        ui,
+        snapshot,
+        model,
+        actions,
+        source,
+        streamed_cache,
+        accessibility,
+    )
 }
 
 fn render_advanced_center_surface(
@@ -3676,6 +3739,7 @@ fn render_editor_canvas(
     actions: &mut Vec<DesktopAction>,
     source: Option<&dyn DesktopLineSource>,
     streamed_cache: &mut StreamedLayoutCachePool,
+    accessibility: &mut editor_accessibility::EditorAccessibility,
 ) -> egui::Rect {
     render_tab_strip(ui, snapshot, actions);
     if ui.available_height() >= 250.0 {
@@ -3703,6 +3767,26 @@ fn render_editor_canvas(
                 full_rect.min,
                 egui::pos2(full_rect.right() - minimap_width, full_rect.bottom()),
             );
+            accessibility.publish(
+                ui,
+                &snapshot.active_buffer_projection,
+                code_rect.intersect(ui.clip_rect()),
+            );
+            // Behind the line widgets: blank code-area clicks own the same
+            // keyboard identity as text clicks, without adding an AT Focus action.
+            let background = ui.interact(
+                code_rect,
+                editor_accessibility::document_widget_id().with("pointer_background"),
+                egui::Sense::CLICK,
+            );
+            if snapshot.active_buffer_projection.buffer_id.is_some()
+                && background.clicked()
+                && ui.input(|input| input.pointer.primary_clicked())
+            {
+                ui.memory_mut(|memory| {
+                    memory.request_focus(editor_accessibility::document_widget_id());
+                });
+            }
             let mut code_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(code_rect)
@@ -4175,6 +4259,10 @@ fn render_code_lines(
                                 utf16_offset: None,
                             };
                             if response.clicked() {
+                                ui.memory_mut(|memory| {
+                                    memory
+                                        .request_focus(editor_accessibility::document_widget_id());
+                                });
                                 actions.push(DesktopAction::SetVisualCursor {
                                     buffer_id: Some(buffer_id),
                                     expected_snapshot_id: viewport.snapshot_id,
@@ -4210,6 +4298,11 @@ fn render_code_lines(
                     cached_code_line_galley(ui, active_buffer_id, snapshot_id, line, wrap_width);
                 let response =
                     ui.add(egui::Label::new(galley.clone()).sense(egui::Sense::click_and_drag()));
+                if response.clicked() || response.dragged() {
+                    ui.memory_mut(|memory| {
+                        memory.request_focus(editor_accessibility::document_widget_id());
+                    });
+                }
                 if let Some(position) = response.interact_pointer_pos()
                     && let Some(buffer_id) = active_buffer_id
                 {
@@ -6995,11 +7088,28 @@ fn render_settings_panel(
                 ));
             }
         }
+        if view.settings_section == SettingsSection::McpPeers {
+            #[cfg(feature = "ai")]
+            mcp_settings::render(ui, &model.mcp_settings_peers, snapshot.product_mode == DockMode::Manual, &mut view.mcp_settings_draft, actions);
+            #[cfg(not(feature = "ai"))]
+            ui.label(theme::muted("MCP transport is unavailable in this offline build."));
+        }
         if view.settings_section == SettingsSection::AiProviders {
+            interactive_fields::render_named_provider_profiles(
+                ui,
+                &model.ai_provider_profiles,
+                model.provider_configuration_busy,
+                &mut view.ai_profile_credential_draft,
+                &mut view.ai_profile_metadata_draft,
+                actions,
+            );
+            if !model.ai_provider_profiles.iter().any(|p| p.selected)
+                && view.ai_profile_metadata_draft.is_none()
+            {
             if snapshot.assisted_ai_projection.providers.is_empty() {
-                ui.label(theme::body_strong("No AI provider configured"));
+                ui.label(theme::body_strong("No compatibility provider available"));
                 ui.label(theme::muted(
-                    "Choose an AI provider available on this computer or add an Anthropic API key.",
+                    "Add a named profile for an exact endpoint and model, or choose a compatibility preference below.",
                 ));
             } else {
                 for provider in snapshot.assisted_ai_projection.providers.iter().take(6) {
@@ -7008,7 +7118,7 @@ fn render_settings_panel(
                         &provider.provider_label,
                     );
                     let availability = match provider.availability {
-                        AssistedAiProviderAvailabilityState::Available => "Ready",
+                        AssistedAiProviderAvailabilityState::Available => "Adapter available (model unqualified)",
                         AssistedAiProviderAvailabilityState::Disabled => "Disabled",
                         AssistedAiProviderAvailabilityState::Refused => "Blocked by policy",
                         AssistedAiProviderAvailabilityState::Unavailable => "Unavailable",
@@ -7026,6 +7136,7 @@ fn render_settings_panel(
                 actions,
             );
             interactive_fields::render_anthropic_byok_form(ui, actions);
+            }
         }
         if view.settings_section == SettingsSection::Editor {
             let mut line_numbers_visible = model.settings.line_numbers_visible;

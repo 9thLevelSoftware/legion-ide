@@ -53,12 +53,25 @@ $betaWorkspace = Join-Path $smokeRoot "workspace"
 $smokeDir = Join-Path $smokeRoot "smoke"
 $stagingDir = Join-Path $smokeRoot "staging"
 $candidateTag = "v$ReleaseVersion"
+# The Windows package is the offline SKU. Select the existing Manual workflow
+# explicitly; the default beta workflow still exercises Assist proposals.
+$smokeArguments = @(
+    "--beta-smoke"
+    "--beta-manual-local"
+    "--duration-ms", "1500"
+    "--workspace", $WorkspaceRoot
+    "--beta-workspace", $betaWorkspace
+    "--evidence", (Join-Path $smokeDir "beta-smoke.md")
+    "--session-state", (Join-Path $smokeDir "session.json")
+    "--diagnostics-export", (Join-Path $smokeDir "diagnostics.md")
+)
 
 if ($PrintSmokePlan) {
     Write-Output "artifact=$msiPath"
     Write-Output "beta_workspace=$betaWorkspace"
     Write-Output "smoke_dir=$smokeDir"
     Write-Output "staging_dir=$stagingDir"
+    Write-Output "smoke_arguments=$(ConvertTo-Json -InputObject $smokeArguments -Compress)"
     exit 0
 }
 
@@ -177,6 +190,9 @@ try {
     $packageVersionStatus = "passed"
     Add-Content -LiteralPath $evidencePath -Value "package_version=passed version=$productVersion"
 
+    if (@(Get-ChildItem -LiteralPath $stagingDir -Force).Count -ne 0) {
+        Fail "Extraction directory must be empty to bind payload provenance; use a fresh WorkspaceRoot: $stagingDir"
+    }
     $arguments = @('/a', "`"$msiPath`"", '/qn', "TARGETDIR=`"$stagingDir`"", '/norestart')
     $process = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
     if ($process.ExitCode -ne 0) {
@@ -193,18 +209,23 @@ try {
     $structureStatus = "passed"
     Add-Content -LiteralPath $evidencePath -Value "structure=passed binary=$stagedBinary"
 
+    # Bind only the unique payload from this verified extraction. Recheck the
+    # installer after extraction so a changed artifact cannot acquire a binding.
+    $extractedMsiHash = (Get-FileHash -LiteralPath $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($extractedMsiHash -ne $actualHash) {
+        Fail "MSI changed during extraction; payload binding refused"
+    }
+    $payloadHash = (Get-FileHash -LiteralPath $stagedBinary -Algorithm SHA256).Hash.ToLowerInvariant()
+    [System.IO.File]::WriteAllText(
+        (Join-Path $PackageDir "legion-desktop.exe.sha256"),
+        "$payloadHash *legion-desktop.exe`n",
+        $Utf8NoBom
+    )
+    Add-Content -LiteralPath $evidencePath -Value "payload_binding=verified-extraction sha256=$payloadHash msi_sha256=$actualHash"
+
     $smokeLog = Join-Path $smokeDir "stdout-stderr.log"
     $oldPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    $smokeArguments = @(
-        "--beta-smoke"
-        "--duration-ms", "1500"
-        "--workspace", $WorkspaceRoot
-        "--beta-workspace", $betaWorkspace
-        "--evidence", (Join-Path $smokeDir "beta-smoke.md")
-        "--session-state", (Join-Path $smokeDir "session.json")
-        "--diagnostics-export", (Join-Path $smokeDir "diagnostics.md")
-    )
     & $stagedBinary @smokeArguments *> $smokeLog
     $smokeStatus = $LASTEXITCODE
     $ErrorActionPreference = $oldPreference

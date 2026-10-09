@@ -215,6 +215,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
         selection: Some(ExplorerSelectionProjection { file_id: FileId(2) }),
     };
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -428,6 +429,7 @@ fn populated_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Degraded").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -500,6 +502,7 @@ fn degraded_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Streaming").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(7)),
@@ -561,6 +564,7 @@ fn streaming_snapshot() -> legion_ui::ShellProjectionSnapshot {
 fn highlighted_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Highlighted").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -655,6 +659,7 @@ fn assist_inline_prediction_snapshot() -> legion_ui::ShellProjectionSnapshot {
     let mut snapshot = Shell::empty("Assist").projection_snapshot();
     snapshot.product_mode = DockMode::Assist;
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -728,6 +733,7 @@ enum UiStateMatrixExpectation {
 
 fn state_matrix_active_buffer(snapshot: &mut legion_ui::ShellProjectionSnapshot, dirty: bool) {
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(3)),
@@ -3941,7 +3947,7 @@ fn projection_rendering_provider_credentials_live_in_settings_ai_providers_secti
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
     assert!(accesskit_has_label(
         &full,
-        "Preferred AI provider: auto. Auto uses providers on this computer and never routes remotely; choose Anthropic for that."
+        "Provider preference: auto. Auto requires an explicitly selected named profile; it does not discover or fall back to another provider."
     ));
     assert!(accesskit_has_label(
         &full,
@@ -3986,10 +3992,13 @@ fn projection_rendering_empty_ai_providers_uses_plain_product_copy() {
         click_accessible_control(&ctx, &mut view, &snapshot, &full, "AI Providers");
     let (_settled, full) = render_projection_frame(&ctx, &mut view, &snapshot);
 
-    assert!(accesskit_has_label(&full, "No AI provider configured"));
     assert!(accesskit_has_label(
         &full,
-        "Choose an AI provider available on this computer or add an Anthropic API key."
+        "No compatibility provider available"
+    ));
+    assert!(accesskit_has_label(
+        &full,
+        "Add a named profile for an exact endpoint and model, or choose a compatibility preference below."
     ));
     let settings_text = accesskit_dialog_text(&full, "Settings");
     for internal in [

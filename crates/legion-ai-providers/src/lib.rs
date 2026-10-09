@@ -444,6 +444,9 @@ fn shared_blocking_client() -> Result<&'static reqwest::blocking::Client, String
             reqwest::blocking::Client::builder()
                 .connect_timeout(HTTP_CONNECT_TIMEOUT)
                 .timeout(HTTP_REQUEST_TIMEOUT)
+                // A provider route is authorized once, for one destination.
+                // Redirecting a POST would transmit workspace text elsewhere.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -907,6 +910,8 @@ pub struct OpenAiCompatibleProvider<T = ReqwestProviderHttpTransport> {
     auth_policy: OpenAiCompatibleAuthPolicy,
     metadata_kind: &'static str,
     transport: T,
+    max_completion_tokens: bool,
+    disable_thinking: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -975,7 +980,20 @@ where
             auth_policy,
             metadata_kind,
             transport,
+            max_completion_tokens: false,
+            disable_thinking: false,
         }
+    }
+
+    /// Select explicit chat wire options; never infer these from host/model names.
+    pub fn with_completion_options(
+        mut self,
+        max_completion_tokens: bool,
+        disable_thinking: bool,
+    ) -> Self {
+        self.max_completion_tokens = max_completion_tokens;
+        self.disable_thinking = disable_thinking;
+        self
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -1029,7 +1047,14 @@ where
             }).collect::<Vec<_>>(),
         });
         if let Some(max_tokens) = request.max_tokens {
-            payload["max_tokens"] = json!(max_tokens);
+            payload[if self.max_completion_tokens {
+                "max_completion_tokens"
+            } else {
+                "max_tokens"
+            }] = json!(max_tokens);
+        }
+        if self.disable_thinking {
+            payload["thinking"] = json!({"type": "disabled"});
         }
         if let Some(temperature) = request.temperature {
             payload["temperature"] = json!(temperature);
@@ -2978,6 +3003,34 @@ pub enum McpClientError {
     Transport(String),
 }
 
+/// Validate a credential-free MCP endpoint and return its policy target.
+pub fn mcp_endpoint_network_target(
+    endpoint: &str,
+) -> Result<legion_protocol::NetworkTarget, McpClientError> {
+    let invalid = || McpClientError::Transport("invalid MCP endpoint".into());
+    let url = reqwest::Url::parse(endpoint).map_err(|_| invalid())?;
+    let host = url.host_str().ok_or_else(invalid)?;
+    let loopback = host == "localhost"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if endpoint.trim() != endpoint
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
+    {
+        return Err(invalid());
+    }
+    Ok(legion_protocol::NetworkTarget {
+        scheme: url.scheme().into(),
+        host: host.into(),
+        port: url.port_or_known_default(),
+    })
+}
+
 /// MCP transport port.
 pub trait McpTransport {
     /// Send a JSON-RPC envelope and return the response JSON.
@@ -3180,9 +3233,18 @@ impl McpTransport for StdioMcpTransport {
 }
 
 /// Blocking Streamable HTTP MCP transport.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StreamableHttpMcpTransport {
     config: StreamableHttpMcpTransportConfig,
+    named_client: Option<reqwest::blocking::Client>,
+}
+
+impl fmt::Debug for StreamableHttpMcpTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StreamableHttpMcpTransport")
+            .finish_non_exhaustive()
+    }
 }
 
 fn ensure_rustls_crypto_provider() -> Result<(), McpClientError> {
@@ -3192,7 +3254,45 @@ fn ensure_rustls_crypto_provider() -> Result<(), McpClientError> {
 impl StreamableHttpMcpTransport {
     /// Create a Streamable HTTP transport from endpoint metadata.
     pub fn new(config: StreamableHttpMcpTransportConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            named_client: None,
+        }
+    }
+
+    /// Pin a named peer's protocol and optional bearer route; reject redirects and
+    /// environment proxies rather than silently changing endpoint/credential scope.
+    pub fn for_named_peer(
+        config: StreamableHttpMcpTransportConfig,
+        bearer: Option<&str>,
+        protocol: &str,
+    ) -> Result<Self, McpClientError> {
+        mcp_endpoint_network_target(&config.endpoint)?;
+        ensure_rustls_crypto_provider()?;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "mcp-protocol-version",
+            reqwest::header::HeaderValue::from_str(protocol)
+                .map_err(|_| McpClientError::Transport("invalid MCP protocol header".into()))?,
+        );
+        if let Some(secret) = bearer {
+            let mut authorization =
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {secret}"))
+                    .map_err(|_| McpClientError::Transport("invalid MCP authorization".into()))?;
+            authorization.set_sensitive(true);
+            headers.insert(reqwest::header::AUTHORIZATION, authorization);
+        }
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(30))
+            .default_headers(headers)
+            .build()
+            .map_err(|_| McpClientError::Transport("MCP HTTP client unavailable".into()))?;
+        Ok(Self {
+            config,
+            named_client: Some(client),
+        })
     }
 }
 
@@ -3206,10 +3306,23 @@ impl McpTransport for StreamableHttpMcpTransport {
                 "Streamable HTTP MCP endpoint must not be empty".to_string(),
             ));
         }
-        let response = shared_blocking_client()
-            .map_err(McpClientError::Transport)?
+        let client = match &self.named_client {
+            Some(client) => client,
+            None => shared_blocking_client().map_err(McpClientError::Transport)?,
+        };
+        let mut payload = serde_json::to_value(envelope)
+            .map_err(|_| McpClientError::Transport("MCP envelope encoding failed".into()))?;
+        if self.named_client.is_some()
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.remove("schema_version");
+            if envelope.id.is_none() {
+                object.remove("id");
+            }
+        }
+        let response = client
             .post(&self.config.endpoint)
-            .json(envelope)
+            .json(&payload)
             .send()
             .map_err(|error| McpClientError::Transport(error.to_string()))?;
         if !response.status().is_success() {
@@ -3217,6 +3330,9 @@ impl McpTransport for StreamableHttpMcpTransport {
                 "Streamable HTTP MCP endpoint returned {}",
                 response.status()
             )));
+        }
+        if envelope.id.is_none() {
+            return Ok(Value::Null);
         }
         response
             .json::<Value>()
@@ -3247,6 +3363,38 @@ where
     /// Return the current registry snapshot.
     pub fn registry(&self) -> &McpRegistrySnapshot {
         &self.registry
+    }
+
+    /// Negotiate a pinned protocol revision without invoking an inference provider.
+    pub fn initialize(
+        &self,
+        request_id: impl Into<String>,
+        protocol: &str,
+    ) -> Result<Value, McpClientError> {
+        self.transport.send(&McpJsonRpcEnvelope::request(
+            request_id,
+            "initialize",
+            json!({
+                "protocolVersion": protocol, "capabilities": {},
+                "clientInfo": { "name": "legion-ide", "version": env!("CARGO_PKG_VERSION") }
+            }),
+        ))
+    }
+
+    /// Finish the client handshake on transports with notification support.
+    pub fn notify_initialized(&self) -> Result<(), McpClientError> {
+        self.transport
+            .send(&McpJsonRpcEnvelope::notification(
+                "notifications/initialized",
+                json!({}),
+            ))
+            .map(|_| ())
+    }
+
+    /// Check a selected MCP endpoint through the protocol.
+    pub fn ping(&self, request_id: impl Into<String>) -> Result<Value, McpClientError> {
+        self.transport
+            .send(&McpJsonRpcEnvelope::request(request_id, "ping", json!({})))
     }
 
     /// Apply a list-changed notification and mark the registry stale for reload.

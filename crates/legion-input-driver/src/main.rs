@@ -30,8 +30,10 @@
 //! substitutes for a macOS or Linux row.
 
 mod cli;
+mod focus;
 #[cfg(windows)]
 mod inject;
+mod journey;
 // `observe`, `report` and `session` hold the host-independent vocabulary that
 // `tests/driver_contract.rs` includes by path and asserts against. Which half
 // of it the *binary* reaches depends on the host it is built for — the
@@ -61,6 +63,13 @@ fn run(args: &[String]) -> i32 {
         }
         Ok(cli::Command::ProbeSession { report }) => probe_session(&report),
         Ok(cli::Command::ConformanceRun { product, report }) => conformance_run(&product, &report),
+        Ok(cli::Command::OpenEditSave {
+            product,
+            workspace,
+            target,
+            report,
+            await_foreground,
+        }) => journey::run(&product, &workspace, &target, &report, await_foreground),
     }
 }
 

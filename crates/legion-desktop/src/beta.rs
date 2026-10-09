@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use legion_app::AppProductMode;
 use legion_protocol::{ProposalLifecycleState, TextCoordinate};
-use legion_ui::SearchScopeProjection;
+use legion_ui::{SearchScopeProjection, SearchStatusKindProjection};
 
 use crate::{
     bridge::DesktopAction,
@@ -721,6 +721,24 @@ fn run_search_action(
         use_regex: None,
     }) {
         Ok(DesktopWorkflowOutcome::SearchUpdated) => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while runtime.projection_snapshot().search_projection.status.kind
+                == SearchStatusKindProjection::Running
+            {
+                if std::time::Instant::now() >= deadline {
+                    if let Some(query_id) = runtime.projection_snapshot().search_projection.query_id
+                    {
+                        let _ = runtime.handle_action(DesktopAction::CancelSearch { query_id });
+                    }
+                    return "timeout waiting for search completion".to_string();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                // Use the same frame refresh as the desktop: app-owned search
+                // results settle without redispatching any filesystem intent.
+                if let Err(error) = runtime.refresh_projection() {
+                    return format!("error refreshing search completion: {error}");
+                }
+            }
             let projection = &runtime.projection_snapshot().search_projection;
             format!(
                 "completed {:?} results={} omitted_files={} omitted_results={}",
@@ -898,7 +916,11 @@ fn position(byte_offset: u64) -> TextCoordinate {
 
 fn beta_smoke_command(config: &BetaWorkflowConfig) -> String {
     [
-        "cargo run -p legion-desktop -- --beta-smoke".to_string(),
+        if config.manual_local {
+            "cargo run -p legion-desktop -- --beta-smoke --beta-manual-local".to_string()
+        } else {
+            "cargo run -p legion-desktop -- --beta-smoke".to_string()
+        },
         format!(
             "--workspace {}",
             shell_quote_path(&config.real_workspace_root)

@@ -114,6 +114,38 @@ pub struct CanvasPlacement {
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAction {
+    /// Configure bounded HTTP MCP metadata through existing app authority.
+    #[cfg(feature = "ai")]
+    ConfigureNamedMcpHttpPeer {
+        /// Exact displayed metadata and optional edit revision.
+        form: crate::view::mcp_settings::McpHttpPeerForm,
+    },
+    /// Select an existing peer in this desktop session without connecting.
+    #[cfg(feature = "ai")]
+    SelectNamedMcpPeer {
+        /// Existing peer identity.
+        peer_id: legion_protocol::McpServerId,
+    },
+    /// Apply an explicit lifecycle decision to the displayed selected revision.
+    #[cfg(feature = "ai")]
+    ManageNamedMcpPeer {
+        /// Selected identity.
+        peer_id: legion_protocol::McpServerId,
+        /// Displayed app-owned revision.
+        revision: u64,
+        /// Network grant, connection, health or local revocation decision.
+        operation: crate::view::mcp_settings::McpSettingsOperation,
+    },
+    /// Replace a token only for the exact displayed selected route revision.
+    #[cfg(feature = "ai")]
+    ReplaceNamedMcpPeerCredential {
+        /// Selected peer identity.
+        peer_id: legion_protocol::McpServerId,
+        /// Displayed app revision.
+        revision: u64,
+        /// Redacted, zeroizing token; never persisted to session metadata.
+        credential: SensitiveString,
+    },
     /// Quit the desktop shell.
     Quit,
     /// Save the active buffer through app authority.
@@ -1212,6 +1244,40 @@ pub enum DesktopAction {
     DeleteProviderApiKey {
         /// Provider identifier whose key should be removed.
         provider_id: String,
+    },
+    /// Add or update non-secret named route metadata through app authority.
+    ConfigureAiProviderProfile {
+        /// Exact endpoint/model and adapter options; never contains a key.
+        profile: legion_app::AiProviderProfile,
+    },
+    /// Explicitly select a configured route without connecting or changing mode.
+    SelectAiProviderProfile {
+        /// Existing profile name.
+        name: String,
+    },
+    /// Replace the secure key only if the displayed route still matches.
+    ReplaceAiProfileCredential {
+        /// Profile metadata captured by the rendered credential form.
+        expected_profile: legion_app::AiProviderProfile,
+        /// New key, redacted in diagnostics and zeroized after use.
+        credential: SensitiveString,
+    },
+    /// Revoke the secure key only if the displayed route still matches.
+    RevokeAiProfileCredential {
+        /// Profile metadata captured by the rendered credential form.
+        expected_profile: legion_app::AiProviderProfile,
+    },
+    /// Refresh metadata/keyring status only; never probe a provider endpoint.
+    RefreshAiProviderProfiles,
+    /// Explicitly check the displayed selected route through app authority.
+    CheckAiProviderConnection {
+        /// Exact metadata captured by the rendered provider settings.
+        expected_profile: legion_app::AiProviderProfile,
+    },
+    /// Discard the check outcome while its bounded transport drains.
+    CancelAiProviderConnectionCheck {
+        /// Exact metadata captured by the rendered provider settings.
+        expected_profile: legion_app::AiProviderProfile,
     },
     /// Select the product AI route preference for Assist / Delegate composition.
     ///
@@ -2997,10 +3063,22 @@ impl DesktopCommandBridge {
             // PKT-CKPT: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; this arm satisfies exhaustiveness but is never evaluated in production.
             DesktopAction::RestoreCheckpoint { .. } => DesktopBridgeOutput::Noop,
+            #[cfg(feature = "ai")]
+            DesktopAction::ConfigureNamedMcpHttpPeer { .. }
+            | DesktopAction::SelectNamedMcpPeer { .. }
+            | DesktopAction::ReplaceNamedMcpPeerCredential { .. }
+            | DesktopAction::ManageNamedMcpPeer { .. } => DesktopBridgeOutput::Noop,
             // PKT-PROV: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
             DesktopAction::SetProviderApiKey { .. }
             | DesktopAction::DeleteProviderApiKey { .. }
+            | DesktopAction::ConfigureAiProviderProfile { .. }
+            | DesktopAction::SelectAiProviderProfile { .. }
+            | DesktopAction::ReplaceAiProfileCredential { .. }
+            | DesktopAction::RevokeAiProfileCredential { .. }
+            | DesktopAction::RefreshAiProviderProfiles
+            | DesktopAction::CheckAiProviderConnection { .. }
+            | DesktopAction::CancelAiProviderConnectionCheck { .. }
             | DesktopAction::SetPreferredAiProvider { .. } => DesktopBridgeOutput::Noop,
             // PKT-RAIL: ghost text acceptance goes through the existing inline-prediction
             // acceptance path so no direct buffer mutation occurs.

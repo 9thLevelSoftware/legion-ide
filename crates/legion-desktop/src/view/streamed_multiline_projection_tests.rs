@@ -155,6 +155,7 @@ fn multiline_snapshot(source: &MultiLineSource) -> ShellProjectionSnapshot {
         })
         .collect();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(901)),
         buffer_id: Some(BufferId(901)),

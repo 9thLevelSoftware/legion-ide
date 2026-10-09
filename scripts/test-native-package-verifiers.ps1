@@ -26,7 +26,7 @@
 # on the platform-native jobs in .github/workflows/legion-release.yml.
 
 [CmdletBinding()]
-param()
+param([string]$TestFilter = "*")
 
 $ErrorActionPreference = "Stop"
 
@@ -79,6 +79,9 @@ $script:failed = 0
 $script:skipped = 0
 
 function Invoke-Test([string]$Name, [scriptblock]$Body) {
+    if ($Name -notlike $TestFilter) {
+        return
+    }
     try {
         & $Body
         $script:passed++
@@ -249,6 +252,63 @@ function Write-RealChecksumFile([string]$ArtifactPath) {
     )
 }
 
+Invoke-Test "ps verifier binds extracted payload even when headless smoke fails" {
+    if (-not $isWindowsHost) { throw "SKIP: Windows Installer Automation requires a Windows host" }
+    $fixture = New-FixtureDir "verified-payload-binding"
+    $packageDir = Join-Path $fixture "package"
+    New-Item -ItemType Directory -Path $packageDir | Out-Null
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath "0.0.1"
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $wrapper = Join-Path $fixture "extract-fixture.ps1"
+    # Mock only the OS extraction boundary, not checksum/metadata/version checks
+    # or verifier logic. where.exe is deliberately not a beta-capable product.
+    @'
+param($Verifier, $PackageDir, $SourceSha, $WorkspaceRoot)
+function Start-Process {
+    param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru)
+    if ($FilePath -ne "msiexec.exe") { throw "unexpected extraction command" }
+    $targetArg = @($ArgumentList | Where-Object { $_ -like 'TARGETDIR=*' })[0]
+    $destination = $targetArg.Substring(10).Trim('"')
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    Copy-Item -LiteralPath "$env:SystemRoot/System32/where.exe" -Destination (Join-Path $destination "legion-desktop.exe")
+    return [pscustomobject]@{ ExitCode = 0 }
+}
+
+& $Verifier -PackageDir $PackageDir -ReleaseVersion 0.0.1 -SourceSha $SourceSha -WorkspaceRoot $WorkspaceRoot
+'@ | Set-Content -LiteralPath $wrapper
+    $output = & $psExe -NoProfile -File $wrapper $psVerifier $packageDir $testSha $fixture 2>&1 | Out-String
+    Assert-True ($LASTEXITCODE -ne 0) "non-beta payload unexpectedly passed: $output"
+    $sidecar = Join-Path $packageDir "legion-desktop.exe.sha256"
+    Assert-True (Test-Path -LiteralPath $sidecar) "verified extraction did not emit payload binding: $output"
+    $expected = (Get-FileHash -LiteralPath "$env:SystemRoot/System32/where.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ((Get-Content -LiteralPath $sidecar -Raw).Trim() -eq "$expected *legion-desktop.exe") "binding does not match extracted bytes"
+    $summary = Get-Content -LiteralPath (Join-Path $packageDir "VALIDATION-SUMMARY.toml") -Raw
+    Assert-True ($summary -match 'result = "failed"') "failed smoke was promoted to passed"
+}
+
+Invoke-Test "ps verifier refuses stale extraction before producing payload binding" {
+    if (-not $isWindowsHost) { throw "SKIP: Windows Installer Automation requires a Windows host" }
+    $fixture = New-FixtureDir "stale-extraction-binding"
+    $packageDir = Join-Path $fixture "package"
+    New-Item -ItemType Directory -Path $packageDir | Out-Null
+    $msiPath = Join-Path $packageDir "legion-desktop-windows-x64-msi.msi"
+    New-ProductVersionMsi $msiPath "0.0.1"
+    Write-RealChecksumFile $msiPath
+    Write-MetadataFile $packageDir "windows" "x64" "wix"
+    $stagingDir = Join-Path $fixture "target/release-smoke/windows-x64-msi/staging"
+    New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $stagingDir "legion-desktop.exe") -Value "unrelated stale payload"
+    $run = Invoke-PsVerifier @(
+        "-PackageDir", $packageDir, "-ReleaseVersion", "0.0.1",
+        "-SourceSha", $testSha, "-WorkspaceRoot", $fixture
+    )
+    Assert-True ($run.ExitCode -ne 0) "stale extraction unexpectedly passed"
+    Assert-True ($run.Output -match 'Extraction directory must be empty') "stale extraction refusal missing: $($run.Output)"
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $packageDir "legion-desktop.exe.sha256"))) "stale payload acquired a verified binding"
+}
+
 $zeroHash = "0" * 64
 
 Write-Host "== native package verifier contract tests =="
@@ -311,6 +371,11 @@ Invoke-Test "ps verifier plans windows-x64-msi beta workspace under <workspace>/
     Assert-True ($betaWorkspace.StartsWith($expectedPrefix, [System.StringComparison]::OrdinalIgnoreCase)) `
         "beta workspace '$betaWorkspace' is not under '$expectedPrefix'"
     Assert-True ($betaWorkspace.EndsWith("workspace")) "beta workspace '$betaWorkspace' does not end with workspace"
+    $smokeArguments = Get-OutputValue $run.Output "smoke_arguments"
+    Assert-True ($null -ne $smokeArguments) "no observable smoke arguments in: $($run.Output)"
+    $parsedArguments = @($smokeArguments | ConvertFrom-Json)
+    Assert-True ($parsedArguments -contains "--beta-smoke") "plan does not select beta smoke"
+    Assert-True ($parsedArguments -contains "--beta-manual-local") "offline MSI smoke must explicitly select Manual local"
 }
 
 # --- POSIX verifier: missing-file rejection with evidence streamed to stdout ---
@@ -646,7 +711,8 @@ Invoke-Test "stage script rejects a source under target/release" {
     $smokePackageDir = Join-Path $smokeFixture "package"
     New-StagePackageFixture $smokePackageDir "" | Out-Null
     $smokeSource = Join-Path $smokeFixture "target/release-smoke/windows-x64-msi/staging"
-    New-StagePayloadTree $smokeSource 1 | Out-Null
+    $smokePayload = New-StagePayloadTree $smokeSource 1
+    Write-PayloadBinding $smokePackageDir (Join-Path $smokePayload "legion-desktop.exe")
     $smokeRun = Invoke-StageScript @(
         "-PackageDir", $smokePackageDir,
         "-StagingSource", $smokeSource,

@@ -198,6 +198,7 @@ pub(crate) fn declared_request_tokens(prompt_bytes: usize, completion_tokens: u3
 /// exists precisely to refuse a request that cannot say what it costs.
 pub(crate) fn declared_request_cost_cents(backend: ProductAiLiveBackend) -> Option<u64> {
     match backend {
+        ProductAiLiveBackend::Configured(_) => None,
         // Both local backends declare zero, and they have to declare the same
         // thing because they cost the same thing. An organisation that allows
         // `llama-cpp` and requires a cost declaration for `ai.provider.*` would
@@ -368,24 +369,33 @@ impl AppComposition {
         &mut self,
         metadata: &InlinePredictionRequestMetadata,
     ) -> Result<bool, AppCompositionError> {
-        let Some(backend) = product_ai_selected_live_backend(self.preferred_ai_provider) else {
-            return Ok(false);
+        let Some(backend) = self.selected_product_ai_selection()?.0 else {
+            return if self.preferred_ai_provider == ProductAiProviderPreference::Deterministic {
+                Ok(false)
+            } else {
+                Err(AppCompositionError::AiRuntime(
+                    "selected AI provider unavailable; configure its endpoint/model/credentials"
+                        .to_string(),
+                ))
+            };
         };
-        if !self.inline_prediction_provider_authorized(backend, metadata)? {
-            return Ok(false);
+        if !self.inline_prediction_provider_authorized(backend.clone(), metadata)? {
+            return Err(AppCompositionError::AiRuntime(
+                "selected AI provider denied by policy".into(),
+            ));
         }
 
-        let (provider_id, model, _class, _target, _, _, _) = product_ai_route_fields(Some(backend));
+        let (provider_id, model, _class, _target, _, _, _) =
+            product_ai_route_fields(Some(backend.clone()));
         let Some(lane_reservation) = ProductAiLaneReservation::try_acquire(
             self.live_product_ai_stream.clone(),
             "assist.inline_prediction",
             &provider_id,
             &model,
         ) else {
-            // Another product operation owns the lane. Falling back to the
-            // deterministic path keeps ghost text answering rather than
-            // failing, which is the right trade for a suggestion.
-            return Ok(false);
+            return Err(AppCompositionError::AiRuntime(
+                "selected AI provider is busy".into(),
+            ));
         };
 
         let buffer_excerpt = self.inline_prediction_excerpt(metadata);
@@ -434,7 +444,9 @@ impl AppComposition {
             // certainly not a reason to run the provider on this thread after
             // deciding not to. The lane reservation is dropped with the closure,
             // which releases it.
-            Err(_error) => Ok(false),
+            Err(_error) => Err(AppCompositionError::AiRuntime(
+                "selected AI provider worker unavailable".into(),
+            )),
         }
     }
 
@@ -443,6 +455,7 @@ impl AppComposition {
         &mut self,
         _metadata: &InlinePredictionRequestMetadata,
     ) -> Result<bool, AppCompositionError> {
+        self.selected_product_ai_selection()?;
         Ok(false)
     }
 
@@ -470,9 +483,9 @@ impl AppComposition {
         metadata: &InlinePredictionRequestMetadata,
     ) -> Result<bool, AppCompositionError> {
         let (provider_id, _model, _class, network_target, _, _, _) =
-            product_ai_route_fields(Some(backend));
+            product_ai_route_fields(Some(backend.clone()));
         let broker = DenyByDefaultBroker::new(
-            self.product_ai_policy_with_org_ceiling(Some(backend)),
+            self.product_ai_policy_with_org_ceiling(Some(backend.clone())),
             CapabilityNamespace("app.ai".to_string()),
         );
         let decision = broker
@@ -514,6 +527,26 @@ impl AppComposition {
 /// before. A partial ceiling is worse than none: the call sites believe
 /// they are governed.
 mod org_ceiling {
+    #[cfg(feature = "ai")]
+    fn unavailable_test_backend() -> super::ProductAiLiveBackend {
+        let mut app = crate::AppComposition::with_provider_secret_store(std::sync::Arc::new(
+            legion_storage::InMemorySecretStore::default(),
+        ));
+        app.configure_ai_provider_profile(crate::AiProviderProfile {
+            name: "failure-test".into(),
+            provider_id: "anthropic".into(),
+            endpoint: "http://127.0.0.1:1".into(),
+            model: "test-model".into(),
+            max_completion_tokens: false,
+            disable_thinking: false,
+        })
+        .unwrap();
+        app.select_ai_provider_profile("failure-test").unwrap();
+        app.replace_ai_profile_credential("failure-test", "synthetic-test-key")
+            .unwrap();
+        app.selected_product_ai_selection().unwrap().0.unwrap()
+    }
+
     use legion_security::{
         PolicyKeyring, PolicySigningKey, policy_bundle_verifying_key_b64, sign_policy_bundle,
     };
@@ -899,11 +932,9 @@ mod org_ceiling {
             "src/main.rs",
             None,
         );
-        // Anthropic with no credential resolvable in the test environment: the
-        // backend is selected and the call cannot succeed, which is the shape
-        // of a live failure.
+        // A closed loopback peer and synthetic key never resolve production credentials.
         let (failed, stream) = crate::product_ai_completion::resolve_assisted_edit_proposal_text(
-            Some(super::ProductAiLiveBackend::Anthropic),
+            Some(unavailable_test_backend()),
             crate::ProductAiProviderPreference::Anthropic,
             None,
             "tidy this",
@@ -921,7 +952,7 @@ mod org_ceiling {
             "a failed provider run must not be summarised as an ordinary offline one"
         );
         assert!(
-            failed.summary.contains("anthropic"),
+            failed.summary.contains("configured profile"),
             "the summary must name the backend that failed, got {:?}",
             failed.summary
         );
@@ -933,9 +964,14 @@ mod org_ceiling {
             "the details a reviewer checks must record the failure, got {:?}",
             failed.details
         );
-        assert_eq!(
-            failed.replacement, offline.replacement,
-            "the fallback content itself is unchanged; only what it claims about itself is"
+        assert!(
+            failed.replacement.is_empty(),
+            "a failed provider produces no fixture edit"
+        );
+        assert_eq!(failed.span, (0, 0));
+        assert!(
+            !offline.replacement.is_empty(),
+            "deliberate fixture remains available"
         );
     }
 
@@ -1054,7 +1090,7 @@ mod org_ceiling {
             None,
         );
         let (failed, stream) = crate::product_ai_completion::resolve_delegate_chat_reply(
-            Some(super::ProductAiLiveBackend::Anthropic),
+            Some(unavailable_test_backend()),
             crate::ProductAiProviderPreference::Anthropic,
             None,
             "what does this do?",
@@ -1075,8 +1111,8 @@ mod org_ceiling {
             "a failed provider run must not read the same as an ordinary offline one"
         );
         assert!(
-            failed.contains("did not answer"),
-            "the reply must say the provider did not answer, got {failed:?}"
+            failed.contains("unavailable; no reply produced"),
+            "the reply must report unavailability without fixture output, got {failed:?}"
         );
         assert!(
             !failed.contains("enable Ollama loopback"),
@@ -1246,7 +1282,7 @@ mod org_ceiling {
             crate::ProductAiLiveBackend::LlamaCpp,
         ] {
             let (class, health, cost) =
-                crate::inline_prediction_route_labels(Some(backend), "some-provider");
+                crate::inline_prediction_route_labels(Some(backend.clone()), "some-provider");
 
             assert_eq!(
                 class,

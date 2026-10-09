@@ -4,8 +4,8 @@
 //! is not evidence that a desktop session exists, and neither is an environment
 //! variable that happens to be set on a developer's machine. A headless Windows
 //! CI runner, or a process running in a service session, must report that it
-//! cannot attach — which is exactly what `OpenInputDesktop` /
-//! `SetThreadDesktop` do when there is no input desktop to attach to.
+//! cannot attach. `UOI_IO` checks the current attachment; otherwise
+//! `OpenInputDesktop` / `SetThreadDesktop` must establish one.
 
 /// The outcome of attempting to attach this process to the input desktop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,41 +29,73 @@ pub enum DesktopAttachment {
 
 /// Attach to the input desktop, or report why that was impossible.
 ///
-/// On Windows this opens the *input* desktop (the one currently receiving
-/// keyboard and mouse input) and makes it this thread's desktop. Both calls
-/// fail in a service session and on a station with no visible desktop, which is
-/// the property the blocked path depends on.
+/// On Windows this first checks whether the thread's existing desktop receives
+/// input. If so, retain that attachment and its granted access. Otherwise open
+/// the input desktop and attach; inability to query or attach remains blocked.
 #[cfg(windows)]
 pub fn probe_input_desktop() -> DesktopAttachment {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
-        DESKTOP_WRITEOBJECTS, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop,
-        UOI_NAME,
+        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEWINDOW,
+        DESKTOP_READOBJECTS, DESKTOP_WRITEOBJECTS, GetThreadDesktop, GetUserObjectInformationW,
+        OpenInputDesktop, SetThreadDesktop, UOI_IO, UOI_NAME,
     };
+    use windows::Win32::System::Threading::GetCurrentThreadId;
 
-    let access = DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0);
+    // STA COM bootstrap creates a hidden window after SetThreadDesktop. The
+    // attached handle must permit it; this requests one extra object right,
+    // without changing the desktop ACL or bypassing attachment failure.
+    let access = DESKTOP_ACCESS_FLAGS(
+        DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0 | DESKTOP_CREATEWINDOW.0,
+    );
     // SAFETY: plain Win32 calls with owned arguments; the returned handle is
     // checked before use and this process exits shortly after the probe.
     unsafe {
-        let desktop = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, access) {
+        let current = match GetThreadDesktop(GetCurrentThreadId()) {
             Ok(desktop) => desktop,
             Err(err) => {
                 return DesktopAttachment::NotAttached {
-                    detail: format!("OpenInputDesktop failed: {err}"),
+                    detail: format!("GetThreadDesktop failed: {err}"),
                 };
             }
         };
-
-        if let Err(err) = SetThreadDesktop(desktop) {
-            let _ = CloseDesktop(desktop);
+        let mut receives_input = 0u32;
+        if let Err(err) = GetUserObjectInformationW(
+            HANDLE(current.0),
+            UOI_IO,
+            Some((&mut receives_input as *mut u32).cast()),
+            std::mem::size_of_val(&receives_input) as u32,
+            None,
+        ) {
             return DesktopAttachment::NotAttached {
-                detail: format!("SetThreadDesktop failed: {err}"),
+                detail: format!("query current desktop input status failed: {err}"),
             };
         }
+        let desktop = if receives_input != 0 {
+            // Reopening the same input desktop with a reduced mask and calling
+            // SetThreadDesktop would replace this thread's existing access.
+            // GetThreadDesktop returns a borrowed handle: do not close it.
+            current
+        } else {
+            let desktop = match OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, access) {
+                Ok(desktop) => desktop,
+                Err(err) => {
+                    return DesktopAttachment::NotAttached {
+                        detail: format!("OpenInputDesktop failed: {err}"),
+                    };
+                }
+            };
+            if let Err(err) = SetThreadDesktop(desktop) {
+                let _ = CloseDesktop(desktop);
+                return DesktopAttachment::NotAttached {
+                    detail: format!("SetThreadDesktop failed: {err}"),
+                };
+            }
+            desktop
+        };
 
-        // The handle deliberately stays open: it is now this thread's desktop,
-        // and closing it would detach the thread that is about to inject.
+        // Retain the borrowed handle or keep the newly opened attachment alive
+        // until process exit. No ACL, token, or desktop activation is changed.
         let mut name = [0u16; 128];
         let mut needed = 0u32;
         let byte_length = u32::try_from(std::mem::size_of_val(&name)).unwrap_or(0);

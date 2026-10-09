@@ -3451,6 +3451,8 @@ fn validate_grapheme_dependency_specs(
 ) -> Vec<String> {
     const DEPENDENCY: &str = "unicode-segmentation";
     const REQUIRED: &str = "=1.13.2";
+    const DESKTOP_A11Y_POLICY: &str =
+        "Ticket 004's coordinator-approved bounded small-document accessibility repair";
     let mut issues = Vec::new();
     if !policy_text.contains("unicode-segmentation = 1.13.2") {
         issues.push(
@@ -3459,14 +3461,21 @@ fn validate_grapheme_dependency_specs(
         );
     }
     for (package, req) in owners {
-        if *package != "legion-text" {
+        if !matches!(package.as_str(), "legion-text" | "legion-desktop") {
             issues.push(format!(
-                "`{package}` directly depends on `{DEPENDENCY}`; only `legion-text` may own it"
+                "`{package}` directly depends on `{DEPENDENCY}`; only `legion-text` and policy-authorized `legion-desktop` may own it"
             ));
-        } else if req != REQUIRED {
-            issues.push(format!(
-                "`legion-text` must pin `{DEPENDENCY}` to `{REQUIRED}`, found `{req}`"
-            ));
+        } else {
+            if *package == "legion-desktop" && !policy_text.contains(DESKTOP_A11Y_POLICY) {
+                issues.push(
+                    "`plans/dependency-policy.md` must document bounded small-document accessibility authorization for `legion-desktop`".to_string(),
+                );
+            }
+            if req != REQUIRED {
+                issues.push(format!(
+                    "`{package}` must pin `{DEPENDENCY}` to `{REQUIRED}`, found `{req}`"
+                ));
+            }
         }
     }
     if !owners
@@ -5779,6 +5788,26 @@ Final gate outputs archived from current commands.
     #[test]
     fn grapheme_dependency_gate_covers_pin_owner_and_policy_cases() {
         let policy = "`unicode-segmentation = 1.13.2`";
+        let desktop_policy = format!(
+            "{policy}\nTicket 004's coordinator-approved bounded small-document accessibility repair"
+        );
+        let authorized_owners = vec![
+            ("legion-text".to_string(), "=1.13.2".to_string()),
+            ("legion-desktop".to_string(), "=1.13.2".to_string()),
+        ];
+        assert!(validate_grapheme_dependency_specs(&authorized_owners, &desktop_policy).is_empty());
+        assert!(
+            validate_grapheme_dependency_specs(&authorized_owners, policy)
+                .iter()
+                .any(|issue| issue.contains("small-document accessibility authorization"))
+        );
+        let mut unpinned_desktop = authorized_owners.clone();
+        unpinned_desktop[1].1 = "^1.13.2".to_string();
+        assert!(
+            validate_grapheme_dependency_specs(&unpinned_desktop, &desktop_policy)
+                .iter()
+                .any(|issue| issue.contains("`legion-desktop` must pin"))
+        );
         assert!(
             validate_grapheme_dependency_specs(
                 &[("legion-text".to_string(), "=1.13.2".to_string())],

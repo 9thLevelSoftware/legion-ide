@@ -57,6 +57,7 @@ fn fingerprint(value: &str) -> FileFingerprint {
 fn syntax_highlights_map_to_correct_token_kinds() {
     let mut snapshot = Shell::empty("HighlightJourney").projection_snapshot();
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         state: ActiveBufferProjectionState::Full,
         workspace_id: Some(WorkspaceId(1)),
         buffer_id: Some(BufferId(10)),

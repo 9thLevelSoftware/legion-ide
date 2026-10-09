@@ -816,6 +816,7 @@ fn focus_order_follows_the_projected_accessibility_node_sequence() {
         selection: Some(ExplorerSelectionProjection { file_id: FileId(1) }),
     };
     snapshot.active_buffer_projection = ActiveBufferProjection {
+        accessibility: None,
         workspace_id: None,
         buffer_id: Some(BufferId(7)),
         file_id: Some(FileId(1)),

@@ -22,6 +22,304 @@
 
 use std::path::Path;
 
+/// Published properties of a UIA TabItem, read independently of product state.
+#[derive(Clone, Debug)]
+pub struct TabObservation {
+    pub name: String,
+    pub selected: bool,
+    pub visible: bool,
+    pub description: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabState {
+    Clean,
+    Dirty,
+}
+
+/// Require one exact visible selected tab; unknown descriptions are not clean.
+pub fn selected_tab_state(target: &str, tabs: &[TabObservation]) -> Result<TabState, String> {
+    let matches: Vec<_> = tabs
+        .iter()
+        .filter(|tab| tab.name == target && tab.visible)
+        .collect();
+    let [tab] = matches.as_slice() else {
+        return Err(format!(
+            "target {target:?} must identify one visible UIA TabItem; found {}",
+            matches.len()
+        ));
+    };
+    if !tab.selected {
+        return Err("exact target UIA TabItem is not selected".into());
+    }
+    match tab.description.as_str() {
+        "" => Ok(TabState::Clean),
+        "Unsaved changes" => Ok(TabState::Dirty),
+        _ => Err("selected target UIA TabItem has an unknown full description".into()),
+    }
+}
+
+/// UIA properties used at the external navigation boundary. Control type IDs
+/// are the published UIA IDs (Button 50000, Dialog/Window 50032).
+#[derive(Clone, Debug)]
+pub struct ExplorerElement<T> {
+    pub name: String,
+    pub control_type: i32,
+    pub visible: bool,
+    pub value: T,
+}
+
+pub struct ExplorerNavigationSnapshot<T> {
+    drawer_buttons: Vec<T>,
+    scoped_targets: Option<Vec<T>>,
+    scoped_close_buttons: Option<Vec<T>>,
+}
+
+/// UIA offscreen flags alone do not rule out clipped content. Require the
+/// actual click center inside the current product client and proven container.
+pub fn contained_click_center(
+    element: [i32; 4],
+    client: [i32; 4],
+    container: Option<[i32; 4]>,
+) -> Result<(i32, i32), String> {
+    let positive = |rect: [i32; 4]| rect[2] > rect[0] && rect[3] > rect[1];
+    if !positive(element) {
+        return Err("UIA element has no positive bounds; no input sent".into());
+    }
+    let center = (
+        ((i64::from(element[0]) + i64::from(element[2])) / 2) as i32,
+        ((i64::from(element[1]) + i64::from(element[3])) / 2) as i32,
+    );
+    for rect in std::iter::once(client).chain(container) {
+        if !positive(rect)
+            || center.0 < rect[0]
+            || center.0 >= rect[2]
+            || center.1 < rect[1]
+            || center.1 >= rect[3]
+        {
+            return Err(
+                "UIA click center is outside product client or Explorer drawer; no input sent"
+                    .into(),
+            );
+        }
+    }
+    Ok(center)
+}
+
+/// A geometrically valid point can still be covered by another element.
+pub fn verified_click_center(
+    element: [i32; 4],
+    client: [i32; 4],
+    container: Option<[i32; 4]>,
+    hit_is_target: impl FnOnce((i32, i32)) -> Result<bool, String>,
+) -> Result<(i32, i32), String> {
+    let center = contained_click_center(element, client, container)?;
+    if !hit_is_target(center)? {
+        return Err("UIA point hit does not identify exact intended element; no input sent".into());
+    }
+    Ok(center)
+}
+
+#[derive(Clone, Copy)]
+pub struct ScopeBounds {
+    pub rectangle: [i32; 4],
+    pub verified_explorer_drawer: bool,
+}
+
+pub struct ClickObservation {
+    pub center: (i32, i32),
+    pub explorer_scope_geometry_unavailable: bool,
+}
+
+/// The named semantic Dialog currently publishes exactly zero bounds. Only
+/// that verified scope may omit geometry; target/client bounds and hit identity
+/// still apply. Positive and all other malformed scope rectangles stay strict.
+pub fn verified_scoped_click_center(
+    element: [i32; 4],
+    client: [i32; 4],
+    scope: Option<ScopeBounds>,
+    hit_is_target: impl FnOnce((i32, i32)) -> Result<bool, String>,
+) -> Result<ClickObservation, String> {
+    let unavailable =
+        scope.is_some_and(|scope| scope.verified_explorer_drawer && scope.rectangle == [0; 4]);
+    let container = scope.and_then(|scope| (!unavailable).then_some(scope.rectangle));
+    let center = verified_click_center(element, client, container, hit_is_target)?;
+    Ok(ClickObservation {
+        center,
+        explorer_scope_geometry_unavailable: unavailable,
+    })
+}
+
+/// Only descendants of the unique visible named drawer are Explorer targets.
+/// Same-name tabs, breadcrumbs and Excerpts buttons elsewhere are not evidence.
+pub fn explorer_navigation_snapshot<T>(
+    target: &str,
+    controls: Vec<ExplorerElement<T>>,
+    mut descendants: impl FnMut(&T) -> Result<Vec<ExplorerElement<T>>, String>,
+) -> Result<ExplorerNavigationSnapshot<T>, String> {
+    let mut scopes = Vec::new();
+    let mut drawer_buttons = Vec::new();
+    for element in controls {
+        if element.visible && element.name == "Explorer drawer" {
+            match element.control_type {
+                50032 => scopes.push(element.value),
+                50000 => drawer_buttons.push(element.value),
+                _ => {}
+            }
+        }
+    }
+    if scopes.len() > 1 {
+        return Err(format!(
+            "Explorer drawer scope must be unique; found {}",
+            scopes.len()
+        ));
+    }
+    let (scoped_targets, scoped_close_buttons) = if let Some(scope) = scopes.pop() {
+        let mut targets = Vec::new();
+        let mut close_buttons = Vec::new();
+        for element in descendants(&scope)? {
+            if element.visible && element.control_type == 50000 {
+                if element.name == target {
+                    targets.push(element.value);
+                } else if element.name == "Close Explorer drawer" {
+                    close_buttons.push(element.value);
+                }
+            }
+        }
+        (Some(targets), Some(close_buttons))
+    } else {
+        (None, None)
+    };
+    Ok(ExplorerNavigationSnapshot {
+        drawer_buttons,
+        scoped_targets,
+        scoped_close_buttons,
+    })
+}
+
+/// File selection leaves the native drawer open. Close only its scoped button
+/// and observe absence before the caller may target the editor behind it.
+pub fn close_explorer_drawer<T>(
+    mut snapshot: impl FnMut() -> Result<ExplorerNavigationSnapshot<T>, String>,
+    mut click_close: impl FnMut(T) -> Result<(), String>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut pause: impl FnMut(),
+) -> Result<(), String> {
+    let Some(mut buttons) = snapshot()?.scoped_close_buttons else {
+        return Ok(());
+    };
+    if buttons.len() != 1 {
+        return Err(format!(
+            "Close Explorer drawer must identify one scoped Button; found {}; no editor input sent",
+            buttons.len()
+        ));
+    }
+    click_close(buttons.remove(0))?;
+    let deadline = elapsed() + std::time::Duration::from_secs(3);
+    while elapsed() < deadline {
+        if snapshot()?.scoped_close_buttons.is_none() {
+            return Ok(());
+        }
+        pause();
+    }
+    Err("timed out waiting for Explorer drawer absence; no editor input sent".into())
+}
+
+/// Wait only for the exact document element to own focus; never repair focus
+/// with product actions or accept another control inside the same HWND.
+pub fn wait_for_editor_focus(
+    mut is_focused: impl FnMut() -> Result<bool, String>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut pause: impl FnMut(),
+) -> Result<(), String> {
+    let deadline = elapsed() + std::time::Duration::from_secs(3);
+    while elapsed() < deadline {
+        if is_focused()? {
+            return Ok(());
+        }
+        pause();
+    }
+    Err("exact document editor did not receive keyboard focus; no text input sent".into())
+}
+
+/// Use an already-open scoped row or open the unique compact drawer once and
+/// wait at most three seconds for its scoped row. Unscoped wide mode blocks.
+pub fn navigate_explorer_target<T>(
+    target: &str,
+    mut snapshot: impl FnMut() -> Result<ExplorerNavigationSnapshot<T>, String>,
+    mut click_drawer: impl FnMut(T) -> Result<(), String>,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut pause: impl FnMut(),
+) -> Result<T, String> {
+    fn unique<T>(mut values: Vec<T>, label: &str) -> Result<T, String> {
+        if values.len() != 1 {
+            return Err(format!(
+                "{label} must identify exactly one visible element; found {}",
+                values.len()
+            ));
+        }
+        Ok(values.remove(0))
+    }
+    let initial = snapshot()?;
+    let target_label = format!("Explorer scoped target {target:?}");
+    if let Some(targets) = initial.scoped_targets {
+        return unique(targets, &target_label);
+    }
+    let drawer = unique(
+        initial.drawer_buttons,
+        "Explorer drawer Button (no proven Explorer scope)",
+    )?;
+    click_drawer(drawer)?;
+    let deadline = elapsed() + std::time::Duration::from_secs(3);
+    while elapsed() < deadline {
+        if let Some(targets) = snapshot()?.scoped_targets
+            && !targets.is_empty()
+        {
+            return unique(targets, &target_label);
+        }
+        pause();
+    }
+    Err(format!(
+        "timed out waiting for unique visible {target_label} inside Explorer drawer; no target input sent"
+    ))
+}
+
+/// External top-level window metadata, with no product-side hooks.
+#[derive(Clone, Debug)]
+pub struct ProductWindowCandidate {
+    pub handle: usize,
+    pub process_id: u32,
+    pub visible: bool,
+    pub title: String,
+    pub width: i32,
+    pub height: i32,
+    pub owner: usize,
+}
+
+/// Select only a unique visible product main window; helpers and ambiguity wait.
+pub fn select_product_window(
+    process_id: u32,
+    candidates: &[ProductWindowCandidate],
+) -> Option<usize> {
+    let mut matches = candidates.iter().filter(|candidate| {
+        candidate.process_id == process_id
+            && candidate.visible
+            && candidate.title == "Legion IDE"
+            && candidate.width > 0
+            && candidate.height > 0
+            && candidate.owner == 0
+            && candidate.handle != 0
+    });
+    let selected = matches.next()?.handle;
+    matches.next().is_none().then_some(selected)
+}
+
+/// Exact complete document comparison, allowing only the UIA CRLF/LF transport
+/// distinction. No substring, Unicode normalization or omitted suffix qualifies.
+pub fn document_text_matches(expected: &str, observed: &str) -> bool {
+    expected.replace("\r\n", "\n") == observed.replace("\r\n", "\n")
+}
+
 /// Lowercase hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     const K: [u32; 64] = [
@@ -175,7 +473,7 @@ pub fn file_digest(path: &Path) -> Result<FileDigest, String> {
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, HWND, LPARAM, RECT, SetLastError};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -187,7 +485,8 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    EnumWindows, GWLP_HWNDPARENT, GetClientRect, GetWindowLongPtrW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible,
 };
 #[cfg(windows)]
 use windows::core::BOOL;
@@ -199,7 +498,7 @@ const MAX_TEXT: i32 = 1 << 16;
 #[cfg(windows)]
 struct WindowSearch {
     process_id: u32,
-    found: HWND,
+    candidates: Vec<ProductWindowCandidate>,
 }
 
 #[cfg(windows)]
@@ -212,9 +511,29 @@ unsafe extern "system" fn collect_window(window: HWND, param: LPARAM) -> BOOL {
     // SAFETY: `window` comes from the enumeration itself.
     unsafe {
         GetWindowThreadProcessId(window, Some(&mut owner));
-        if owner == search.process_id && IsWindowVisible(window).as_bool() {
-            search.found = window;
-            return BOOL(0);
+        if owner == search.process_id {
+            let mut rect = RECT::default();
+            let mut title = [0u16; 256];
+            let title_len = GetWindowTextW(window, &mut title);
+            // EnumWindows supplies top-level windows, so HWNDPARENT is their
+            // owner. Zero is valid; distinguish it from an API failure via
+            // last error rather than GetWindow's null-to-Err wrapper.
+            SetLastError(ERROR_SUCCESS);
+            let window_owner = GetWindowLongPtrW(window, GWLP_HWNDPARENT);
+            if window_owner == 0 && GetLastError() != ERROR_SUCCESS {
+                return BOOL(1);
+            }
+            if GetClientRect(window, &mut rect).is_ok() {
+                search.candidates.push(ProductWindowCandidate {
+                    handle: window.0 as usize,
+                    process_id: owner,
+                    visible: IsWindowVisible(window).as_bool(),
+                    title: String::from_utf16_lossy(&title[..title_len as usize]),
+                    width: rect.right - rect.left,
+                    height: rect.bottom - rect.top,
+                    owner: window_owner as usize,
+                });
+            }
         }
     }
     BOOL(1)
@@ -241,7 +560,8 @@ pub enum WindowWait {
     TimedOut,
 }
 
-/// Wait for a visible top-level window owned by `process_id`.
+/// Wait for a unique visible, unowned `Legion IDE` window with a positive client
+/// area belonging to `process_id`. Never select the zero-area Winit event helper.
 #[cfg(windows)]
 pub fn wait_for_window(
     process_id: u32,
@@ -255,14 +575,15 @@ pub fn wait_for_window(
         }
         let mut search = WindowSearch {
             process_id,
-            found: HWND(std::ptr::null_mut()),
+            candidates: Vec::new(),
         };
         let param = LPARAM(&raw mut search as isize);
         // SAFETY: the callback is a plain `extern "system"` function and
         // `param` points at a live local for the duration of the call.
-        let _ = unsafe { EnumWindows(Some(collect_window), param) };
-        if !search.found.is_invalid() {
-            return WindowWait::Found(search.found);
+        if unsafe { EnumWindows(Some(collect_window), param) }.is_ok()
+            && let Some(handle) = select_product_window(process_id, &search.candidates)
+        {
+            return WindowWait::Found(HWND(handle as *mut std::ffi::c_void));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -280,7 +601,266 @@ pub struct UiaOracle {
 }
 
 #[cfg(windows)]
+pub struct ExplorerClickTarget {
+    pub element: IUIAutomationElement,
+    pub scope: Option<IUIAutomationElement>,
+}
+
+#[cfg(windows)]
 impl UiaOracle {
+    /// Read the real tab strip's role, selection and full-description properties.
+    /// Explorer rows and debug projection strings cannot satisfy this oracle.
+    pub fn selected_tab_state(
+        &self,
+        root: &IUIAutomationElement,
+        target: &str,
+    ) -> Result<TabState, String> {
+        use windows::Win32::UI::Accessibility::{
+            IUIAutomationElement6, IUIAutomationSelectionItemPattern, UIA_SelectionItemPatternId,
+            UIA_TabItemControlTypeId,
+        };
+        use windows::core::Interface;
+        let mut tabs = Vec::new();
+        for element in self.subtree(root)? {
+            // SAFETY: all values are read from a live external UIA element.
+            unsafe {
+                if element.CurrentControlType().map_err(|e| e.to_string())?
+                    != UIA_TabItemControlTypeId
+                {
+                    continue;
+                }
+                let name = element
+                    .CurrentName()
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                if name != target {
+                    continue;
+                }
+                let visible = !element
+                    .CurrentIsOffscreen()
+                    .map_err(|e| e.to_string())?
+                    .as_bool();
+                if !visible {
+                    continue;
+                }
+                let pattern = element
+                    .GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                    .map_err(|e| format!("target tab selection unavailable: {e}"))?;
+                let selected = pattern
+                    .CurrentIsSelected()
+                    .map_err(|e| e.to_string())?
+                    .as_bool();
+                let description = element
+                    .cast::<IUIAutomationElement6>()
+                    .map_err(|e| format!("target tab full-description interface unavailable: {e}"))?
+                    .CurrentFullDescription()
+                    .map_err(|e| e.to_string())?
+                    .to_string();
+                tabs.push(TabObservation {
+                    name,
+                    selected,
+                    visible,
+                    description,
+                });
+            }
+        }
+        selected_tab_state(target, &tabs)
+    }
+
+    /// Select the unique complete TextPattern matching the externally read file.
+    /// Ambiguous, truncated and unavailable document oracles are blocked.
+    pub fn exact_document_element(
+        &self,
+        root: &IUIAutomationElement,
+        baseline: &str,
+    ) -> Result<(IUIAutomationElement, IUIAutomationTextPattern), String> {
+        let mut matches = Vec::new();
+        for element in self.subtree(root)? {
+            if let Ok(pattern) = unsafe {
+                element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            } && let Ok(text) = self.document_text(&pattern)
+                && document_text_matches(baseline, &text)
+            {
+                matches.push((element, pattern));
+            }
+        }
+        if matches.len() != 1 {
+            return Err(format!(
+                "exact complete target document must identify one UIA text element; found {}",
+                matches.len()
+            ));
+        }
+        Ok(matches.remove(0))
+    }
+    /// Read accessible names; callers must not infer a specific dirty affordance
+    /// merely from an unrelated change elsewhere in the window.
+    pub fn names(&self, root: &IUIAutomationElement) -> Result<Vec<String>, String> {
+        self.subtree(root)?
+            .into_iter()
+            .map(|element| unsafe {
+                element
+                    .CurrentName()
+                    .map(|name| name.to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .collect()
+    }
+
+    /// Read the product's named Explorer Dialog/Window and its actual subtree.
+    /// Flattened global filename buttons cannot establish Explorer membership.
+    pub fn explorer_navigation_elements(
+        &self,
+        root: &IUIAutomationElement,
+        name: &str,
+    ) -> Result<ExplorerNavigationSnapshot<ExplorerClickTarget>, String> {
+        explorer_navigation_snapshot(
+            name,
+            self.navigation_controls(self.subtree(root)?, None)?,
+            |scope| self.navigation_controls(self.subtree(&scope.element)?, Some(&scope.element)),
+        )
+    }
+
+    fn navigation_controls(
+        &self,
+        elements: Vec<IUIAutomationElement>,
+        scope: Option<&IUIAutomationElement>,
+    ) -> Result<Vec<ExplorerElement<ExplorerClickTarget>>, String> {
+        let mut controls = Vec::new();
+        for element in elements {
+            let label = unsafe { element.CurrentName() }
+                .map_err(|error| error.to_string())?
+                .to_string();
+            let control_type = unsafe { element.CurrentControlType() }
+                .map_err(|error| error.to_string())?
+                .0;
+            let visible = !unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| error.to_string())?
+                .as_bool();
+            controls.push(ExplorerElement {
+                name: label,
+                control_type,
+                visible,
+                value: ExplorerClickTarget {
+                    element,
+                    scope: scope.cloned(),
+                },
+            });
+        }
+        Ok(controls)
+    }
+
+    /// Current UIA bounds supply coordinates, constrained by the actual HWND
+    /// client and (for a scoped row) its current visible drawer bounds.
+    pub fn clickable_center(
+        &self,
+        window: HWND,
+        element: &IUIAutomationElement,
+        scope: Option<&IUIAutomationElement>,
+    ) -> Result<(i32, i32), String> {
+        self.clickable_center_with_observation(window, element, scope)
+            .map(|point| point.center)
+    }
+
+    pub fn clickable_center_with_observation(
+        &self,
+        window: HWND,
+        element: &IUIAutomationElement,
+        scope: Option<&IUIAutomationElement>,
+    ) -> Result<ClickObservation, String> {
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowInfo, WINDOWINFO};
+        let current_bounds = |element: &IUIAutomationElement| {
+            if unsafe { element.CurrentIsOffscreen() }
+                .map_err(|error| error.to_string())?
+                .as_bool()
+                || !unsafe { element.CurrentIsEnabled() }
+                    .map_err(|error| error.to_string())?
+                    .as_bool()
+            {
+                return Err(
+                    "UIA navigation element is offscreen or disabled; no input sent".into(),
+                );
+            }
+            let rect = self.bounding_rectangle(element)?;
+            Ok::<_, String>([rect.left, rect.top, rect.right, rect.bottom])
+        };
+        let target_element = element;
+        let element = current_bounds(element)?;
+        let container = scope
+            .map(|scope| {
+                // Scope uniqueness and exact label selection come from the navigation
+                // snapshot. Recheck current semantic identity and actual membership.
+                let rectangle = current_bounds(scope)?;
+                let named_dialog = unsafe { scope.CurrentName() }
+                    .map_err(|e| e.to_string())?
+                    .to_string()
+                    == "Explorer drawer"
+                    && unsafe { scope.CurrentControlType() }
+                        .map_err(|e| e.to_string())?
+                        .0
+                        == 50032
+                    && unsafe { target_element.CurrentControlType() }
+                        .map_err(|e| e.to_string())?
+                        .0
+                        == 50000;
+                if !named_dialog {
+                    return Err(
+                        "scope is not the exact Explorer drawer Dialog with a Button target"
+                            .to_string(),
+                    );
+                }
+                let mut member = false;
+                for descendant in self.subtree(scope)? {
+                    member |=
+                        unsafe { self.automation.CompareElements(&descendant, target_element) }
+                            .map_err(|e| e.to_string())?
+                            .as_bool();
+                }
+                if !member {
+                    return Err("target no longer belongs to Explorer drawer subtree".to_string());
+                }
+                Ok(ScopeBounds {
+                    rectangle,
+                    verified_explorer_drawer: true,
+                })
+            })
+            .transpose()?;
+        let mut info = WINDOWINFO {
+            cbSize: std::mem::size_of::<WINDOWINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: caller supplies the exact selected product HWND; cbSize is set.
+        unsafe { GetWindowInfo(window, &mut info) }
+            .map_err(|e| format!("product client unavailable: {e}"))?;
+        let client = info.rcClient;
+        verified_scoped_click_center(
+            element,
+            [client.left, client.top, client.right, client.bottom],
+            container,
+            |(x, y)| {
+                // SAFETY: UIA reads compare the actual point hit with the intended element.
+                unsafe {
+                    let hit = self
+                        .automation
+                        .ElementFromPoint(windows::Win32::Foundation::POINT { x, y })
+                        .map_err(|e| format!("UIA point hit unavailable: {e}"))?;
+                    self.automation
+                        .CompareElements(&hit, target_element)
+                        .map(|same| same.as_bool())
+                        .map_err(|e| e.to_string())
+                }
+            },
+        )
+    }
+
+    pub fn element_is_focused(&self, element: &IUIAutomationElement) -> Result<bool, String> {
+        let focused = self.focused_element()?;
+        // SAFETY: read-only comparison of live external UIA elements.
+        unsafe { self.automation.CompareElements(&focused, element) }
+            .map(|same| same.as_bool())
+            .map_err(|e| e.to_string())
+    }
     /// Initialise COM for this thread and create the UI Automation client.
     pub fn open() -> Result<Self, String> {
         // SAFETY: both calls are the documented COM bootstrap sequence.
@@ -321,9 +901,10 @@ impl UiaOracle {
                 .map_err(|err| format!("element array length failed: {err}"))?;
             let mut elements = Vec::new();
             for index in 0..length {
-                if let Ok(element) = found.GetElement(index) {
-                    elements.push(element);
-                }
+                let element = found
+                    .GetElement(index)
+                    .map_err(|err| format!("UIA subtree element {index} unavailable: {err}"))?;
+                elements.push(element);
             }
             Ok(elements)
         }

@@ -420,6 +420,7 @@ impl DesktopLaunchConfig {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut smoke_enabled = false;
         let mut beta_enabled = false;
+        let mut beta_manual_local = false;
         let mut manual_perf_enabled = false;
         let mut windowed_e2e_enabled = false;
         let mut workspace_root = None;
@@ -443,6 +444,7 @@ impl DesktopLaunchConfig {
             match arg_text.as_ref() {
                 "--smoke" => smoke_enabled = true,
                 "--beta-smoke" => beta_enabled = true,
+                "--beta-manual-local" => beta_manual_local = true,
                 "--manual-perf" => manual_perf_enabled = true,
                 "--windowed-e2e" => windowed_e2e_enabled = true,
                 "--workspace" => {
@@ -527,6 +529,9 @@ impl DesktopLaunchConfig {
         if smoke_enabled && beta_enabled {
             return Err(anyhow!("--smoke and --beta-smoke cannot be combined"));
         }
+        if beta_manual_local && !beta_enabled {
+            return Err(anyhow!("--beta-manual-local requires --beta-smoke"));
+        }
         if manual_perf_enabled && smoke_enabled {
             return Err(anyhow!("--manual-perf and --smoke cannot be combined"));
         }
@@ -561,7 +566,7 @@ impl DesktopLaunchConfig {
             None
         };
         let beta = if beta_enabled {
-            Some(BetaWorkflowConfig::new(
+            let config = BetaWorkflowConfig::new(
                 workspace_root.clone(),
                 beta_workspace_root
                     .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_WORKSPACE_PATH)),
@@ -572,7 +577,12 @@ impl DesktopLaunchConfig {
                 diagnostics_export
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_DIAGNOSTICS_EXPORT_PATH)),
-            )?)
+            )?;
+            Some(if beta_manual_local {
+                config.manual_local()
+            } else {
+                config
+            })
         } else {
             None
         };
@@ -950,6 +960,10 @@ impl SelectedProblemKey {
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
+    #[cfg(feature = "ai")]
+    selected_named_mcp_peer: Option<legion_protocol::McpServerId>,
+    // Secure-store status is read on open/explicit settings actions, never paint.
+    ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
     shell: Shell,
     bridge: DesktopCommandBridge,
     view: ProjectionView,
@@ -1129,11 +1143,24 @@ impl DesktopRuntime {
 
     /// Open the configured workspace and optional initial file.
     pub fn open(config: DesktopLaunchConfig) -> Result<Self> {
+        Self::open_with_app(config, AppComposition::new())
+    }
+
+    /// Open using an injected secure-storage port, including during session restore.
+    /// Production `open` uses the operating system keyring; isolated contracts can
+    /// supply synthetic storage without reading or modifying personal credentials.
+    pub fn open_with_provider_secret_store(
+        config: DesktopLaunchConfig,
+        store: Arc<dyn SecretStore + Send + Sync>,
+    ) -> Result<Self> {
+        Self::open_with_app(config, AppComposition::with_provider_secret_store(store))
+    }
+
+    fn open_with_app(config: DesktopLaunchConfig, mut app: AppComposition) -> Result<Self> {
         let session_record = match &config.session_state {
             Some(path) => DesktopSessionStore::load(path)?,
             None => None,
         };
-        let mut app = AppComposition::new();
         app.open_workspace(
             &config.workspace_root,
             WorkspaceTrustState::Trusted,
@@ -1249,6 +1276,9 @@ impl DesktopRuntime {
             .extend(status_details.iter().cloned());
 
         let mut runtime = Self {
+            #[cfg(feature = "ai")]
+            selected_named_mcp_peer: None,
+            ai_provider_profiles: app.ai_provider_profiles(),
             app,
             shell: Shell::new(snapshot),
             bridge: DesktopCommandBridge::new(),
@@ -1743,18 +1773,149 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 Ok(outcome)
             }
-            // Product AI route preference (local-first Auto / Ollama / Anthropic / fixture).
+            #[cfg(feature = "ai")]
+            DesktopAction::ConfigureNamedMcpHttpPeer { form } => {
+                let result = self
+                    .app
+                    .configure_named_mcp_http_peer_settings(
+                        form.configuration(),
+                        form.expected_revision,
+                    )
+                    .map(|_| ());
+                self.finish_mcp_settings_action(result, true)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::SelectNamedMcpPeer { peer_id } => {
+                let result = self.app.named_mcp_peer_configurations().iter().find(|p| p.metadata.peer_id == peer_id)
+                    .ok_or(legion_app::named_mcp_peer::NamedMcpPeerError::UnknownPeer)
+                    .and_then(|config| {
+                        if config.metadata.role != legion_protocol::named_mcp_peer::McpPeerRole::Client
+                            || !matches!(config.transport, legion_app::named_mcp_peer::NamedMcpPeerTransport::Http { .. }) {
+                            return Err(legion_app::named_mcp_peer::NamedMcpPeerError::UnsupportedEnvironment);
+                        }
+                        Ok(())
+                    });
+                if result.is_ok() {
+                    self.selected_named_mcp_peer = Some(peer_id);
+                }
+                self.finish_mcp_settings_action(result, false)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::ManageNamedMcpPeer {
+                peer_id,
+                revision,
+                operation,
+            } => {
+                use crate::view::mcp_settings::McpSettingsOperation;
+                let result = self
+                    .require_selected_mcp_peer_revision(&peer_id, revision)
+                    .and_then(|()| {
+                        match operation {
+                            McpSettingsOperation::GrantTransport => {
+                                self.app.grant_named_mcp_peer_transport(
+                                    &peer_id,
+                                    revision,
+                                    legion_app::named_mcp_peer::NamedMcpPeerPermissions::network(),
+                                )
+                            }
+                            McpSettingsOperation::Connect => {
+                                return self
+                                    .app
+                                    .start_named_mcp_peer_connection(&peer_id, revision);
+                            }
+                            McpSettingsOperation::ProbeHealth => {
+                                return self
+                                    .app
+                                    .start_named_mcp_peer_health_probe(&peer_id, revision);
+                            }
+                            McpSettingsOperation::RevokeGrant => {
+                                self.app.revoke_named_mcp_peer_grant(&peer_id)
+                            }
+                            McpSettingsOperation::RevokeCredential => self
+                                .app
+                                .revoke_named_mcp_peer_stored_credential(&peer_id, revision),
+                        }
+                        .map(|_| ())
+                    });
+                self.finish_mcp_settings_action(result, false)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::ReplaceNamedMcpPeerCredential {
+                peer_id,
+                revision,
+                credential,
+            } => {
+                let result = self
+                    .require_selected_mcp_peer_revision(&peer_id, revision)
+                    .and_then(|()| {
+                        self.app
+                            .replace_named_mcp_peer_credential(&peer_id, revision, &credential)
+                    });
+                drop(credential);
+                self.finish_mcp_settings_action(result, false)
+            }
+            DesktopAction::ConfigureAiProviderProfile { profile } => {
+                let result = self.app.configure_ai_provider_profile(profile);
+                self.finish_provider_settings_action(result, true)
+            }
+            DesktopAction::SelectAiProviderProfile { name } => {
+                let result = self.app.select_ai_provider_profile(&name);
+                self.finish_provider_settings_action(result, true)
+            }
+            DesktopAction::ReplaceAiProfileCredential {
+                expected_profile,
+                credential,
+            } => {
+                let result = self
+                    .require_displayed_provider_profile(&expected_profile)
+                    .and_then(|()| {
+                        self.app
+                            .replace_ai_profile_credential(&expected_profile.name, &credential)
+                    });
+                drop(credential);
+                self.finish_provider_settings_action(result, false)
+            }
+            DesktopAction::RevokeAiProfileCredential { expected_profile } => {
+                let result = self
+                    .require_displayed_provider_profile(&expected_profile)
+                    .and_then(|()| {
+                        self.app
+                            .revoke_ai_profile_credential(&expected_profile.name)
+                    });
+                self.finish_provider_settings_action(result, false)
+            }
+            DesktopAction::RefreshAiProviderProfiles => {
+                self.finish_provider_settings_action(Ok(()), false)
+            }
+            DesktopAction::CheckAiProviderConnection { expected_profile } => {
+                let result = self
+                    .app
+                    .start_ai_provider_connection_check(&expected_profile);
+                self.finish_provider_action(
+                    result,
+                    false,
+                    "Checking the selected provider connection.",
+                )
+            }
+            DesktopAction::CancelAiProviderConnectionCheck { expected_profile } => {
+                let result = self
+                    .app
+                    .cancel_ai_provider_connection_check(&expected_profile);
+                self.finish_provider_action(
+                    result,
+                    false,
+                    "Cancellation requested; waiting for the bounded transport to finish.",
+                )
+            }
+            // Legacy route preference; Auto requires an explicitly selected profile.
             DesktopAction::SetPreferredAiProvider { provider_id } => {
+                if self.app.provider_configuration_busy() {
+                    return self.finish_provider_settings_action(Err(legion_app::AppCompositionError::AiRuntime(
+                        "Provider configuration is busy; stop or finish the current operation first.".into(),
+                    )), false);
+                }
                 self.app.set_preferred_ai_provider_label(&provider_id);
-                let active = self.app.preferred_ai_provider().as_str();
-                self.set_status(
-                    StatusSeverity::Info,
-                    format!("Preferred AI provider set to: {active}"),
-                );
-                self.refresh_projection()?;
-                self.last_outcome = DesktopWorkflowOutcome::Noop;
-                self.persist_diagnostics_if_configured();
-                Ok(DesktopWorkflowOutcome::Noop)
+                self.finish_provider_settings_action(Ok(()), true)
             }
             // PKT-PROV: store a BYOK API key in the OS keyring.
             DesktopAction::SetProviderApiKey {
@@ -1879,6 +2040,155 @@ impl DesktopRuntime {
                 Ok(outcome)
             }
         }
+    }
+
+    #[cfg(feature = "ai")]
+    fn poll_mcp_settings_operations(&mut self) -> bool {
+        let previous_mode = self.app.product_mode();
+        let outcomes = self.app.poll_named_mcp_peer_operations();
+        let changed = !outcomes.is_empty() || self.app.product_mode() != previous_mode;
+        for (id, result) in outcomes {
+            if self.selected_named_mcp_peer.as_ref() == Some(&id)
+                && !matches!(
+                    result,
+                    Err(legion_app::named_mcp_peer::NamedMcpPeerError::StaleRevision)
+                )
+            {
+                let _ = self.finish_mcp_settings_action(result.map(|_| ()), false);
+            }
+        }
+        if changed {
+            let _ = self.refresh_projection();
+        }
+        // Retired peers can still own a drain lease even without a visible job.
+        changed
+            || self.app.provider_configuration_busy()
+            || self.app.named_mcp_peer_configurations().iter().any(|p| {
+                self.app
+                    .named_mcp_peer_operation_pending(&p.metadata.peer_id)
+            })
+    }
+
+    #[cfg(feature = "ai")]
+    fn require_selected_mcp_peer_revision(
+        &self,
+        peer_id: &legion_protocol::McpServerId,
+        revision: u64,
+    ) -> std::result::Result<(), legion_app::named_mcp_peer::NamedMcpPeerError> {
+        if self.selected_named_mcp_peer.as_ref() != Some(peer_id)
+            || self
+                .app
+                .inspect_named_mcp_peer(peer_id)
+                .is_none_or(|p| p.revision != revision)
+        {
+            return Err(legion_app::named_mcp_peer::NamedMcpPeerError::StaleRevision);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "ai")]
+    fn finish_mcp_settings_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::named_mcp_peer::NamedMcpPeerError>,
+        persist_metadata: bool,
+    ) -> Result<DesktopWorkflowOutcome> {
+        let outcome = match result {
+            Err(error) => DesktopWorkflowOutcome::Error(error.to_string()),
+            Ok(()) if persist_metadata && self.save_session_state().is_err() => DesktopWorkflowOutcome::Error(
+                "MCP settings changed for this session but could not be saved. Retry saving before closing.".into()),
+            Ok(()) => DesktopWorkflowOutcome::Noop,
+        };
+        match &outcome {
+            DesktopWorkflowOutcome::Error(message) => {
+                self.set_status(StatusSeverity::Error, message.clone())
+            }
+            _ => self.set_status(StatusSeverity::Info, "MCP settings action completed."),
+        }
+        self.refresh_projection()?;
+        self.last_outcome = outcome.clone();
+        self.persist_diagnostics_if_configured();
+        Ok(outcome)
+    }
+
+    fn require_displayed_provider_profile(
+        &self,
+        expected: &legion_app::AiProviderProfile,
+    ) -> std::result::Result<(), legion_app::AppCompositionError> {
+        if self
+            .app
+            .ai_provider_profiles()
+            .iter()
+            .any(|p| &p.profile == expected)
+        {
+            Ok(())
+        } else {
+            Err(legion_app::AppCompositionError::AiRuntime(
+                "Provider profile changed; refresh settings before changing credentials.".into(),
+            ))
+        }
+    }
+
+    fn finish_provider_settings_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::AppCompositionError>,
+        persist_metadata: bool,
+    ) -> Result<DesktopWorkflowOutcome> {
+        self.finish_provider_action(
+            result,
+            persist_metadata,
+            "Provider settings updated; no connection was made.",
+        )
+    }
+
+    fn finish_provider_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::AppCompositionError>,
+        persist_metadata: bool,
+        success_message: &'static str,
+    ) -> Result<DesktopWorkflowOutcome> {
+        let outcome = match result {
+            Err(error) => DesktopWorkflowOutcome::Error(error.to_string()),
+            Ok(()) if persist_metadata && self.save_session_state().is_err() => {
+                DesktopWorkflowOutcome::Error(
+                    "Provider settings changed for this session but could not be saved. Retry saving before closing.".into(),
+                )
+            }
+            Ok(()) => DesktopWorkflowOutcome::Noop,
+        };
+        match &outcome {
+            DesktopWorkflowOutcome::Error(message) => {
+                self.set_status(StatusSeverity::Error, message.clone())
+            }
+            _ => self.set_status(StatusSeverity::Info, success_message),
+        }
+        self.ai_provider_profiles = self.app.ai_provider_profiles();
+        self.refresh_projection()?;
+        self.last_outcome = outcome.clone();
+        self.persist_diagnostics_if_configured();
+        Ok(outcome)
+    }
+
+    /// Reconcile a check once; ordinary frames never reload the credential store.
+    pub fn poll_ai_provider_connection_check(&mut self) -> bool {
+        if !self.app.poll_ai_provider_connection_check() {
+            return false;
+        }
+        self.ai_provider_profiles = self.app.ai_provider_profiles();
+        if let Some(selected) = self
+            .ai_provider_profiles
+            .iter()
+            .find(|profile| profile.selected)
+        {
+            let state = selected.connection_check;
+            let severity = if state == legion_app::AiProviderConnectionState::Failed {
+                StatusSeverity::Error
+            } else {
+                StatusSeverity::Info
+            };
+            self.set_status(severity, state.label());
+        }
+        let _ = self.refresh_projection();
+        true
     }
 
     /// Dispatch a UI-originated action, surfacing any failure as an error
@@ -2820,6 +3130,13 @@ impl DesktopRuntime {
             review_hunk_selected_index: self.review_hunk_selected_index,
             durable_checkpoint_timeline_rows: self.list_checkpoint_timeline_rows(),
             preferred_ai_provider: self.app.preferred_ai_provider().as_str().to_string(),
+            ai_provider_profiles: self.ai_provider_profiles.clone(),
+            provider_configuration_busy: self.app.provider_configuration_busy(),
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: crate::view::mcp_settings::peer_projections(
+                &self.app,
+                self.selected_named_mcp_peer.as_ref(),
+            ),
             product_ai_stream_chunks: self
                 .app
                 .last_product_ai_stream()
@@ -4350,7 +4667,7 @@ impl DesktopRuntime {
         }
     }
 
-    fn refresh_projection(&mut self) -> Result<()> {
+    pub(crate) fn refresh_projection(&mut self) -> Result<()> {
         self.app.tick_lsp_interactions(Instant::now());
 
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.
@@ -5151,6 +5468,12 @@ impl DesktopEframeApp {
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
+        // Poll app-owned MCP workers, including retired transports draining.
+        #[cfg(feature = "ai")]
+        if self.runtime.poll_mcp_settings_operations() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
         // Progressive product AI stream: merge live SSE sink into projection and
         // keep repainting while deltas are in flight.
         // Also while an audit write is owed: a failed one is retried by the next
@@ -5161,6 +5484,13 @@ impl DesktopEframeApp {
             || self.runtime.product_ai_stream_in_flight()
             || self.runtime.search_worker_in_flight()
             || self.runtime.has_pending_route_audits()
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        // Connection checks share app authority but publish metadata only.
+        if self.runtime.poll_ai_provider_connection_check()
+            || self.runtime.app.ai_provider_connection_check_in_flight()
         {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
@@ -5246,8 +5576,10 @@ impl DesktopEframeApp {
         snapshot: &ShellProjectionSnapshot,
     ) {
         let focused = ui.memory(|memory| memory.focused());
+        let editor_focused =
+            focused == Some(crate::view::editor_accessibility::document_widget_id());
         let text_edit_focused = ui.ctx().text_edit_focused();
-        if focused.is_some() && !text_edit_focused {
+        if focused.is_some() && !editor_focused && !text_edit_focused {
             ui.input_mut(|state| {
                 state.events.retain(|event| {
                     !matches!(
@@ -5270,6 +5602,7 @@ impl DesktopEframeApp {
         // claim. Surrender it before paint so a leading space types instead
         // of pressing the leftover control.
         let typing_at_stale_control = focused.is_some()
+            && !editor_focused
             && !text_edit_focused
             && !self.focus_arrived_by_tab
             && self.runtime.center_surface_is_editor()
@@ -5436,20 +5769,25 @@ impl DesktopEframeApp {
         // after that was swallowed as an activation.
         let traversal_tab = input.key_pressed(egui::Key::Tab)
             && (!input.modifiers.any() || input.modifiers.shift_only());
+        let focused_now = ui.memory(|memory| memory.focused());
         let accesskit_focus = input.events.iter().any(|event| {
             matches!(
                 event,
                 egui::Event::AccessKitActionRequest(request)
                     if request.action == egui::accesskit::Action::Focus
+                        && request.target_tree == egui::accesskit::TreeId::ROOT
+                        && focused_now.is_some_and(|focused| {
+                            request.target_node == focused.accesskit_id()
+                        })
             )
         });
         if traversal_tab || accesskit_focus {
             self.focus_navigation_pending = true;
         }
-        let focused_now = ui.memory(|memory| memory.focused());
         if accesskit_focus && focused_now.is_some() {
             // The focus request is the navigation. Paint already applied it,
-            // including when the same control was already focused.
+            // including when the same control was already focused. Ignored
+            // requests to non-focusable nodes cannot claim an unrelated button.
             self.focus_arrived_by_tab = true;
             self.focus_owner = focused_now;
             self.focus_navigation_pending = false;
@@ -5461,8 +5799,10 @@ impl DesktopEframeApp {
             self.focus_owner = focused_now;
             self.focus_navigation_pending = false;
         }
-        let mut pressable_control_focused =
-            focused_now.is_some() && !ui.ctx().text_edit_focused() && self.focus_arrived_by_tab;
+        let mut pressable_control_focused = focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+            && self.focus_arrived_by_tab;
 
         // Typing into the editor takes the keyboard back from a stale button.
         //
@@ -5482,8 +5822,10 @@ impl DesktopEframeApp {
         // *including* a space, which is why this is a separate condition from
         // the one above. Surrendering it here is what stops the same space
         // pressing the control it was typed past.
-        let stale_control_focused =
-            focused_now.is_some() && !ui.ctx().text_edit_focused() && !self.focus_arrived_by_tab;
+        let stale_control_focused = focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+            && !self.focus_arrived_by_tab;
         if (pressable_control_focused || stale_control_focused)
             && input.events.iter().any(|event| {
                 matches!(
@@ -5510,7 +5852,10 @@ impl DesktopEframeApp {
         //
         // Outside the provenance gate deliberately: a modified chord is never a
         // control's activation, however that control came to hold focus.
-        if focused_now.is_some() && !ui.ctx().text_edit_focused() {
+        if focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+        {
             ui.input_mut(|state| {
                 state.events.retain(|event| {
                     !matches!(

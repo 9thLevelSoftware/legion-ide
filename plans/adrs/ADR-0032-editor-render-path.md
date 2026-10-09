@@ -27,6 +27,22 @@ Legion will continue with a custom egui code-canvas widget for M1. The code canv
 
 The custom painter should introduce a `CodeCanvasPainter` seam so the editor remains renderer-portable. GPUI remains a live fallback to re-evaluate after M1 evidence, not a dependency to add during M0.
 
+### Ticket 004 bounded accessibility projection
+
+The coordinator approved complete small-buffer accessibility on 2026-10-09.
+The desktop adapter may publish a stable text-input control and bounded
+`TextRun` descendants from the existing exact `small_buffer_preview`, using
+app-produced snapshot identity, editability, coverage and directed-caret
+metadata. The renderer caches presentation data only; it gains no editor,
+save, or filesystem authority. Its direct workspace-pinned Unicode
+segmentation dependency describes accessibility units, and its dev-only
+AccessKit consumer verifies the rendered contract. ADR-0015's large/degraded
+whole-source restriction remains absolute: unavailable or over-budget source
+publishes constrained coverage, never a complete viewport fragment. This
+amendment records the approved scope; native TextPattern and native action
+qualification remain external gates. See
+`plans/evidence/ide-2026-ticket004-editor-accessibility-prerequisite.md`.
+
 ## Consequences
 
 - **Positive:** preserves projection-only UI and enables row virtualization, per-line shaping caches, IME handling, gutter lanes, multibuffer review, and large-file degradation without fighting a general-purpose text widget.

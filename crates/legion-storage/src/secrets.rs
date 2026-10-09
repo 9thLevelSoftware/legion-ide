@@ -172,7 +172,7 @@ fn keyring_error(error: keyring::Error) -> SecretStoreError {
 }
 
 fn is_not_found_error(error: &keyring::Error) -> bool {
-    error.to_string().to_ascii_lowercase().contains("not found")
+    matches!(error, keyring::Error::NoEntry)
 }
 
 #[cfg(test)]

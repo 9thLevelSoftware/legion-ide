@@ -8,7 +8,7 @@
 
 use std::{thread, time::Duration};
 
-use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GetLastError, HANDLE, HGLOBAL, SetLastError, WIN32_ERROR};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -43,10 +43,16 @@ fn send(inputs: &[INPUT]) -> Result<(), String> {
         .map_err(|_| "INPUT is larger than SendInput can describe".to_string())?;
     // SAFETY: `inputs` is a live slice of fully initialised `INPUT` values and
     // `size` is the size of that type.
-    let sent = unsafe { SendInput(inputs, size) };
+    let (sent, last_error) = unsafe {
+        // Capture the diagnostic immediately: later Win32 calls can replace it.
+        // A zero code does not rule out UIPI or another input restriction.
+        SetLastError(WIN32_ERROR(0));
+        let sent = SendInput(inputs, size);
+        (sent, GetLastError().0)
+    };
     if sent as usize != inputs.len() {
         return Err(format!(
-            "SendInput accepted {sent} of {} events; the input desktop rejected the rest",
+            "SendInput accepted {sent} of {} events; win32_last_error={last_error}; input_struct_bytes={size}; cause undetermined (UIPI is not identified by this error code)",
             inputs.len()
         ));
     }
@@ -139,6 +145,16 @@ pub fn unicode_text(text: &str) -> Result<(), String> {
 /// rectangle of the target element. ADR-0056 forbids taking it from any
 /// product geometry API.
 pub fn click_at(x: i32, y: i32) -> Result<(), String> {
+    click_at_with_sender(x, y, send)
+}
+
+/// External SendInput boundary seam. A click is submitted in one batch, so a
+/// caller's foreground guard covers move/down/up without gaps between sends.
+pub fn click_at_with_sender(
+    x: i32,
+    y: i32,
+    submit: impl FnOnce(&[INPUT]) -> Result<(), String>,
+) -> Result<(), String> {
     // SAFETY: `GetSystemMetrics` takes a plain index and returns a plain int.
     let (origin_x, origin_y, width, height) = unsafe {
         (
@@ -167,13 +183,11 @@ pub fn click_at(x: i32, y: i32) -> Result<(), String> {
         },
     };
 
-    send(&[mouse(absolute_flags)])?;
-    send(&[mouse(
-        MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
-    )])?;
-    send(&[mouse(
-        MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
-    )])
+    submit(&[
+        mouse(absolute_flags),
+        mouse(MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0),
+        mouse(MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0),
+    ])
 }
 
 /// Put `text` on the **system** clipboard as `CF_UNICODETEXT`.
