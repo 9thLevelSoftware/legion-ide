@@ -84,15 +84,181 @@ Raw logs, preserved outside the checkout:
 - `D:/legion-ide-2026-notes/ticket004-candidate-r3-verification.log`
 - `D:/legion-ide-2026-notes/ticket004-candidate-r3-readonly-text-patterns.log`
 
-## Remaining attended gate
+## Attended attempt and Explorer diagnosis
 
-Fresh owner availability was requested only after this read-only success. No
-attended run has yet used candidate r3. The prepared driver is the reviewed
+After fresh owner availability, candidate r3 ran with the reviewed
 `legion-input-driver-tab-oracle-e4168202.exe`, SHA-256
 `e416820272207a88f872978d99b7188a51f4a81aa460394fac1beea966052f74`.
-It retains exact foreground guards, complete document comparison, exact disk
-bytes and Git oracles. Its bounded journey does not cover scenario steps 7-8,
-all recovery cases, CJK/full input conformance or human pilot durations.
+The owner foregrounded the exact product window (PID 16776, HWND `0xb0e48`).
+Foreground and UIA bootstrap passed, but navigation blocked before any driver
+input: `Explorer label "README.md" must identify exactly one visible element;
+found 3`. The report and outer command returned exit 3. The driver's owned-child
+cleanup then closed the window; this observation does not establish an app
+crash or missed owner click. The report is
+`D:/legion-ide-2026-notes/ticket004-native-journey-candidate-r3-attended.toml`.
+
+Read-only role and ancestry traces identified a README TabItem, breadcrumb Text,
+and Excerpts Button. None was an Explorer file row. The earlier explicit-file
+diagnostic had naturally persisted normal ignored `.legion/session.json`
+metadata, causing later launches to restore README despite clean tracked Git
+state. A fresh external session path supplied through the normal public
+`--session-state` option produced an empty editor and only the Explorer drawer
+toggle. That probe verified the default session hash was unchanged. No default
+session was deleted or reset.
+
+A separate diagnostic child of the same packaged executable then used a newly
+reserved external session at
+`D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/session.json`. Supported
+Windows desktop automation observed the actual empty editor, opened the real
+Explorer drawer, and found this hierarchy:
+
+```text
+Legion IDE -> region Explorer -> dialog Explorer drawer -> button README.md
+```
+
+Clicking that dialog's README row opened the clean tab; the desktop tool reported
+`focused_element = Editor document`. That field did not establish actual UIA
+keyboard focus. The drawer remained open. No typing or save occurred. The diagnostic
+closed its own child normally. The reference checkout remained tracked-Git-clean
+with the same README SHA-256 recorded above. This validates the selector's
+structural basis, not the repaired driver's native open/edit/save journey.
+
+Preserved diagnostic artifacts outside the checkout:
+
+- `D:/legion-ide-2026-notes/ticket004-explorer-duplicates-r3.log`
+- `D:/legion-ide-2026-notes/ticket004-explorer-duplicates-context-r3.log`
+- `D:/legion-ide-2026-notes/ticket004-explorer-fresh-session-r3.log`
+- `D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/explorer-tree.txt`
+  (SHA-256 `0776020e8d3a838e74576951e5fcbdd40fe80ae8b6e78599f76f69658f7c32cb`).
+- `D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/explorer-drawer.jpg`
+  (SHA-256 `99d4a893dd97cd9e53dd7cbc80ce45eb0f3d6a9ecc193bb4c3d3d4415dbc0e4e`).
+- `D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/readme-tree.txt`
+  (SHA-256 `d6062394e18394a96cac6639138b83bd5bfc68e727ba9c11da96e85a84698ab1`).
+- `D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/readme-open.jpg`
+  (SHA-256 `7a8d3e27da9b8a1b31b3fba51c87078a39d12ea368dbfe2a04391651e0c4364c`).
+- `D:/legion-ide-2026-notes/ticket004-sky-explorer-probe/readme-focus.json`
+  preserves the same observation's `focused_element = "100 edit Editor document"`.
+
+## Bounded driver repair checks
+
+The three-file driver patch scopes exact Button selection to the unique named
+Explorer Dialog's descendants. Tabs, breadcrumbs and Excerpts cannot satisfy
+that scope. Missing/ambiguous/read-failed observations block. Unsupported wide
+layouts without a proven Explorer container also block. Each journey reserves
+a new report and external session directory and passes the normal public
+`--session-state` option; existing reports or session directories are refused.
+
+After opening a file, the driver closes the scoped drawer and waits for its
+absence. Pointer targets require current enabled/visible positive bounds, a
+center inside the product client and any available drawer bounds, and an exact
+UIA point hit. Only the verified semantic Dialog's all-zero bounds are treated
+as unavailable, with that fact recorded explicitly. Typing additionally requires
+the exact document element to own keyboard
+focus. These guards retain the per-input exact-foreground checks and exact
+complete-document, disk and Git oracles.
+
+From `D:/legion-ide-2026-workers/ticket-004`, these filters ran with
+`cargo test -p legion-input-driver --test driver_contract <filter> --target-dir
+D:/legion-ide-2026-tools/native-input-target`:
+
+| Filter | Passing tests |
+| --- | --- |
+| `explorer_scope_` | 2 |
+| `journey_session_` | 2 |
+| `journey_click_bounds_` | 1 |
+| `explorer_` | 3 after drawer-close changes affected the shared snapshot |
+| `journey_editor_focus_` | 1 |
+| `journey_click_hit_` | 1 |
+| `native_journey_missing_package_` | 1 |
+| `attended_journey_flag_` | 1 |
+
+That is 10 distinct tests and 12 successful test executions. New APIs initially
+produced compile-time reds; runtime assertion failures before implementation are
+not claimed. The original attended duplicate-label report remains the actual
+native failure evidence. The driver build with the same target directory,
+rustfmt checks of all three changed files, and `git diff --check` also exited 0.
+Pauli independently passed the unchanged driver and diagnostic documentation;
+that review did not establish native point-hit or focus qualification.
+
+## Direct native guard preflight
+
+The coordinator resumed the existing isolated diagnostic child (PID 62208) after
+the owner explicitly reinvoked Computer Use. The normal session and README
+baseline hashes were captured before launch. An external read-only Rust helper
+at `D:/legion-ide-2026-notes/ticket004-scoped-oracle-probe/` copies the current
+driver's observation/session code, verifies the existing PID's exact r3 image
+path and digest, and has no input, activation or child lifecycle operation.
+Supported desktop automation supplies navigation separately. Helper exit 0
+means only a read-only prerequisite passed, never native journey acceptance.
+
+The drawer toggle passed client containment and exact UIA point hit at
+`(291,947)`. After the coordinator opened the drawer, the file-row sample
+blocked because the semantic Dialog publishes an all-zero rectangle. The
+actual row bounds were `(343,552)-(422,570)` and the native client bounds were
+`(235,258)-(1195,978)`. A labelled diagnostic without the unavailable container
+rectangle passed client containment and exact target hit at `(382,561)`; the
+original guard still returned blocked. Source inspection confirms that the
+Dialog node supplies role and label without bounds. Pauli approved a narrow
+exception for this verified semantic container's all-zero rectangle, retaining
+mandatory positive target/client geometry, exact subtree membership and point
+hit. Positive container bounds remain binding; malformed or unreadable
+properties still block. The implemented exception passed one new focused test
+and the two affected click tests, followed by driver build, formatting and diff
+checks. The final patch therefore has 11 distinct focused tests and 15 successful
+test executions across the two bounded stages. Pauli passed the final delta.
+
+The final native file/close sample passed with the tab, breadcrumb and Excerpts
+README labels also present: exact scoped file point `(383,561)` and close-button
+point `(315,329)`, both with client containment and exact target hit. The helper
+sent neither action. The final helper SHA-256 is
+`5dc869bcceefc3d227886899122bc3d6e34defd78212eff0136b5392c44c5ee1`;
+the reviewed driver binary SHA-256 is
+`c20e50aed405d037dffa3160587f7e38c681bd1a961a2c6320e9be70ec5ec421`.
+The three reviewed driver files were committed and fast-forwarded into
+integration as `5d7b298f9f7bdd20441a7796aec9f8ecb43f6f41`. The identical binary is
+archived without overwriting earlier drivers at
+`D:/legion-ide-2026-tools/legion-input-driver-scoped-explorer-c20e50ae.exe`.
+The final test filters were `verified_zero_explorer_scope_` (one test) and
+`journey_click_` (the two affected click tests), using the same command prefix
+and target directory recorded above. No native typing/save acceptance follows
+from this partial driver commit.
+
+After desktop automation opened README, dismissed the drawer and explicitly
+clicked the editor, the read-only helper observed the exact complete baseline,
+Clean tab, no drawer, and exact editor point hit at `(715,568)`. Its UIA focused
+element comparison nevertheless returned false. The desktop tool's separate
+`focused_element` field reported Editor document; that field is not substituted
+for the failing driver oracle. No text or save was sent.
+
+An instrumented sample confirmed that the exact candidate HWND remained
+foreground. `GetFocusedElement` identified its `Legion IDE` root (type 50032,
+PID 62208), while the document reported both `CurrentHasKeyboardFocus = false`
+and `CurrentIsKeyboardFocusable = false`. Source review traced the mismatch to
+editor keyboard routing without corresponding egui/accessibility focus
+ownership; egui falls back to the accessibility root. The exact focus guard is
+retained. A bounded product focus-projection repair is required and assigned;
+another attended run remains gated on that repair's review and native evidence.
+
+Raw samples are preserved under
+`D:/legion-ide-2026-notes/ticket004-scoped-oracle-native/`: `drawer.log`,
+`file.log`, `file-geometry.log`, `file-hit-diagnostic.log`, `editor.log`, and
+`editor-after-click.log`, and `editor-focus-diagnostic.log`. The diagnostic helper
+changed only to print relevant geometry/focus metadata; successful prior checks
+were not counted as full acceptance.
+
+`file-and-close-final.log` records the final passing navigation guard sample.
+`final-scoped-tree.txt` and `final-scoped-window.jpg` preserve the corresponding
+native tree and screenshot. The coordinator closed only its diagnostic child;
+README and the normal session metadata retained their pre-launch hashes and the
+reference checkout remained tracked-Git-clean. The product focus prerequisite
+remains unresolved on candidate r3.
+
+## Remaining attended gate
+
+Fresh attendance is required for the next attended run after the repair's
+remaining review and native prerequisite checks. The bounded
+journey does not cover scenario steps 7-8, all recovery cases, CJK/full input
+conformance or human pilot durations.
 
 The product repair deliberately supports bounded small documents. Complete
 large/degraded-document accessibility and native accessibility actions remain

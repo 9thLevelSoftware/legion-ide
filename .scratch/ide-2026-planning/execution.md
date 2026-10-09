@@ -80,6 +80,18 @@ offline verification/staging, and exact complete native UIA observation. The
 reference checkout remained clean. This resolves the small-document observation
 prerequisite without promoting native edit/save or large-document accessibility.
 
+The subsequent attended r3 attempt detected owner foreground and UIA successfully,
+then blocked before driver input because global README name matching selected
+three unrelated surfaces. Owned-child cleanup caused the reported immediate
+close. The same r3 receipt records restored session metadata as a test-isolation
+gap, a fresh-session probe, and native Explorer Dialog/Button ancestry with
+screenshots. Reviewed driver repair `5d7b298` integrated locally after 11 distinct
+focused tests; actual scoped file/close point checks passed with duplicate labels
+present. A separate native prerequisite remains: the foreground app reports
+window-root keyboard focus after editor click. A bounded product focus repair is
+assigned, the strict driver guard remains, and no typing/save or ticket 04
+acceptance is claimed.
+
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
 records the exact source and command. This is compile evidence only; native,
