@@ -39,4 +39,3 @@ Status: resolved
 - 2026-10-08 review P2 fixed: explicitly map SC-MANUAL-OFFLINE-30M-WIN to CFG-WIN11-X64-MANUAL-OFFLINE; preserve separately labelled installed offline artifact/hash/inventory and pre-launch whole-process-tree OS network-capture prerequisites, including blocked outcomes. Focused PowerShell canonical reference/prerequisite check passed once; no successful validators repeated. Fast-forwarded integration 9a024a4 before handoff; review clearance pending, no commit.
 
 - 2026-10-08: Independent reviewer PASS; sole P2 offline configuration mapping resolved. Bounded configuration deliverable accepted and ticket02 resolved; runtime/package/native prerequisites remain as documented, canonical acceptance unchanged. No successful checks repeated. Coordinator authorized commit of only the two owned files and fast-forward integration.
-

@@ -159,5 +159,3 @@ Actual results: docs-hygiene exit 0 (documentation hygiene checks passed);
 verify-completion-register exit 0 (register structure only; all 419 acceptance
 values remain unassessed). Each ran once; no runtime/native checks were executed.
 Tracked patch: git diff --check exit 0, with an LF-to-CRLF normalization notice; the new untracked document is outside that Git check. Independent review PASS on 2026-10-08; sole P2 offline mapping resolved.
-
-

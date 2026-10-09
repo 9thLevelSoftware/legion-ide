@@ -2165,4 +2165,3 @@ implementation or acceptance is claimed by publication.
 ## Comments
 
 - 2026-10-08: User said “approved.” Published the approved breakdown to the local tracker, preserving all titles, numbering and dependency edges.
-

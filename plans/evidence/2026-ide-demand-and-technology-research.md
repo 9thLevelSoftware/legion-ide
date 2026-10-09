@@ -106,4 +106,3 @@ The repository's [readiness ledger](../product-readiness-ledger.md) defines an e
 This is a primary-source desk review, not a hands-on competitor benchmark, exhaustive market census, security certification, or model leaderboard. Product documents can change and vendor-reported gains may not reproduce on Legion. Mutable documentation was accessed on 2026-10-08; explicitly dated announcements identify their publication date. No prices, untested package pins or universal performance winners are asserted.
 
 The main unresolved commercial question is which combination makes Legion's target teams switch and keep using it. Validate that with real customer workflows before adding more frontier scope. A useful first pilot is a multi-file change containing a dirty dependency and a failing test: compare successful review, diagnosis, recovery, time and cost against the team's incumbent tools.
-

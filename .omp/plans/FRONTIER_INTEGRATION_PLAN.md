@@ -176,4 +176,3 @@ This revision incorporates confirmed design decisions into documentation only. D
 - User selected **explicit local WSL2 worker** on Windows; no native/SSH/cloud verifier fallback, hidden installer, or global WSL configuration change.
 - Missing verifier/model/server prerequisites yield visible unavailable/blocked status without disabling ordinary editing or relabeling the feature as completed.
 - Supported-domain interpretation is explicit: formal capabilities require enforceable Linux isolation, directly or in Windows WSL2. Native macOS gets truthful unsupported controls; this does not waive three-OS ordinary/native-language/graph/AI-retrieval requirements or cancel any researched capability package.
-
