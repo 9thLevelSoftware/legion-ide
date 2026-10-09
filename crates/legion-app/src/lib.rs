@@ -15879,19 +15879,19 @@ impl AppComposition {
     /// so an unsigned or tampered bundle cannot be installed here.
     pub fn set_org_policy_bundle(&mut self, bundle: legion_security::VerifiedPolicyBundle) {
         self.org_policy_bundle = Some(bundle);
-        // Re-assert the ceiling against the mode already in effect: installing a
-        // bundle that forbids the current mode must lower it, not merely block
-        // future raises.
-        let current = self.product_mode;
-        if self.org_policy_mode_ceiling_denies(current) {
+        self.install_mode_policy_ceiling();
+    }
+
+    // New dispatch is denied by the installed ceiling immediately. Reconcile
+    // the visible mode through all live drains, including retired MCP workers.
+    fn install_mode_policy_ceiling(&mut self) {
+        if self.org_policy_mode_ceiling_denies(self.product_mode) {
             if self.ai_provider_connection_check_in_flight() {
-                // Do not label a live transport Manual. Discard its result and
-                // apply the installed ceiling when the check actually drains.
                 self.cancel_provider_connection_check_for_policy();
-                return;
             }
-            self.product_mode = AppProductMode::Manual;
-            self.phase4_projection_state.assisted_ai_projection = None;
+            // The setter also revokes pending MCP gates before checking the
+            // common drain counter and the provider's result-handoff lane.
+            self.set_product_mode(AppProductMode::Manual);
         }
     }
 
@@ -15919,6 +15919,10 @@ impl AppComposition {
 
     /// Set the app-owned product mode used to authorize AI dispatch.
     pub fn set_product_mode(&mut self, mode: AppProductMode) {
+        #[cfg(feature = "ai")]
+        if !mode.allows_assist() {
+            self.request_named_mcp_operation_drain();
+        }
         if !mode.allows_assist()
             && self
                 .named_provider_snapshots

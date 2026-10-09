@@ -114,6 +114,38 @@ pub struct CanvasPlacement {
 /// Adapter-local renderer action before app routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAction {
+    /// Configure bounded HTTP MCP metadata through existing app authority.
+    #[cfg(feature = "ai")]
+    ConfigureNamedMcpHttpPeer {
+        /// Exact displayed metadata and optional edit revision.
+        form: crate::view::mcp_settings::McpHttpPeerForm,
+    },
+    /// Select an existing peer in this desktop session without connecting.
+    #[cfg(feature = "ai")]
+    SelectNamedMcpPeer {
+        /// Existing peer identity.
+        peer_id: legion_protocol::McpServerId,
+    },
+    /// Apply an explicit lifecycle decision to the displayed selected revision.
+    #[cfg(feature = "ai")]
+    ManageNamedMcpPeer {
+        /// Selected identity.
+        peer_id: legion_protocol::McpServerId,
+        /// Displayed app-owned revision.
+        revision: u64,
+        /// Network grant, connection, health or local revocation decision.
+        operation: crate::view::mcp_settings::McpSettingsOperation,
+    },
+    /// Replace a token only for the exact displayed selected route revision.
+    #[cfg(feature = "ai")]
+    ReplaceNamedMcpPeerCredential {
+        /// Selected peer identity.
+        peer_id: legion_protocol::McpServerId,
+        /// Displayed app revision.
+        revision: u64,
+        /// Redacted, zeroizing token; never persisted to session metadata.
+        credential: SensitiveString,
+    },
     /// Quit the desktop shell.
     Quit,
     /// Save the active buffer through app authority.
@@ -3031,6 +3063,11 @@ impl DesktopCommandBridge {
             // PKT-CKPT: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; this arm satisfies exhaustiveness but is never evaluated in production.
             DesktopAction::RestoreCheckpoint { .. } => DesktopBridgeOutput::Noop,
+            #[cfg(feature = "ai")]
+            DesktopAction::ConfigureNamedMcpHttpPeer { .. }
+            | DesktopAction::SelectNamedMcpPeer { .. }
+            | DesktopAction::ReplaceNamedMcpPeerCredential { .. }
+            | DesktopAction::ManageNamedMcpPeer { .. } => DesktopBridgeOutput::Noop,
             // PKT-PROV: handled in DesktopWorkflowRuntime::handle_action before reaching the
             // bridge; these arms satisfy exhaustiveness but are never evaluated in production.
             DesktopAction::SetProviderApiKey { .. }

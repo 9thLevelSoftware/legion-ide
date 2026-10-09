@@ -13,6 +13,10 @@ describes specification creation and does not negate this later authorization.
 
 ## Active work
 
+Current local ticket counts: **5 resolved, 247 ready-for-agent, 2 needs-info**.
+The entries below distinguish accepted slices from implementation and diagnostic
+progress. Later narrative sections retain the earlier checkpoint history.
+
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
 - 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
@@ -20,17 +24,35 @@ describes specification creation and does not negate this later authorization.
   review PASS and source integrated as `9cff366`. [Save-conflict evidence](../../plans/evidence/ide-2026-ticket005-save-conflict-recovery.md)
   records 15 unique focused passing tests and preserved original/recovery-copy
   bytes across conflict and actual store reopen. No native GUI, abrupt-kill,
-  broader A02 or ticket 04 acceptance is inferred; composed-wave gates remain pending.
+  broader A02 or ticket 04 acceptance is inferred. The composed source checks are
+  recorded in the [wave integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md).
 - 40: explicit provider core integrated as `77166f7`, with reviewed workspace
   session metadata persistence in `928275e` and reviewed native settings UI
-  implementation in `1fb8180` (integrated through `f3f9436`). Native input,
-  profile credential entry/reopen, connection checking and live qualification remain open.
+  implementation in `1fb8180` (integrated through `f3f9436`). The independently
+  reviewed asynchronous connection check and installed-ceiling admission repair
+  are integrated as `ee6896f`; [connection-check evidence](../../plans/evidence/ticket-040-provider-connection-check.md)
+  records 20 distinct focused passing tests across the lane's recorded revisions.
+  Native profile/credential entry/reopen and live qualification remain open.
 - 63: reviewed named MCP HTTP core integrated as `ac8087f` and bounded HTTP
-  metadata persistence in `1da8848`; UI, stdio/server activation and real-peer
-  qualification remain open.
+  metadata persistence in `1da8848`. The reviewed wave1 settings/async operation
+  slice and provider/MCP drain composition are included in this checkpoint;
+  [settings evidence](../../plans/evidence/ide-2026-ticket063-mcp-settings.md)
+  records 25 distinct focused worker passes and the separate integration regression.
+  Native settings, stdio/server activation and real-peer qualification remain open.
+  Two historical Windows `0xc0000409` aborts remain unresolved. One completed
+  two-test debugger diagnostic did not reproduce the abort; no repair or
+  uninterrupted green-suite claim is made. Root authorized local partial
+  implementation while retaining this native/product/release qualification blocker.
 - 88: provisional language/platform inventory integrated as `18ef5f7`; remains
   needs-info pending host/configuration/fixture ratification, without scope reduction.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
+- 155: bounded [extension contract](../../plans/completion/ide-2026-extension-execution-contract.md)
+  documentation integrated as `2b2b989` after root review. It remains
+  ready-for-agent: authorized API/runtime/limit/ADR work is actionable, while
+  actual representative/host qualification is not invented or ratified.
+- 169: newly unblocked by ticket 05 for a bounded remote-workspace authority
+  contract. Its separate documentation lane is awaiting root review and handoff;
+  no status change or acceptance is inferred.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
 - 04: partial external driver fixes in `177caa5` and reviewed compact-drawer
@@ -46,9 +68,21 @@ describes specification creation and does not negate this later authorization.
   bounded product accessibility repair passed independent review and integrated
   as `caf1821`. Its frozen offline MSI 0.0.3 passed packaging verification and a
   native read-only check of the exact complete README, clean tab and editor
-  geometry. Native typing/save remain unqualified; fresh attendance was requested.
+  geometry. The later frozen r4 source `fb9982f` passed packaging and actual
+  Computer Use Explorer/open/close/editor-point prerequisites, but native UIA
+  focus still returned the root with both editor focus properties false.
+  No typing/save was attempted; ticket 04 remains unaccepted. Component-only
+  compact-layout coverage (`3471753`) and delivery diagnostics (`21e22f`) do not
+  reproduce or repair this native gap. Computer Use remains stopped after Escape.
 - Credential prerequisite: typed missing-key classification and isolated native
   Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
+
+The composed provider/MCP regression passed one test covering four active/retired
+MCP and response-order branches. Default desktop all-targets, offline lib/bins,
+dependency policy and no-egui-textedit checks passed once on the composed source.
+The default executable build follows its local source commit; final docs-hygiene
+is reserved for the subsequent ticket 169 documentation handoff. No GUI, live
+provider/peer, full-workspace/platform or release qualification is inferred.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
 packaged successfully (MSI SHA-256

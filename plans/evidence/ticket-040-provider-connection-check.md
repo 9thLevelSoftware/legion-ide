@@ -151,7 +151,10 @@ Frozen source/test SHA-256 values (2026-10-09):
 
 ### Remaining gates
 
-Pauli delta review is pending after the policy repair below. Native profile input/screenshots, route-bound
+Pauli independently reviewed the final policy repair and related admission guards:
+PASS for this bounded implementation. The reviewed worker commit was
+`56fb55f2b55ea3cee5cf8454fe149c36534e99e8`, integrated as
+`ee6896f1e340113cfa1cddbd873f2bc7cf0cb8e7`. Native profile input/screenshots, route-bound
 credential persistence through the actual UI, authenticated Token Plan behavior,
 endpoint/model compatibility and provider usefulness remain unqualified. No
 personal credential, live remote call or native GUI launch was used. This patch
@@ -206,5 +209,6 @@ Source inspection also found direct retained-mode checks in named MCP
 activation/probe/runtime admission. This was reported to the coordinator; Socrates
 owns that separately changing subsystem. This repair adds no MCP references or
 MCP edits. Integration owns composition of both drain guards/reconciliation and
-MCP admission enforcement; this receipt does not claim that pending composition
-has passed. No commit or merge was made by this worker.
+MCP admission enforcement. The later [composed-wave checkpoint](ide-2026-provider-mcp-integration.md)
+records independent composition review, the four-branch shared-drain regression,
+and final default/offline compilation. No commit or merge was made by this worker.

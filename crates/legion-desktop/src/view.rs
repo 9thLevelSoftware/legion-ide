@@ -6,6 +6,9 @@ mod assistant_rail;
 mod brand_mark;
 /// Call-hierarchy rows for the language section: direction and degraded marking.
 mod call_hierarchy;
+/// Native settings for named HTTP MCP peers.
+#[cfg(feature = "ai")]
+pub mod mcp_settings;
 /// Snapshot-backed status, language, trust, and assistant rows.
 mod status_rows;
 use status_rows::*;
@@ -388,6 +391,9 @@ pub struct DesktopProjectionViewState {
     pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
     /// App refusal gate while a provider operation is still draining.
     pub provider_configuration_busy: bool,
+    /// App-owned named MCP settings metadata; never loads credentials on paint.
+    #[cfg(feature = "ai")]
+    pub mcp_settings_peers: Vec<mcp_settings::McpSettingsPeerProjection>,
     /// Accumulated product AI stream chunks for the assistant rail (Assist / Delegate).
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream (`provider/model/operation`).
@@ -421,6 +427,8 @@ impl Default for DesktopProjectionViewState {
             preferred_ai_provider: "auto".to_string(),
             ai_provider_profiles: Vec::new(),
             provider_configuration_busy: false,
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: Vec::new(),
             product_ai_stream_chunks: Vec::new(),
             product_ai_stream_label: String::new(),
             product_ai_streamed: false,
@@ -1130,6 +1138,9 @@ pub struct DesktopProjectionViewModel {
     pub ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
     /// Whether configuration controls must wait for the app-owned operation.
     pub provider_configuration_busy: bool,
+    /// Named MCP peer settings, with explicit desktop selection.
+    #[cfg(feature = "ai")]
+    pub mcp_settings_peers: Vec<mcp_settings::McpSettingsPeerProjection>,
     /// Product AI stream chunks for progressive assistant-rail rendering.
     pub product_ai_stream_chunks: Vec<String>,
     /// Metadata label for the last product stream.
@@ -1311,6 +1322,8 @@ impl DesktopProjectionViewModel {
             preferred_ai_provider: state.preferred_ai_provider.clone(),
             ai_provider_profiles: state.ai_provider_profiles.clone(),
             provider_configuration_busy: state.provider_configuration_busy,
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: state.mcp_settings_peers.clone(),
             product_ai_stream_chunks: state.product_ai_stream_chunks.clone(),
             product_ai_stream_label: state.product_ai_stream_label.clone(),
             product_ai_streamed: state.product_ai_streamed,
@@ -1345,6 +1358,8 @@ pub struct ProjectionView {
     selected_activity: ActivitySurface,
     utility_surface: Option<UtilitySurface>,
     settings_section: SettingsSection,
+    #[cfg(feature = "ai")]
+    mcp_settings_draft: mcp_settings::McpSettingsDraft,
     ai_profile_credential_draft: Option<(
         legion_app::AiProviderProfile,
         crate::bridge::SensitiveString,
@@ -1441,6 +1456,7 @@ enum SettingsSection {
     Editor,
     LanguageTools,
     AiProviders,
+    McpPeers,
     Extensions,
     Notifications,
     Privacy,
@@ -1448,11 +1464,12 @@ enum SettingsSection {
 }
 
 impl SettingsSection {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Editor,
         Self::LanguageTools,
         Self::AiProviders,
+        Self::McpPeers,
         Self::Extensions,
         Self::Notifications,
         Self::Privacy,
@@ -1465,6 +1482,7 @@ impl SettingsSection {
             Self::Editor => "Editor",
             Self::LanguageTools => "Language Tools",
             Self::AiProviders => "AI Providers",
+            Self::McpPeers => "MCP Peers",
             Self::Extensions => "Extensions",
             Self::Notifications => "Notifications",
             Self::Privacy => "Privacy",
@@ -1566,6 +1584,8 @@ impl ProjectionView {
             selected_activity: ActivitySurface::Explorer,
             utility_surface: None,
             settings_section: SettingsSection::Appearance,
+            #[cfg(feature = "ai")]
+            mcp_settings_draft: mcp_settings::McpSettingsDraft::default(),
             ai_profile_credential_draft: None,
             ai_profile_metadata_draft: None,
             utility_overlay_origin: None,
@@ -2055,6 +2075,12 @@ impl ProjectionView {
             ui.ctx().memory_mut(|memory| memory.request_focus(origin));
         }
         render_utility_overlay(ui.ctx(), snapshot, &model, self, &mut actions);
+        #[cfg(feature = "ai")]
+        if self.utility_surface != Some(UtilitySurface::Settings)
+            || self.settings_section != SettingsSection::McpPeers
+        {
+            self.mcp_settings_draft.clear_sensitive();
+        }
         if self.utility_surface != Some(UtilitySurface::Settings)
             || self.settings_section != SettingsSection::AiProviders
         {
@@ -7061,6 +7087,12 @@ fn render_settings_panel(
                     "Start and restart are available when a TypeScript or JavaScript file is active.",
                 ));
             }
+        }
+        if view.settings_section == SettingsSection::McpPeers {
+            #[cfg(feature = "ai")]
+            mcp_settings::render(ui, &model.mcp_settings_peers, snapshot.product_mode == DockMode::Manual, &mut view.mcp_settings_draft, actions);
+            #[cfg(not(feature = "ai"))]
+            ui.label(theme::muted("MCP transport is unavailable in this offline build."));
         }
         if view.settings_section == SettingsSection::AiProviders {
             interactive_fields::render_named_provider_profiles(

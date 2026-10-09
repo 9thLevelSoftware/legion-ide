@@ -960,6 +960,8 @@ impl SelectedProblemKey {
 /// Renderer-backed desktop runtime.
 pub struct DesktopRuntime {
     app: AppComposition,
+    #[cfg(feature = "ai")]
+    selected_named_mcp_peer: Option<legion_protocol::McpServerId>,
     // Secure-store status is read on open/explicit settings actions, never paint.
     ai_provider_profiles: Vec<legion_app::AiProviderProfileProjection>,
     shell: Shell,
@@ -1274,6 +1276,8 @@ impl DesktopRuntime {
             .extend(status_details.iter().cloned());
 
         let mut runtime = Self {
+            #[cfg(feature = "ai")]
+            selected_named_mcp_peer: None,
             ai_provider_profiles: app.ai_provider_profiles(),
             app,
             shell: Shell::new(snapshot),
@@ -1769,6 +1773,87 @@ impl DesktopRuntime {
                 self.last_outcome = outcome.clone();
                 Ok(outcome)
             }
+            #[cfg(feature = "ai")]
+            DesktopAction::ConfigureNamedMcpHttpPeer { form } => {
+                let result = self
+                    .app
+                    .configure_named_mcp_http_peer_settings(
+                        form.configuration(),
+                        form.expected_revision,
+                    )
+                    .map(|_| ());
+                self.finish_mcp_settings_action(result, true)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::SelectNamedMcpPeer { peer_id } => {
+                let result = self.app.named_mcp_peer_configurations().iter().find(|p| p.metadata.peer_id == peer_id)
+                    .ok_or(legion_app::named_mcp_peer::NamedMcpPeerError::UnknownPeer)
+                    .and_then(|config| {
+                        if config.metadata.role != legion_protocol::named_mcp_peer::McpPeerRole::Client
+                            || !matches!(config.transport, legion_app::named_mcp_peer::NamedMcpPeerTransport::Http { .. }) {
+                            return Err(legion_app::named_mcp_peer::NamedMcpPeerError::UnsupportedEnvironment);
+                        }
+                        Ok(())
+                    });
+                if result.is_ok() {
+                    self.selected_named_mcp_peer = Some(peer_id);
+                }
+                self.finish_mcp_settings_action(result, false)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::ManageNamedMcpPeer {
+                peer_id,
+                revision,
+                operation,
+            } => {
+                use crate::view::mcp_settings::McpSettingsOperation;
+                let result = self
+                    .require_selected_mcp_peer_revision(&peer_id, revision)
+                    .and_then(|()| {
+                        match operation {
+                            McpSettingsOperation::GrantTransport => {
+                                self.app.grant_named_mcp_peer_transport(
+                                    &peer_id,
+                                    revision,
+                                    legion_app::named_mcp_peer::NamedMcpPeerPermissions::network(),
+                                )
+                            }
+                            McpSettingsOperation::Connect => {
+                                return self
+                                    .app
+                                    .start_named_mcp_peer_connection(&peer_id, revision);
+                            }
+                            McpSettingsOperation::ProbeHealth => {
+                                return self
+                                    .app
+                                    .start_named_mcp_peer_health_probe(&peer_id, revision);
+                            }
+                            McpSettingsOperation::RevokeGrant => {
+                                self.app.revoke_named_mcp_peer_grant(&peer_id)
+                            }
+                            McpSettingsOperation::RevokeCredential => self
+                                .app
+                                .revoke_named_mcp_peer_stored_credential(&peer_id, revision),
+                        }
+                        .map(|_| ())
+                    });
+                self.finish_mcp_settings_action(result, false)
+            }
+            #[cfg(feature = "ai")]
+            DesktopAction::ReplaceNamedMcpPeerCredential {
+                peer_id,
+                revision,
+                credential,
+            } => {
+                let result = self
+                    .require_selected_mcp_peer_revision(&peer_id, revision)
+                    .and_then(|()| {
+                        self.app
+                            .replace_named_mcp_peer_credential(&peer_id, revision, &credential)
+                    });
+                drop(credential);
+                self.finish_mcp_settings_action(result, false)
+            }
             DesktopAction::ConfigureAiProviderProfile { profile } => {
                 let result = self.app.configure_ai_provider_profile(profile);
                 self.finish_provider_settings_action(result, true)
@@ -1955,6 +2040,74 @@ impl DesktopRuntime {
                 Ok(outcome)
             }
         }
+    }
+
+    #[cfg(feature = "ai")]
+    fn poll_mcp_settings_operations(&mut self) -> bool {
+        let previous_mode = self.app.product_mode();
+        let outcomes = self.app.poll_named_mcp_peer_operations();
+        let changed = !outcomes.is_empty() || self.app.product_mode() != previous_mode;
+        for (id, result) in outcomes {
+            if self.selected_named_mcp_peer.as_ref() == Some(&id)
+                && !matches!(
+                    result,
+                    Err(legion_app::named_mcp_peer::NamedMcpPeerError::StaleRevision)
+                )
+            {
+                let _ = self.finish_mcp_settings_action(result.map(|_| ()), false);
+            }
+        }
+        if changed {
+            let _ = self.refresh_projection();
+        }
+        // Retired peers can still own a drain lease even without a visible job.
+        changed
+            || self.app.provider_configuration_busy()
+            || self.app.named_mcp_peer_configurations().iter().any(|p| {
+                self.app
+                    .named_mcp_peer_operation_pending(&p.metadata.peer_id)
+            })
+    }
+
+    #[cfg(feature = "ai")]
+    fn require_selected_mcp_peer_revision(
+        &self,
+        peer_id: &legion_protocol::McpServerId,
+        revision: u64,
+    ) -> std::result::Result<(), legion_app::named_mcp_peer::NamedMcpPeerError> {
+        if self.selected_named_mcp_peer.as_ref() != Some(peer_id)
+            || self
+                .app
+                .inspect_named_mcp_peer(peer_id)
+                .is_none_or(|p| p.revision != revision)
+        {
+            return Err(legion_app::named_mcp_peer::NamedMcpPeerError::StaleRevision);
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "ai")]
+    fn finish_mcp_settings_action(
+        &mut self,
+        result: std::result::Result<(), legion_app::named_mcp_peer::NamedMcpPeerError>,
+        persist_metadata: bool,
+    ) -> Result<DesktopWorkflowOutcome> {
+        let outcome = match result {
+            Err(error) => DesktopWorkflowOutcome::Error(error.to_string()),
+            Ok(()) if persist_metadata && self.save_session_state().is_err() => DesktopWorkflowOutcome::Error(
+                "MCP settings changed for this session but could not be saved. Retry saving before closing.".into()),
+            Ok(()) => DesktopWorkflowOutcome::Noop,
+        };
+        match &outcome {
+            DesktopWorkflowOutcome::Error(message) => {
+                self.set_status(StatusSeverity::Error, message.clone())
+            }
+            _ => self.set_status(StatusSeverity::Info, "MCP settings action completed."),
+        }
+        self.refresh_projection()?;
+        self.last_outcome = outcome.clone();
+        self.persist_diagnostics_if_configured();
+        Ok(outcome)
     }
 
     fn require_displayed_provider_profile(
@@ -2979,6 +3132,11 @@ impl DesktopRuntime {
             preferred_ai_provider: self.app.preferred_ai_provider().as_str().to_string(),
             ai_provider_profiles: self.ai_provider_profiles.clone(),
             provider_configuration_busy: self.app.provider_configuration_busy(),
+            #[cfg(feature = "ai")]
+            mcp_settings_peers: crate::view::mcp_settings::peer_projections(
+                &self.app,
+                self.selected_named_mcp_peer.as_ref(),
+            ),
             product_ai_stream_chunks: self
                 .app
                 .last_product_ai_stream()
@@ -5309,6 +5467,12 @@ impl DesktopEframeApp {
                 ui.ctx()
                     .request_repaint_after(std::time::Duration::from_millis(50));
             }
+        }
+        // Poll app-owned MCP workers, including retired transports draining.
+        #[cfg(feature = "ai")]
+        if self.runtime.poll_mcp_settings_operations() {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
         }
         // Progressive product AI stream: merge live SSE sink into projection and
         // keep repainting while deltas are in flight.

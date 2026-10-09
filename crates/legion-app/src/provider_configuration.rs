@@ -451,9 +451,7 @@ impl AppComposition {
                 .remove(&job.profile.name);
         }
         drop(job.lane);
-        if self.org_policy_mode_ceiling_denies(self.product_mode) {
-            self.set_product_mode(AppProductMode::Manual);
-        }
+        self.install_mode_policy_ceiling();
         true
     }
 

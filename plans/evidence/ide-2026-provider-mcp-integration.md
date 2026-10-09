@@ -85,3 +85,114 @@ it is not runtime or native qualification. The focused suites in the
 Native UI/profile credential entry/reopen, live MiMo responses, MCP native UI and
 real peers remain unqualified. The earlier unexplained `0xc0000409` remains open.
 No ticket or canonical acceptance checkbox is promoted.
+
+## Wave1 settings and shared-drain composition
+
+This later checkpoint supersedes the earlier current-state descriptions above
+without replacing their historical evidence. Base integration source was
+`ee6896f1e340113cfa1cddbd873f2bc7cf0cb8e7`. It already includes accepted ticket 05's
+app/storage save-conflict slice, reviewed provider connection-check source,
+bounded ticket 155 contract documentation and ticket 04 component diagnostics.
+Current counts remain 5 resolved / 247 ready-for-agent / 2 needs-info.
+
+The frozen [MCP settings handoff](ide-2026-ticket063-mcp-settings.md) was verified
+against all 45 manifest entries. Worker patch SHA-256:
+`4f86b9073081ce49e3aa54ce25f7feac84a190127aa0ec7f19d2cb19ee686fa5`.
+Pauli independently reviewed the complete patch: PASS for bounded local partial
+implementation, with the crash qualification blocker retained below. Shared
+desktop hunks were composed without copying over provider actions or polling.
+
+The coordinator independently reviewed the integrator's two production changes
+and new regression. Installing a denying ceiling first preserves provider
+cancellation, then uses the common mode setter; that setter revokes pending MCP
+grants before testing the existing shared drain counter. Provider completion
+reconciles the ceiling only after releasing its handoff lane. MCP polling
+reconciles before/after results, including retired-only drain. New admissions
+remain denied while a displayed non-Manual mode represents unfinished drain.
+
+Verified final raw file identities for the integrator-authored delta:
+
+| File | SHA-256 |
+| --- | --- |
+| `crates/legion-app/src/lib.rs` | `777ccf63ac066d6d9b8b8de3b1651fa053e924ec5af77eab4a96fe5d439d46ac` |
+| `crates/legion-app/src/provider_configuration.rs` | `db0bfaf6b268be5ac08d8fd38d8e5bb47d38f927de2b9556e8253378da26f23c` |
+| `crates/legion-app/tests/provider_mcp_drain_composition.rs` | `0254fb232d14ccb59e144015f42a523a532878549cb10c40ab634c05cbcae38e` |
+
+The production diff is retained externally as
+`D:/legion-ide-2026-notes/wave1-provider-mcp-production-composition-ee6896f.patch`,
+SHA-256 `027b6653e1a53807271c435b3560afa4c20e8ae0e68bc57f2d3a0d70b1b6bdae`.
+No production edit followed the coordinator's author-delta review.
+
+### Combined behavioral evidence
+
+```text
+cargo test -p legion-app --test provider_mcp_drain_composition -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target -- --nocapture
+```
+
+Result: exit 0, 1 test passed in 0.32 seconds (compile 3.73 seconds), covering
+active and retired MCP workers with both HTTP response-release orders. Independent
+held loopback servers prove both requests are live before lowering the signed
+ceiling to Manual. Public observations establish immediate admission denial,
+honest intermediate mode, final Manual after both drains, rejected late success,
+no delegated sandbox allocation and unchanged editor/disk bytes. For retired MCP
+there is no per-peer completion projection; the test does not treat a timed poll
+as proof that the retired worker completed.
+
+Log: `D:/legion-ide-2026-notes/wave1-provider-mcp-composition-ee6896f-2.log`.
+The first invocation failed on the fixture's policy wire spelling `Delegate`
+instead of `Delegates`, before issuing either request. That setup failure is
+retained in `wave1-provider-mcp-composition-ee6896f-1.log` in the same directory;
+it is not a product behavioral red. Only this failed new check was rerun after
+the fixture correction. Subsequent rustfmt changed whitespace only; no successful
+test was repeated.
+
+### Composed source gates
+
+Commands ran once from integration on the reviewed, unchanged production delta:
+
+```text
+cargo check -p legion-desktop --all-targets -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target
+cargo check -p legion-desktop --no-default-features --features offline --lib --bins -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target
+cargo run -p xtask -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target -- check-deps
+cargo run -p xtask -j 2 --target-dir D:/legion-ide-2026-tools/qualification-target -- no-egui-textedit
+```
+
+| Check | Result | Log under `D:/legion-ide-2026-notes/` |
+| --- | --- | --- |
+| Default desktop all-targets | Exit 0, 20.99 seconds | `wave1-composed-desktop-alltargets-ee6896f.log` |
+| Offline desktop lib/bins | Exit 0, 6.31 seconds | `wave1-composed-desktop-offline-ee6896f.log` |
+| Dependency policy | Exit 0 | `wave1-composed-check-deps-ee6896f.log` |
+| No egui TextEdit in the editor canvas | Exit 0 | `wave1-composed-no-egui-textedit-ee6896f.log` |
+
+Scoped formatting of the integrator's three Rust files passed; the frozen worker
+files retain their recorded formatting evidence. Offline compilation reports 42
+app warnings for unused imports/dead code; the existing vendored epaint f32
+fallback warning also remains. No unrelated warning cleanup was performed.
+Final docs-hygiene is intentionally deferred until the separate ticket 169
+documentation handoff. The default-feature desktop executable will be built
+after the local source commit and bound to its exact SHA and executable SHA-256.
+No runtime/native or full-workspace/platform result is inferred from compilation.
+
+### Retained qualification limits
+
+The two historical Windows `0xc0000409` MCP test-process aborts remain unresolved.
+The first debugger capture attempt failed during harness startup before any test
+completion. A separately authorized corrected synchronous LLDB attempt reused the
+same frozen EXE/PDB and completed the exact two selected tests, both passing with
+inferior exit 0. This single diagnostic did not reproduce the abort; no repair,
+cause or uninterrupted green suite is claimed. The complete chronology and
+frozen identities are retained in
+`D:/legion-ide-2026-notes/ticket063-lldb-20261009-162447-e096a38e/receipt.md`.
+Root permits local partial implementation while retaining the intermittent abort
+as a native/product/release qualification blocker. No further crash rerun is part
+of this checkpoint.
+
+Ticket 04 remains gated by the r4 native root-focus discrepancy; no typing/save
+ran and Computer Use remains stopped. Ticket 40 still needs native profile and
+credential workflows plus live-provider qualification. Ticket 63 still needs
+native settings, real peers, stdio/server and broader cancellation/recovery
+qualification. Ticket 88 remains provisional. Ticket 155's bounded document is
+not runtime compatibility or representative/host ratification. Ticket 169 is a
+separate pending documentation handoff. The old offline r4 installer predates
+these provider/MCP changes and is not their executable artifact. No GUI launch,
+live remote call, signing, push, PR or product acceptance is part of this wave.
