@@ -2,13 +2,14 @@
 
 ## Notes
 
-The user approved the [numbered breakdown](ticket-breakdown.md). All 254 issues are published individually as `ready-for-agent`. The [specification](spec.md) governs design. This index is navigation, not a separate readiness database.
+The user approved the [numbered breakdown](ticket-breakdown.md). All 254 issues were initially published individually as `ready-for-agent`; current execution status is recorded in each issue. The [specification](spec.md) governs design. This index is navigation, not a separate readiness database.
 
 ## Decisions-so-far
 
 - 2026-10-08: Approved titles, numbering, outcomes and blocking edges are preserved.
 - Publication claims or resolves no implementation ticket.
 - Work any ticket whose blockers are resolved; numbering is not a forced serial schedule.
+- 2026-10-08: [01](issues/01-reconcile-the-2026-program-delta.md) resolved on the reviewed worker branch: [Q1–Q36 reconciliation](../../plans/completion/ide-2026-reconciliation.md), nine explicit delta/owner handoffs, full retained scope and locally passing document/register/mapping checks. Independent review PASS (Einstein); no configuration ratification or canonical implementation/product-acceptance status changed. No other ticket executed here.
 
 ## Initial frontier
 
@@ -18,7 +19,7 @@ The user approved the [numbered breakdown](ticket-breakdown.md). All 254 issues 
 
 | Ticket | Blocked by |
 | --- | --- |
-| [01: Reconcile the 2026 program delta](issues/01-reconcile-the-2026-program-delta.md) | None |
+| [01: Reconcile the 2026 program delta](issues/01-reconcile-the-2026-program-delta.md) — **resolved** | None |
 | [02: Ratify the Windows/Rust pilot configuration](issues/02-ratify-the-windows-rust-pilot-configuration.md) | [01](issues/01-reconcile-the-2026-program-delta.md) |
 | [03: Name essential migration workflows](issues/03-name-essential-migration-workflows.md) | [01](issues/01-reconcile-the-2026-program-delta.md) |
 | [04: Drive one real native open-edit-save journey](issues/04-drive-one-real-native-open-edit-save-journey.md) | [02](issues/02-ratify-the-windows-rust-pilot-configuration.md) |
