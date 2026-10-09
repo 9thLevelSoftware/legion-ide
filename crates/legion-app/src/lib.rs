@@ -6416,6 +6416,17 @@ impl ActiveDocumentController {
     }
 
     fn bind_opened_file(&mut self, opened: &OpenedFileText, buffer_id: BufferId) {
+        if self.open_tabs.contains(&buffer_id)
+            && let Some(metadata) = self.metadata_for_buffer(buffer_id).cloned()
+        {
+            // Reopening activates the retained editor text; it does not reload it.
+            // Keep that text's save baseline, even for a currently clean buffer:
+            // adopting freshly read disk metadata would authorize a later save
+            // to overwrite external changes the buffer has never incorporated.
+            self.activate_metadata(buffer_id, &metadata);
+            self.close_dirty_prompt = None;
+            return;
+        }
         let identity = opened.identity.clone();
         let metadata = ActiveFileMetadata {
             identity: identity.clone(),

@@ -8,8 +8,8 @@ static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 const FULL_CACHE_BUDGET_BYTES: usize = 5 * 1024 * 1024;
 
 use legion_app::{
-    AppCommandExecutionState, AppCommandOutcome, AppCommandRequest, AppComposition,
-    AppEditorCommandPort, AppProductMode, AppSaveOutcome, AppWorkspaceCommandPort,
+    AppCloseTabOutcome, AppCommandExecutionState, AppCommandOutcome, AppCommandRequest,
+    AppComposition, AppEditorCommandPort, AppProductMode, AppSaveOutcome, AppWorkspaceCommandPort,
     BatchExecutionJournalItemState, BatchExecutionJournalStageState, BatchExecutionStage,
     BatchPlanningSemantics, BatchPreflightRoute, BatchRollbackContractStatus, CommandDispatcher,
     CommandExecutionService, OpenFileIntent,
@@ -41,6 +41,7 @@ use legion_protocol::{
     WorkspaceRequest, WorkspaceResponse, WorkspaceTrustState,
 };
 use legion_remote::RemoteOperationDisposition;
+use legion_storage::HotExitStore;
 use legion_ui::{CommandDispatchIntent, ShellLayoutProjection};
 use uuid::Uuid;
 
@@ -916,6 +917,295 @@ fn workspace_vfs_integration_external_overwrite_between_open_and_save_yields_con
 
     let _ = save_err;
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn workspace_vfs_integration_reopening_conflicted_file_does_not_authorize_overwrite() {
+    let root = create_root();
+    let target = root.join("reopen-conflict.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+    let (mut app, _) = app_with_events();
+    app.open_workspace(
+        &root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".to_string()),
+    )
+    .expect("open workspace");
+    let file_id = app.open_file(target.to_string_lossy()).expect("open file");
+    let buffer_id = app.active_buffer_id().expect("active buffer");
+    let expected = app.active_file_fingerprint().cloned();
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), "!"))
+        .expect("edit buffer");
+    std::fs::write(&target, "external").expect("external overwrite");
+    assert!(matches!(
+        app.save_active_buffer().expect("save outcome"),
+        AppSaveOutcome::Rejected(_)
+    ));
+
+    assert_eq!(
+        app.open_file(target.to_string_lossy())
+            .expect("reopen file"),
+        file_id
+    );
+    assert_eq!(app.active_buffer_id(), Some(buffer_id));
+    assert_eq!(app.editor().text(buffer_id).expect("dirty text"), "seed!");
+    assert_eq!(
+        app.active_file_fingerprint().cloned(),
+        expected,
+        "reopening a retained buffer must not silently acknowledge unseen disk changes"
+    );
+    assert!(matches!(
+        app.save_active_buffer().expect("second save"),
+        AppSaveOutcome::Rejected(_)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("disk bytes"),
+        "external"
+    );
+    assert!(app.editor().is_dirty(buffer_id).expect("dirty state"));
+    std::fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn workspace_vfs_integration_conflict_recovery_survives_store_reopen_and_saves_separate_copy() {
+    let fixture = tempfile::tempdir().expect("isolated fixture");
+    let root = fixture.path();
+    let target = root.join("original.txt");
+    let copy = root.join("recovered.txt");
+    let store = root.join("unsaved");
+    let dirty = "seed α😀\r\n";
+    let external = "external\r\nbytes\n";
+    std::fs::write(&target, "seed\r\n").expect("seed original");
+    let (mut app, _) = app_with_events();
+    app.open_workspace(
+        root,
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".into()),
+    )
+    .expect("open workspace");
+    assert_eq!(app.product_mode(), AppProductMode::Manual);
+    app.open_file(target.to_string_lossy())
+        .expect("open original");
+    let buffer = app.active_buffer_id().expect("original buffer");
+    let baseline = app.active_file_fingerprint().cloned();
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), " α😀"))
+        .expect("edit original");
+    std::fs::write(&target, external).expect("external overwrite");
+    assert!(matches!(
+        app.save_active_buffer().expect("refused save"),
+        AppSaveOutcome::Rejected(_)
+    ));
+    assert_eq!(app.editor().text(buffer).expect("preserved text"), dirty);
+    assert!(matches!(app.close_tab(buffer).expect("close prompt"),
+        AppCloseTabOutcome::CloseDirtyPrompt { buffer_id, .. } if buffer_id == buffer));
+    app.cancel_dirty_close(buffer).expect("cancel close");
+    assert_eq!(app.active_buffer_id(), Some(buffer));
+    assert!(app.editor().is_dirty(buffer).expect("still dirty"));
+
+    let session = app
+        .capture_workspace_session_record()
+        .expect("capture session");
+    let snapshots = app
+        .capture_hot_exit_snapshots()
+        .expect("capture unsaved body");
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].body, dirty);
+    assert_eq!(snapshots[0].disk_fingerprint, baseline);
+    assert!(
+        !format!("{session:?}").contains(dirty),
+        "session metadata must not retain source"
+    );
+    HotExitStore::save(&store, &snapshots).expect("persist unsaved body");
+    let blocked_store = root.join("blocked-store");
+    std::fs::write(&blocked_store, "storage blocker").expect("create real storage failure");
+    assert!(HotExitStore::save(&blocked_store, &snapshots).is_err());
+    assert_eq!(
+        app.editor()
+            .text(buffer)
+            .expect("text after storage failure"),
+        dirty
+    );
+    assert!(
+        app.editor()
+            .is_dirty(buffer)
+            .expect("dirty after storage failure")
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("original disk bytes"),
+        external.as_bytes()
+    );
+    drop(app);
+
+    let (mut restored, sink) = app_with_events();
+    restored
+        .open_workspace(
+            root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".into()),
+        )
+        .expect("reopen workspace");
+    restored
+        .restore_workspace_session_record(&session)
+        .expect("restore session metadata");
+    let loaded = HotExitStore::load(&store).expect("reopen actual storage");
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].body, dirty);
+    assert_eq!(
+        restored
+            .restore_hot_exit_snapshots(&loaded)
+            .expect("restore editor body"),
+        1
+    );
+    let original_buffer = restored.active_buffer_id().expect("restored original");
+    restored
+        .open_file(target.to_string_lossy())
+        .expect("activate restored original");
+    assert_eq!(restored.active_file_fingerprint().cloned(), baseline);
+    assert_eq!(
+        restored
+            .editor()
+            .text(original_buffer)
+            .expect("restored text"),
+        dirty
+    );
+    assert!(matches!(
+        restored
+            .save_active_buffer()
+            .expect("refused restored save"),
+        AppSaveOutcome::Rejected(_)
+    ));
+    assert_eq!(
+        std::fs::read(&target).expect("original remains external"),
+        external.as_bytes()
+    );
+
+    // Explicitly preserve both versions using the existing new-file/edit/save
+    // workflow. This is not an overwrite resolution or an automatic retry.
+    restored
+        .open_new_file(copy.to_string_lossy())
+        .expect("choose separate recovery path");
+    let copy_buffer = restored.active_buffer_id().expect("recovery buffer");
+    restored
+        .edit_active_buffer(TextEdit::insert(
+            TextPosition::zero(),
+            loaded[0].body.clone(),
+        ))
+        .expect("copy recovered edits");
+    assert!(matches!(
+        restored.save_active_buffer().expect("save recovery copy"),
+        AppSaveOutcome::Saved(_)
+    ));
+    assert!(
+        !restored
+            .editor()
+            .is_dirty(copy_buffer)
+            .expect("copy is saved")
+    );
+    assert_eq!(
+        std::fs::read(&copy).expect("exact recovery bytes"),
+        dirty.as_bytes()
+    );
+    assert_eq!(
+        std::fs::read(&target).expect("exact external bytes"),
+        external.as_bytes()
+    );
+    assert_eq!(
+        restored
+            .editor()
+            .text(original_buffer)
+            .expect("original edits remain"),
+        dirty
+    );
+    assert!(
+        restored
+            .editor()
+            .is_dirty(original_buffer)
+            .expect("original remains unsaved")
+    );
+    let events = sink.events().expect("workflow events");
+    for event in &events {
+        assert_non_zero_core_ids(event);
+    }
+    assert_events_include_order(
+        &events,
+        &[
+            "proposal.created",
+            "proposal.validated",
+            "proposal.previewed",
+            "proposal.applied",
+            "proposal.audit_recorded",
+        ],
+    );
+    drop(restored);
+
+    let mut reopened = AppComposition::new();
+    reopened
+        .open_workspace(
+            root,
+            WorkspaceTrustState::Trusted,
+            PrincipalId("trusted".into()),
+        )
+        .expect("independent reopen");
+    reopened
+        .open_file(copy.to_string_lossy())
+        .expect("read persisted recovery copy");
+    let reopened_buffer = reopened.active_buffer_id().expect("reopened copy");
+    assert_eq!(
+        reopened
+            .editor()
+            .text(reopened_buffer)
+            .expect("reopened recovery text"),
+        dirty
+    );
+    assert!(
+        !reopened
+            .editor()
+            .is_dirty(reopened_buffer)
+            .expect("reopened copy clean")
+    );
+}
+
+#[test]
+fn workspace_vfs_integration_reopening_clean_retained_text_does_not_acknowledge_external_edit() {
+    let fixture = tempfile::tempdir().expect("isolated fixture");
+    let target = fixture.path().join("clean-reopen.txt");
+    std::fs::write(&target, "seed").expect("seed file");
+    let mut app = AppComposition::new();
+    app.open_workspace(
+        fixture.path(),
+        WorkspaceTrustState::Trusted,
+        PrincipalId("trusted".into()),
+    )
+    .expect("open workspace");
+    app.open_file(target.to_string_lossy()).expect("open file");
+    let buffer = app.active_buffer_id().expect("buffer");
+    let baseline = app.active_file_fingerprint().cloned();
+    std::fs::write(&target, "external").expect("external edit before editor is dirty");
+    app.open_file(target.to_string_lossy())
+        .expect("reactivate file");
+    assert_eq!(app.active_buffer_id(), Some(buffer));
+    assert_eq!(app.editor().text(buffer).expect("retained text"), "seed");
+    assert!(
+        !app.editor()
+            .is_dirty(buffer)
+            .expect("still clean relative to baseline")
+    );
+    assert_eq!(app.active_file_fingerprint().cloned(), baseline);
+    app.edit_active_buffer(TextEdit::insert(TextPosition::new(0, 4), "!"))
+        .expect("edit retained text");
+    assert!(matches!(
+        app.save_active_buffer().expect("refused save"),
+        AppSaveOutcome::Rejected(_)
+    ));
+    assert_eq!(
+        app.editor().text(buffer).expect("dirty text remains"),
+        "seed!"
+    );
+    assert!(app.editor().is_dirty(buffer).expect("dirty retained"));
+    assert_eq!(
+        std::fs::read(&target).expect("disk bytes remain"),
+        b"external"
+    );
 }
 
 #[test]
