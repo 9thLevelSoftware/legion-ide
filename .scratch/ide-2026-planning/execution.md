@@ -13,7 +13,9 @@ describes specification creation and does not negate this later authorization.
 
 ## Active work
 
-- 01: claimed; reconcile approved decisions/outcomes with canonical requirements.
+- 01: resolved and independently reviewed; integrated as `c2a6578`.
+- 02: claimed on `codex/ide-2026-ticket-002`; pilot configuration contract.
+- 03: claimed on `codex/ide-2026-ticket-003`; migration workflow contract.
 
 ## Verification policy
 
