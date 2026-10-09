@@ -19,7 +19,8 @@ describes specification creation and does not negate this later authorization.
 - 40: claimed on `codex/ide-2026-ticket-040`; explicit provider configuration.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
 - Native candidate prerequisite repair: independently reviewed and integrated as
-  `07d2187`; rebuilt immutable candidate verification remains pending.
+  `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
+- 04: claimed on `codex/ide-2026-ticket-004`; external native open/edit/save journey.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
 packaged successfully (MSI SHA-256
