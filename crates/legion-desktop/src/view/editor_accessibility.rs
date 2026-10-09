@@ -22,6 +22,10 @@ const MAX_SELECTION_METADATA_BYTES: usize =
     (MAX_SELECTABLE_UNITS + MAX_TEXT_RUNS) * std::mem::size_of::<usize>();
 const MAX_RUN_UNITS: usize = 255;
 
+pub(crate) fn document_widget_id() -> egui::Id {
+    egui::Id::new("legion_editor_document")
+}
+
 #[derive(Debug)]
 struct TextRun {
     node: Node,
@@ -30,6 +34,7 @@ struct TextRun {
 
 #[derive(Debug, Default)]
 pub(super) struct EditorAccessibility {
+    last_active_buffer: Option<legion_protocol::BufferId>,
     cached: Option<(
         EditorAccessibilityProjection,
         Result<Vec<TextRun>, &'static str>,
@@ -45,13 +50,65 @@ impl EditorAccessibility {
     ) {
         if active.buffer_id.is_none() {
             self.cached = None;
+            self.last_active_buffer = None;
+            ui.memory_mut(|memory| memory.surrender_focus(document_widget_id()));
             return;
         }
+        let activated = self.last_active_buffer != active.buffer_id;
+        self.last_active_buffer = active.buffer_id;
+        if activated
+            && ui.is_enabled()
+            && !ui.input(|input| input.pointer.any_pressed())
+            && ui.memory(|memory| memory.focused().is_none())
+        {
+            // Initial/file-open activation can claim an unowned keyboard, but
+            // never takes it from an already focused control or pointer gesture.
+            ui.memory_mut(|memory| memory.request_focus(document_widget_id()));
+        }
+        // Register focus interest only to retain keyboard ownership already
+        // acquired by a real canvas activation. An unsolicited AT request must
+        // not transfer focus away from another control.
+        let owns_keyboard = ui.memory(|memory| memory.has_focus(document_widget_id()));
         let mut document_ui = ui.new_child(
             egui::UiBuilder::new()
-                .id(egui::Id::new("legion_editor_document"))
+                .id(document_widget_id())
+                .sense(if owns_keyboard {
+                    egui::Sense::focusable_noninteractive()
+                } else {
+                    egui::Sense::hover()
+                })
                 .max_rect(viewport_rect),
         );
+        document_ui.set_min_size(viewport_rect.size());
+        if owns_keyboard {
+            // egui computes spatial navigation before this frame's filter is
+            // installed. On the first arrow after activation, cancel that one
+            // pending spatial move; the app still consumes the original key.
+            let editor_arrow = ui.input(|input| {
+                !input.modifiers.any()
+                    && [
+                        egui::Key::ArrowLeft,
+                        egui::Key::ArrowRight,
+                        egui::Key::ArrowUp,
+                        egui::Key::ArrowDown,
+                    ]
+                    .iter()
+                    .any(|key| input.key_pressed(*key))
+            });
+            ui.memory_mut(|memory| {
+                if editor_arrow {
+                    memory.move_focus(egui::FocusDirection::None);
+                }
+                memory.set_focus_lock_filter(
+                    document_widget_id(),
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        ..Default::default()
+                    },
+                );
+            });
+        }
         let id = document_ui.unique_id();
         // Do not build or retain text when the platform has not enabled a11y.
         if ui.ctx().accesskit_node_builder(id, |_| ()).is_none() {
@@ -115,6 +172,7 @@ impl EditorAccessibility {
             node.set_label("Editor document");
             node.set_description("Complete bounded small-buffer text");
             node.set_bounds(bounds(viewport_rect));
+            node.remove_action(egui::accesskit::Action::Focus);
             if !active.accessibility.expect("validated metadata").editable {
                 node.set_read_only();
             }
@@ -280,5 +338,6 @@ fn publish_unavailable(ctx: &egui::Context, id: egui::Id, rect: egui::Rect, reas
         node.set_label("Editor document");
         node.set_description(format!("Complete text unavailable: {reason}"));
         node.set_bounds(bounds(rect));
+        node.remove_action(egui::accesskit::Action::Focus);
     });
 }

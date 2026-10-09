@@ -5352,8 +5352,10 @@ impl DesktopEframeApp {
         snapshot: &ShellProjectionSnapshot,
     ) {
         let focused = ui.memory(|memory| memory.focused());
+        let editor_focused =
+            focused == Some(crate::view::editor_accessibility::document_widget_id());
         let text_edit_focused = ui.ctx().text_edit_focused();
-        if focused.is_some() && !text_edit_focused {
+        if focused.is_some() && !editor_focused && !text_edit_focused {
             ui.input_mut(|state| {
                 state.events.retain(|event| {
                     !matches!(
@@ -5376,6 +5378,7 @@ impl DesktopEframeApp {
         // claim. Surrender it before paint so a leading space types instead
         // of pressing the leftover control.
         let typing_at_stale_control = focused.is_some()
+            && !editor_focused
             && !text_edit_focused
             && !self.focus_arrived_by_tab
             && self.runtime.center_surface_is_editor()
@@ -5572,8 +5575,10 @@ impl DesktopEframeApp {
             self.focus_owner = focused_now;
             self.focus_navigation_pending = false;
         }
-        let mut pressable_control_focused =
-            focused_now.is_some() && !ui.ctx().text_edit_focused() && self.focus_arrived_by_tab;
+        let mut pressable_control_focused = focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+            && self.focus_arrived_by_tab;
 
         // Typing into the editor takes the keyboard back from a stale button.
         //
@@ -5593,8 +5598,10 @@ impl DesktopEframeApp {
         // *including* a space, which is why this is a separate condition from
         // the one above. Surrendering it here is what stops the same space
         // pressing the control it was typed past.
-        let stale_control_focused =
-            focused_now.is_some() && !ui.ctx().text_edit_focused() && !self.focus_arrived_by_tab;
+        let stale_control_focused = focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+            && !self.focus_arrived_by_tab;
         if (pressable_control_focused || stale_control_focused)
             && input.events.iter().any(|event| {
                 matches!(
@@ -5621,7 +5628,10 @@ impl DesktopEframeApp {
         //
         // Outside the provenance gate deliberately: a modified chord is never a
         // control's activation, however that control came to hold focus.
-        if focused_now.is_some() && !ui.ctx().text_edit_focused() {
+        if focused_now.is_some()
+            && focused_now != Some(crate::view::editor_accessibility::document_widget_id())
+            && !ui.ctx().text_edit_focused()
+        {
             ui.input_mut(|state| {
                 state.events.retain(|event| {
                     !matches!(

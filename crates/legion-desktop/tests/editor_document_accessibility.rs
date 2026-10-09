@@ -491,11 +491,11 @@ fn qualification_unsolicited_accessibility_focus_preserves_enter_and_space_input
             data: None,
         },
     )]));
-    assert_ne!(
+    assert_eq!(
         app.headless_egui_context()
             .memory(|memory| memory.focused().map(|id| id.accesskit_id())),
         Some(id),
-        "non-focusable canvas semantic node cannot take widget focus"
+        "file-open keyboard ownership survives an unsolicited same-node Focus"
     );
     let key = |key| egui::Event::Key {
         key,

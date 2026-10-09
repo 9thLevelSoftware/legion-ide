@@ -15,7 +15,7 @@ mod components;
 mod debug_inspector;
 /// Applying persisted dock splitter fractions, and observing new ones.
 pub mod dock_geometry;
-mod editor_accessibility;
+pub(crate) mod editor_accessibility;
 #[cfg(feature = "ai")]
 pub mod ghost_text;
 pub mod rail_icons;
@@ -3746,6 +3746,21 @@ fn render_editor_canvas(
                 &snapshot.active_buffer_projection,
                 code_rect.intersect(ui.clip_rect()),
             );
+            // Behind the line widgets: blank code-area clicks own the same
+            // keyboard identity as text clicks, without adding an AT Focus action.
+            let background = ui.interact(
+                code_rect,
+                editor_accessibility::document_widget_id().with("pointer_background"),
+                egui::Sense::CLICK,
+            );
+            if snapshot.active_buffer_projection.buffer_id.is_some()
+                && background.clicked()
+                && ui.input(|input| input.pointer.primary_clicked())
+            {
+                ui.memory_mut(|memory| {
+                    memory.request_focus(editor_accessibility::document_widget_id());
+                });
+            }
             let mut code_ui = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(code_rect)
@@ -4218,6 +4233,10 @@ fn render_code_lines(
                                 utf16_offset: None,
                             };
                             if response.clicked() {
+                                ui.memory_mut(|memory| {
+                                    memory
+                                        .request_focus(editor_accessibility::document_widget_id());
+                                });
                                 actions.push(DesktopAction::SetVisualCursor {
                                     buffer_id: Some(buffer_id),
                                     expected_snapshot_id: viewport.snapshot_id,
@@ -4253,6 +4272,11 @@ fn render_code_lines(
                     cached_code_line_galley(ui, active_buffer_id, snapshot_id, line, wrap_width);
                 let response =
                     ui.add(egui::Label::new(galley.clone()).sense(egui::Sense::click_and_drag()));
+                if response.clicked() || response.dragged() {
+                    ui.memory_mut(|memory| {
+                        memory.request_focus(editor_accessibility::document_widget_id());
+                    });
+                }
                 if let Some(position) = response.interact_pointer_pos()
                     && let Some(buffer_id) = active_buffer_id
                 {
