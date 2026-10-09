@@ -139,6 +139,16 @@ pub fn unicode_text(text: &str) -> Result<(), String> {
 /// rectangle of the target element. ADR-0056 forbids taking it from any
 /// product geometry API.
 pub fn click_at(x: i32, y: i32) -> Result<(), String> {
+    click_at_with_sender(x, y, send)
+}
+
+/// External SendInput boundary seam. A click is submitted in one batch, so a
+/// caller's foreground guard covers move/down/up without gaps between sends.
+pub fn click_at_with_sender(
+    x: i32,
+    y: i32,
+    submit: impl FnOnce(&[INPUT]) -> Result<(), String>,
+) -> Result<(), String> {
     // SAFETY: `GetSystemMetrics` takes a plain index and returns a plain int.
     let (origin_x, origin_y, width, height) = unsafe {
         (
@@ -167,13 +177,11 @@ pub fn click_at(x: i32, y: i32) -> Result<(), String> {
         },
     };
 
-    send(&[mouse(absolute_flags)])?;
-    send(&[mouse(
-        MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
-    )])?;
-    send(&[mouse(
-        MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
-    )])
+    submit(&[
+        mouse(absolute_flags),
+        mouse(MOUSEEVENTF_LEFTDOWN.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0),
+        mouse(MOUSEEVENTF_LEFTUP.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0),
+    ])
 }
 
 /// Put `text` on the **system** clipboard as `CF_UNICODETEXT`.

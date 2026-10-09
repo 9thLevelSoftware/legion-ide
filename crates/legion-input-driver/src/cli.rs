@@ -26,6 +26,14 @@ pub const EXIT_BLOCKED: i32 = 3;
 /// The two subcommands the harness invokes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// A bounded journey on an explicitly prepared disposable repository.
+    OpenEditSave {
+        product: PathBuf,
+        workspace: PathBuf,
+        target: PathBuf,
+        report: PathBuf,
+        await_foreground: bool,
+    },
     /// `--probe-session --report <path>`: attach to the input desktop.
     ProbeSession {
         /// Where to write the session handshake report.
@@ -58,7 +66,8 @@ impl CliError {
 /// Usage string, printed on a parse error.
 pub const USAGE: &str = concat!(
     "usage: legion-input-driver --probe-session --report <path>\n",
-    "       legion-input-driver --conformance-run --product <exe> --report <path>"
+    "       legion-input-driver --conformance-run --product <exe> --report <path>\n",
+    "       legion-input-driver --open-edit-save-run [--await-foreground] --product <exe> --workspace <clone> --target <relative-file> --report <path>"
 );
 
 /// Parse the driver's arguments (already stripped of `argv[0]`).
@@ -69,6 +78,10 @@ pub const USAGE: &str = concat!(
 pub fn parse(args: &[String]) -> Result<Command, CliError> {
     let mut probe_session = false;
     let mut conformance_run = false;
+    let mut journey_run = false;
+    let mut await_foreground = false;
+    let mut workspace = None;
+    let mut target = None;
     let mut product: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
 
@@ -78,6 +91,19 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
         match arg {
             "--probe-session" => probe_session = true,
             "--conformance-run" => conformance_run = true,
+            "--open-edit-save-run" => journey_run = true,
+            "--await-foreground" => await_foreground = true,
+            "--workspace" | "--target" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| CliError::new(format!("{arg} requires a path")))?;
+                if arg == "--workspace" {
+                    workspace = Some(PathBuf::from(value));
+                } else {
+                    target = Some(PathBuf::from(value));
+                }
+            }
             "--product" => {
                 index += 1;
                 let value = args
@@ -100,6 +126,37 @@ pub fn parse(args: &[String]) -> Result<Command, CliError> {
     }
 
     let report = report.ok_or_else(|| CliError::new("--report <path> is required"))?;
+
+    if journey_run {
+        if probe_session || conformance_run {
+            return Err(CliError::new(
+                "journey and conformance/probe modes are mutually exclusive",
+            ));
+        }
+        let (Some(workspace), Some(target)) = (workspace, target) else {
+            return Err(CliError::new(
+                "--open-edit-save-run requires --workspace and --target",
+            ));
+        };
+        return Ok(Command::OpenEditSave {
+            product: product
+                .ok_or_else(|| CliError::new("--open-edit-save-run requires --product"))?,
+            workspace,
+            target,
+            report,
+            await_foreground,
+        });
+    }
+    if await_foreground {
+        return Err(CliError::new(
+            "--await-foreground requires --open-edit-save-run",
+        ));
+    }
+    if workspace.is_some() || target.is_some() {
+        return Err(CliError::new(
+            "--workspace and --target require --open-edit-save-run",
+        ));
+    }
 
     match (probe_session, conformance_run) {
         (true, true) => Err(CliError::new(

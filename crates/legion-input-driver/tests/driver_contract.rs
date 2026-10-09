@@ -16,6 +16,204 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "../src/focus.rs"]
+mod focus;
+
+#[cfg(windows)]
+#[path = "../src/inject.rs"]
+#[allow(dead_code)]
+mod inject;
+
+#[cfg(windows)]
+#[test]
+fn pointer_click_delivers_move_down_up_in_one_external_batch() {
+    let mut batches = Vec::new();
+    inject::click_at_with_sender(10, 10, |events| {
+        batches.push(events.len());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(batches, vec![3]);
+}
+
+#[test]
+fn document_oracle_rejects_partial_or_extra_text_and_preserves_unicode() {
+    assert!(observe::document_text_matches(
+        "# Legion\r\nbody\r\n",
+        "# Legion\nbody\n"
+    ));
+    assert!(!observe::document_text_matches(
+        "# Legion\nbody\n",
+        "# Legion\nwrong\n"
+    ));
+    assert!(!observe::document_text_matches(
+        "marker body",
+        "prefix marker body extra"
+    ));
+    assert!(!observe::document_text_matches("é", "e\u{301}"));
+}
+
+#[test]
+fn unattended_journey_default_preserves_existing_foreground_mode() {
+    let args = [
+        "--open-edit-save-run",
+        "--product",
+        "missing.exe",
+        "--workspace",
+        ".",
+        "--target",
+        "README.md",
+        "--report",
+        "unused.toml",
+    ]
+    .map(str::to_string);
+    assert!(matches!(
+        cli::parse(&args).unwrap(),
+        cli::Command::OpenEditSave {
+            await_foreground: false,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn attended_wait_requires_target_and_stops_on_exit_or_sixty_second_deadline() {
+    use focus::{AwaitForegroundOutcome as Outcome, ForegroundObservation as Observation};
+    use std::{cell::Cell, time::Duration};
+    let polls = Cell::new(0);
+    let ready = focus::await_user_foreground(
+        || {
+            if polls.get() == 0 {
+                Observation::Other
+            } else {
+                Observation::Target
+            }
+        },
+        || Duration::from_millis(polls.get() * 100),
+        || polls.set(polls.get() + 1),
+    );
+    assert_eq!(ready, Outcome::Ready);
+    assert_eq!(polls.get(), 1);
+
+    let exited = focus::await_user_foreground(
+        || Observation::WindowExited,
+        || Duration::ZERO,
+        || panic!("exited window must not keep waiting"),
+    );
+    assert_eq!(exited, Outcome::WindowExited);
+
+    let seconds = Cell::new(0);
+    let timed_out = focus::await_user_foreground(
+        || Observation::Other,
+        || Duration::from_secs(seconds.get()),
+        || seconds.set(seconds.get() + 1),
+    );
+    assert_eq!(timed_out, Outcome::TimedOut);
+    assert_eq!(seconds.get(), 60);
+}
+
+#[test]
+fn attended_journey_flag_is_opt_in_and_rejected_outside_journey() {
+    let dir = temp_dir("attended-missing-package");
+    let report = dir.join("attended.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--await-foreground",
+            "--product",
+            "missing-product.exe",
+            "--workspace",
+            ".",
+            "--target",
+            "README.md",
+            "--report",
+        ])
+        .arg(&report)
+        .output()
+        .expect("run public attended CLI without a product");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(report)
+            .unwrap()
+            .contains("status = \"blocked\"")
+    );
+    let rejected = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--probe-session",
+            "--await-foreground",
+            "--report",
+            "unused.toml",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("--await-foreground requires --open-edit-save-run")
+    );
+}
+
+#[test]
+fn focus_loss_blocks_external_input_batch_without_sending_text() {
+    let mut received = String::new();
+    let outcome = focus::guarded_batch(1_u64, 2_u64, || {
+        received.push_str("marker");
+        Ok(())
+    });
+    assert!(outcome.is_err());
+    assert!(
+        received.is_empty(),
+        "non-target application must receive no input"
+    );
+}
+
+#[test]
+fn native_journey_requires_explicit_workspace_and_target_without_launching_product() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--product",
+            "missing-product.exe",
+            "--report",
+            "unused.toml",
+        ])
+        .output()
+        .expect("run external driver parser");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires --workspace and --target"));
+}
+
+#[test]
+fn native_journey_missing_package_records_blocked_without_claiming_scenario_acceptance() {
+    let dir = temp_dir("journey-missing-package");
+    let report_path = dir.join("journey.toml");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_legion-input-driver"))
+        .args([
+            "--open-edit-save-run",
+            "--product",
+            "missing-product.exe",
+            "--workspace",
+            ".",
+            "--target",
+            "README.md",
+            "--report",
+        ])
+        .arg(&report_path)
+        .output()
+        .expect("run external driver without an available product");
+    assert_eq!(output.status.code(), Some(3));
+    let text = fs::read_to_string(report_path).expect("blocked report exists");
+    assert!(text.contains("status = \"blocked\""));
+    assert!(text.contains("complete_scenario = false"));
+    assert!(text.contains("full_input_conformance = false"));
+    assert!(!text.contains("native_window_created=true"));
+}
+
 // The driver is a binary crate. Including its host-independent modules by path
 // is what lets these assertions run against the same source the binary uses,
 // rather than against a copy that could drift away from it.
@@ -25,12 +223,82 @@ mod cli;
 #[path = "../src/observe.rs"]
 #[allow(dead_code)]
 mod observe;
+
+#[test]
+fn product_window_selection_waits_past_observed_helper_and_rejects_ambiguity() {
+    use observe::{ProductWindowCandidate, select_product_window};
+    let helper = ProductWindowCandidate {
+        handle: 0x51d6a,
+        process_id: 31936,
+        visible: true,
+        title: String::new(),
+        width: 0,
+        height: 0,
+        owner: 0,
+    };
+    let mut main = ProductWindowCandidate {
+        handle: 0x491dc8,
+        process_id: 31936,
+        visible: false,
+        title: "Legion IDE".into(),
+        width: 960,
+        height: 720,
+        owner: 0,
+    };
+    assert_eq!(
+        select_product_window(31936, &[helper.clone(), main.clone()]),
+        None
+    );
+    main.visible = true;
+    assert_eq!(
+        select_product_window(31936, &[helper, main.clone()]),
+        Some(0x491dc8)
+    );
+    let mut other = main.clone();
+    other.process_id = 18568;
+    assert_eq!(select_product_window(31936, &[other]), None);
+    let mut duplicate = main.clone();
+    duplicate.handle = 0x123;
+    assert_eq!(
+        select_product_window(31936, &[main.clone(), duplicate]),
+        None
+    );
+    main.width = 0;
+    assert_eq!(select_product_window(31936, &[main.clone()]), None);
+    main.width = 960;
+    main.title = "Winit Thread Event Target".into();
+    assert_eq!(select_product_window(31936, &[main.clone()]), None);
+    main.title = "Legion IDE".into();
+    main.owner = 0x123;
+    assert_eq!(select_product_window(31936, &[main]), None);
+}
 #[path = "../src/report.rs"]
 #[allow(dead_code)]
 mod report;
 #[path = "../src/session.rs"]
 #[allow(dead_code)]
 mod session;
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires an interactive Windows input desktop; run isolated with --ignored"]
+fn attached_input_desktop_allows_native_sta_com_initialization() {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    assert!(matches!(
+        session::probe_input_desktop(),
+        DesktopAttachment::Attached { .. }
+    ));
+    // This isolated filtered test opens no product/UIA client and sends no input.
+    // The real attachment must retain the rights needed by native STA bootstrap.
+    let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if result.is_ok() {
+        unsafe { CoUninitialize() };
+    }
+    assert!(
+        result.is_ok(),
+        "STA initialization after desktop attachment: {result:?}"
+    );
+}
 
 use report::{ClassObservation, ClassOutcome, ConformanceReport};
 use session::DesktopAttachment;

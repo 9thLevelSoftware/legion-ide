@@ -22,6 +22,42 @@
 
 use std::path::Path;
 
+/// External top-level window metadata, with no product-side hooks.
+#[derive(Clone, Debug)]
+pub struct ProductWindowCandidate {
+    pub handle: usize,
+    pub process_id: u32,
+    pub visible: bool,
+    pub title: String,
+    pub width: i32,
+    pub height: i32,
+    pub owner: usize,
+}
+
+/// Select only a unique visible product main window; helpers and ambiguity wait.
+pub fn select_product_window(
+    process_id: u32,
+    candidates: &[ProductWindowCandidate],
+) -> Option<usize> {
+    let mut matches = candidates.iter().filter(|candidate| {
+        candidate.process_id == process_id
+            && candidate.visible
+            && candidate.title == "Legion IDE"
+            && candidate.width > 0
+            && candidate.height > 0
+            && candidate.owner == 0
+            && candidate.handle != 0
+    });
+    let selected = matches.next()?.handle;
+    matches.next().is_none().then_some(selected)
+}
+
+/// Exact complete document comparison, allowing only the UIA CRLF/LF transport
+/// distinction. No substring, Unicode normalization or omitted suffix qualifies.
+pub fn document_text_matches(expected: &str, observed: &str) -> bool {
+    expected.replace("\r\n", "\n") == observed.replace("\r\n", "\n")
+}
+
 /// Lowercase hex SHA-256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     const K: [u32; 64] = [
@@ -175,7 +211,7 @@ pub fn file_digest(path: &Path) -> Result<FileDigest, String> {
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{ERROR_SUCCESS, GetLastError, HWND, LPARAM, RECT, SetLastError};
 #[cfg(windows)]
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
@@ -187,7 +223,8 @@ use windows::Win32::UI::Accessibility::{
 };
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    EnumWindows, GWLP_HWNDPARENT, GetClientRect, GetWindowLongPtrW, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindowVisible,
 };
 #[cfg(windows)]
 use windows::core::BOOL;
@@ -199,7 +236,7 @@ const MAX_TEXT: i32 = 1 << 16;
 #[cfg(windows)]
 struct WindowSearch {
     process_id: u32,
-    found: HWND,
+    candidates: Vec<ProductWindowCandidate>,
 }
 
 #[cfg(windows)]
@@ -212,9 +249,29 @@ unsafe extern "system" fn collect_window(window: HWND, param: LPARAM) -> BOOL {
     // SAFETY: `window` comes from the enumeration itself.
     unsafe {
         GetWindowThreadProcessId(window, Some(&mut owner));
-        if owner == search.process_id && IsWindowVisible(window).as_bool() {
-            search.found = window;
-            return BOOL(0);
+        if owner == search.process_id {
+            let mut rect = RECT::default();
+            let mut title = [0u16; 256];
+            let title_len = GetWindowTextW(window, &mut title);
+            // EnumWindows supplies top-level windows, so HWNDPARENT is their
+            // owner. Zero is valid; distinguish it from an API failure via
+            // last error rather than GetWindow's null-to-Err wrapper.
+            SetLastError(ERROR_SUCCESS);
+            let window_owner = GetWindowLongPtrW(window, GWLP_HWNDPARENT);
+            if window_owner == 0 && GetLastError() != ERROR_SUCCESS {
+                return BOOL(1);
+            }
+            if GetClientRect(window, &mut rect).is_ok() {
+                search.candidates.push(ProductWindowCandidate {
+                    handle: window.0 as usize,
+                    process_id: owner,
+                    visible: IsWindowVisible(window).as_bool(),
+                    title: String::from_utf16_lossy(&title[..title_len as usize]),
+                    width: rect.right - rect.left,
+                    height: rect.bottom - rect.top,
+                    owner: window_owner as usize,
+                });
+            }
         }
     }
     BOOL(1)
@@ -241,7 +298,8 @@ pub enum WindowWait {
     TimedOut,
 }
 
-/// Wait for a visible top-level window owned by `process_id`.
+/// Wait for a unique visible, unowned `Legion IDE` window with a positive client
+/// area belonging to `process_id`. Never select the zero-area Winit event helper.
 #[cfg(windows)]
 pub fn wait_for_window(
     process_id: u32,
@@ -255,14 +313,15 @@ pub fn wait_for_window(
         }
         let mut search = WindowSearch {
             process_id,
-            found: HWND(std::ptr::null_mut()),
+            candidates: Vec::new(),
         };
         let param = LPARAM(&raw mut search as isize);
         // SAFETY: the callback is a plain `extern "system"` function and
         // `param` points at a live local for the duration of the call.
-        let _ = unsafe { EnumWindows(Some(collect_window), param) };
-        if !search.found.is_invalid() {
-            return WindowWait::Found(search.found);
+        if unsafe { EnumWindows(Some(collect_window), param) }.is_ok()
+            && let Some(handle) = select_product_window(process_id, &search.candidates)
+        {
+            return WindowWait::Found(HWND(handle as *mut std::ffi::c_void));
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -281,6 +340,65 @@ pub struct UiaOracle {
 
 #[cfg(windows)]
 impl UiaOracle {
+    /// Select the unique complete TextPattern matching the externally read file.
+    /// Ambiguous, truncated and unavailable document oracles are blocked.
+    pub fn exact_document_element(
+        &self,
+        root: &IUIAutomationElement,
+        baseline: &str,
+    ) -> Result<(IUIAutomationElement, IUIAutomationTextPattern), String> {
+        let mut matches = Vec::new();
+        for element in self.subtree(root)? {
+            if let Ok(pattern) = unsafe {
+                element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            } && let Ok(text) = self.document_text(&pattern)
+                && document_text_matches(baseline, &text)
+            {
+                matches.push((element, pattern));
+            }
+        }
+        if matches.len() != 1 {
+            return Err(format!(
+                "exact complete target document must identify one UIA text element; found {}",
+                matches.len()
+            ));
+        }
+        Ok(matches.remove(0))
+    }
+    /// Read accessible names; callers must not infer a specific dirty affordance
+    /// merely from an unrelated change elsewhere in the window.
+    pub fn names(&self, root: &IUIAutomationElement) -> Result<Vec<String>, String> {
+        self.subtree(root)?
+            .into_iter()
+            .map(|element| unsafe {
+                element
+                    .CurrentName()
+                    .map(|name| name.to_string())
+                    .map_err(|error| error.to_string())
+            })
+            .collect()
+    }
+
+    /// Locate an exact accessible file label before a tab has been opened.
+    pub fn named_element(
+        &self,
+        root: &IUIAutomationElement,
+        name: &str,
+    ) -> Result<IUIAutomationElement, String> {
+        let mut matches = Vec::new();
+        for element in self.subtree(root)? {
+            if unsafe { element.CurrentName() }.is_ok_and(|value| value.to_string() == name) {
+                matches.push(element);
+            }
+        }
+        if matches.len() != 1 {
+            return Err(format!(
+                "Explorer label {name:?} must identify exactly one accessible element; found {}",
+                matches.len()
+            ));
+        }
+        Ok(matches.remove(0))
+    }
     /// Initialise COM for this thread and create the UI Automation client.
     pub fn open() -> Result<Self, String> {
         // SAFETY: both calls are the documented COM bootstrap sequence.

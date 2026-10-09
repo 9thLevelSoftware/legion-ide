@@ -37,12 +37,17 @@ pub enum DesktopAttachment {
 pub fn probe_input_desktop() -> DesktopAttachment {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::StationsAndDesktops::{
-        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
-        DESKTOP_WRITEOBJECTS, GetUserObjectInformationW, OpenInputDesktop, SetThreadDesktop,
-        UOI_NAME,
+        CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, DESKTOP_CREATEWINDOW,
+        DESKTOP_READOBJECTS, DESKTOP_WRITEOBJECTS, GetUserObjectInformationW, OpenInputDesktop,
+        SetThreadDesktop, UOI_NAME,
     };
 
-    let access = DESKTOP_ACCESS_FLAGS(DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0);
+    // STA COM bootstrap creates a hidden window after SetThreadDesktop. The
+    // attached handle must permit it; this requests one extra object right,
+    // without changing the desktop ACL or bypassing attachment failure.
+    let access = DESKTOP_ACCESS_FLAGS(
+        DESKTOP_READOBJECTS.0 | DESKTOP_WRITEOBJECTS.0 | DESKTOP_CREATEWINDOW.0,
+    );
     // SAFETY: plain Win32 calls with owned arguments; the returned handle is
     // checked before use and this process exits shortly after the probe.
     unsafe {

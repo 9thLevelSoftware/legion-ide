@@ -16,11 +16,13 @@ describes specification creation and does not negate this later authorization.
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
 - 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
-- 40: claimed on `codex/ide-2026-ticket-040`; explicit provider configuration.
+- 40: explicit provider core integrated as `77166f7`; ticket remains open.
+- 63: claimed; core implementation under review.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
-- 04: claimed on `codex/ide-2026-ticket-004`; external native open/edit/save journey.
+- 04: partial external driver fixes independently reviewed; remains needs-info.
+  Latest actual attempt found zero Explorer README.md UIA elements before input.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
 packaged successfully (MSI SHA-256
@@ -31,7 +33,10 @@ and the Assist proposal was refused with `offline.ai_feature_disabled`.
 The bounded repair addresses asynchronous smoke completion and the offline
 Manual smoke contract; it must not weaken acceptance or enable AI implicitly.
 Raw evidence remains in `D:/legion-ide-2026-tools/pilot-candidate-87580fa/`.
-Native-input acceptance has not run.
+Native journey attempts ran and remained blocked before input; no native-input
+or open/edit/save acceptance is claimed. Reviewed partial driver repairs address
+wrong helper-window selection and STA desktop access; Explorer UIA investigation
+is the next bounded slice.
 
 ## Verification policy
 
