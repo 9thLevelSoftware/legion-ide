@@ -16,12 +16,17 @@ describes specification creation and does not negate this later authorization.
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
 - 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
-- 40: explicit provider core integrated as `77166f7`; ticket remains open.
-- 63: claimed; core implementation under review.
+- 40: explicit provider core integrated as `77166f7`, with reviewed workspace
+  session metadata persistence in `928275e`; native settings/credential UI and
+  live qualification remain open.
+- 63: reviewed named MCP HTTP core integrated as `ac8087f`; UI, persistence,
+  stdio/server activation and real-peer qualification remain open.
+- 88: provisional language/platform inventory integrated as `18ef5f7`; remains
+  needs-info pending host/configuration/fixture ratification, without scope reduction.
 - 235: resolved and independently reviewed; integrated as `7b69a45`.
 - Native candidate prerequisite repair: independently reviewed and integrated as
   `07d2187`; rebuilt MSI verification/staging passed, recorded in `9f85092`.
-- 04: partial external driver fixes independently reviewed; remains needs-info.
+- 04: partial external driver fixes reviewed and integrated as `177caa5`; remains needs-info.
   Latest actual attempt found zero Explorer README.md UIA elements before input.
 
 The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
@@ -37,6 +42,13 @@ Native journey attempts ran and remained blocked before input; no native-input
 or open/edit/save acceptance is claimed. Reviewed partial driver repairs address
 wrong helper-window selection and STA desktop access; Explorer UIA investigation
 is the next bounded slice.
+
+The combined provider/persistence/MCP source at `ac8087f` passed one desktop
+all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
+records the exact source and command. This is compile evidence only; native,
+OS-keyring, live-provider/peer and full-workspace/platform qualification are not
+established. The MCP checkpoint's isolated `0xc0000409` test-process abort remains
+unexplained despite its successful diagnostic rerun.
 
 ## Verification policy
 
