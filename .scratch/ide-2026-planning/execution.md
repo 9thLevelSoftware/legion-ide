@@ -31,8 +31,11 @@ describes specification creation and does not negate this later authorization.
 - 04: partial external driver fixes in `177caa5` and reviewed compact-drawer
   navigation in `00ae938`; the latest attended attempt passed foreground/UIA
   checks but Windows accepted zero of three events from the first drawer click.
-  Reviewed reporting-only diagnostics are integrated in `200f8fb`; the next
-  attended diagnostic run remains pending. No successful native input is claimed.
+  Reporting-only diagnostics in `200f8fb` subsequently captured Windows error 5
+  (access denied), with successful foreground/UIA checkpoints and zero accepted
+  events. A bounded repair preserves existing input-desktop access, with a native
+  non-injecting regression red/green and independent review PASS. The repaired
+  attended run remains pending. No successful native input is claimed.
 - Credential prerequisite: typed missing-key classification and isolated native
   Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
 
