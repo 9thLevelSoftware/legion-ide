@@ -94,3 +94,23 @@ repeated after review. A rebuilt immutable MSI must still pass real extraction/h
 and staging with this producer; native-input/AT, DAP/MSVC and actual pilot observation
 remain separate downstream evidence. Payload hashes are integrity bindings, not
 signatures or readiness decisions. Canonical acceptance remains unchanged.
+
+## Rebuilt MSI follow-up (2026-10-09)
+
+The coordinator built a separate immutable candidate from
+`07d2187619af9556cf3fd14ae2d3e429d4ea1c36` in
+`D:/legion-ide-2026-candidate-r2`. The original failed candidate is retained.
+
+- `scripts/package-native.ps1 -Version 0.0.2 -Format wix -OutDir D:/legion-ide-2026-tools/pilot-candidate-07d2187` passed.
+- `scripts/verify-native-package.ps1 -PackageDir D:/legion-ide-2026-tools/pilot-candidate-07d2187 -ReleaseVersion 0.0.2 -SourceSha 07d2187619af9556cf3fd14ae2d3e429d4ea1c36 -WorkspaceRoot D:/legion-ide-2026-candidate-r2` passed once. Checks covered MSI checksum, metadata, version, fresh extraction, payload binding and the extracted executable's Manual headless smoke. Searches completed with 2/5 results; the AI proposal was skipped explicitly for Manual.
+- `scripts/stage-native-acceptance-package.ps1 -PackageDir D:/legion-ide-2026-tools/pilot-candidate-07d2187 -StagingSource D:/legion-ide-2026-candidate-r2/target/release-smoke/windows-x64-msi/staging -DestinationDir D:/legion-ide-2026-candidate-r2/target/native-input-acceptance/package` passed once, after verifying the resolved destination stayed within the candidate's target directory.
+
+MSI SHA-256:
+`e0476a80f0c560d00f7441f637f7f00be86c0f7168b4bbf015f80bd24cc1b333`.
+Extracted and staged executable SHA-256:
+`184c81243778b12aa2dadccc51a33bc0551dfaa1eb4f5c607f96449cb12218b5`.
+Four payload files were staged with `signed = false`. Raw package evidence and
+validation summary are beside the MSI; staging evidence is in the staged directory.
+This completes the previously pending extraction/headless/staging follow-up only.
+Native input, accessibility, real pilot observation and release acceptance remain
+separate and unpromoted. Existing offline unused-code warnings were emitted.
