@@ -32,6 +32,8 @@ Status: needs-info
 
 ## Comments
 
+- 2026-10-09: Bounded editor accessibility repair passed independent review and integrated as `caf1821`. Frozen offline MSI 0.0.3 passed verification/staging, then the read-only native probe returned the exact complete README, Clean tab and valid editor geometry on its first sample. Reference checkout remains clean. [Candidate r3 evidence](../../../plans/evidence/ide-2026-ticket004-candidate-r3.md) binds source/artifacts/logs. Fresh attendance requested; native typing/save, recovery and full conformance remain unqualified. Status remains needs-info.
+
 - 2026-10-09: Euclid navigation delta PASS; coordinator confirmed compiled hash400d068d and authorized partial commit/clean same-base1f647cc integration merge. User availability pending, no launch. Reviewed binary will be archived under the resulting commit ID without overwriting existing files. Ticket04 remains needs-info; no acceptance promotion or repeated successful checks.
 
 - 2026-10-09: New bounded navigation slice after coordinator's read-only stable compact UIA tree (29 elements/27 names, Explorer drawer present, README absent). Merged integration1f647cc preserving ticket088. Driver now prefers a unique visible exact target, otherwise clicks the unique real Explorer drawer via guarded atomic UIA-bounds pointer and waits up to3 seconds for the target; missing/ambiguous results block. Two focused recorded-tree/no-input regressions red→green; build passed. Post-click behavior remains simulated test evidence, not a native observation. Five-file delta awaits independent review; no native run until coordinator announces availability, no commit. Status needs-info unchanged.

@@ -38,9 +38,10 @@ describes specification creation and does not negate this later authorization.
   `b88f7e0` run then successfully clicked the drawer and file; it stopped before
   typing because the driver expected an obsolete debug-style tab label. The
   corrected typed tab oracle observes Clean in a read-only native probe. The
-  editor still exposes only text fragments, blocking exact full-document UIA
-  observation. Native editing/save remain unqualified; a bounded product
-  accessibility repair is assigned in an isolated worktree.
+  bounded product accessibility repair passed independent review and integrated
+  as `caf1821`. Its frozen offline MSI 0.0.3 passed packaging verification and a
+  native read-only check of the exact complete README, clean tab and editor
+  geometry. Native typing/save remain unqualified; fresh attendance was requested.
 - Credential prerequisite: typed missing-key classification and isolated native
   Windows storage qualification integrated as `0b8dd68`; profile UI/live gates remain open.
 
@@ -72,6 +73,12 @@ attendance is inferred from an unanswered availability question.
 records the obsolete driver label predicate, successful clean-tab observation,
 and the remaining full-document accessibility gap. Direct `--file` probe setup is
 not credited as Explorer or native editing acceptance.
+
+[Candidate r3 evidence](../../plans/evidence/ide-2026-ticket004-candidate-r3.md)
+records reviewed source `caf1821`, installer/executable identities, successful
+offline verification/staging, and exact complete native UIA observation. The
+reference checkout remained clean. This resolves the small-document observation
+prerequisite without promoting native edit/save or large-document accessibility.
 
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
