@@ -89,8 +89,10 @@ screenshots. Reviewed driver repair `5d7b298` integrated locally after 11 distin
 focused tests; actual scoped file/close point checks passed with duplicate labels
 present. A separate native prerequisite remains: the foreground app reports
 window-root keyboard focus after editor click. A bounded product focus repair is
-assigned, the strict driver guard remains, and no typing/save or ticket 04
-acceptance is claimed.
+implemented with 18 distinct focused tests and default/offline compilation
+passing; [focus repair evidence](../../plans/evidence/ide-2026-ticket004-editor-focus-prerequisite.md)
+records reviewed source `fb9982f` and the pending native r4 gate. The strict driver guard
+remains, and no typing/save or ticket 04 acceptance is claimed.
 
 The combined provider/persistence/MCP source at `ac8087f` passed one desktop
 all-targets compile. [Integration evidence](../../plans/evidence/ide-2026-provider-mcp-integration.md)
