@@ -420,6 +420,7 @@ impl DesktopLaunchConfig {
     pub fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut smoke_enabled = false;
         let mut beta_enabled = false;
+        let mut beta_manual_local = false;
         let mut manual_perf_enabled = false;
         let mut windowed_e2e_enabled = false;
         let mut workspace_root = None;
@@ -443,6 +444,7 @@ impl DesktopLaunchConfig {
             match arg_text.as_ref() {
                 "--smoke" => smoke_enabled = true,
                 "--beta-smoke" => beta_enabled = true,
+                "--beta-manual-local" => beta_manual_local = true,
                 "--manual-perf" => manual_perf_enabled = true,
                 "--windowed-e2e" => windowed_e2e_enabled = true,
                 "--workspace" => {
@@ -527,6 +529,9 @@ impl DesktopLaunchConfig {
         if smoke_enabled && beta_enabled {
             return Err(anyhow!("--smoke and --beta-smoke cannot be combined"));
         }
+        if beta_manual_local && !beta_enabled {
+            return Err(anyhow!("--beta-manual-local requires --beta-smoke"));
+        }
         if manual_perf_enabled && smoke_enabled {
             return Err(anyhow!("--manual-perf and --smoke cannot be combined"));
         }
@@ -561,7 +566,7 @@ impl DesktopLaunchConfig {
             None
         };
         let beta = if beta_enabled {
-            Some(BetaWorkflowConfig::new(
+            let config = BetaWorkflowConfig::new(
                 workspace_root.clone(),
                 beta_workspace_root
                     .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_WORKSPACE_PATH)),
@@ -572,7 +577,12 @@ impl DesktopLaunchConfig {
                 diagnostics_export
                     .clone()
                     .unwrap_or_else(|| PathBuf::from(beta::DEFAULT_BETA_DIAGNOSTICS_EXPORT_PATH)),
-            )?)
+            )?;
+            Some(if beta_manual_local {
+                config.manual_local()
+            } else {
+                config
+            })
         } else {
             None
         };
@@ -4350,7 +4360,7 @@ impl DesktopRuntime {
         }
     }
 
-    fn refresh_projection(&mut self) -> Result<()> {
+    pub(crate) fn refresh_projection(&mut self) -> Result<()> {
         self.app.tick_lsp_interactions(Instant::now());
 
         // PKT-LSP-B T1 (D4): non-blocking per-frame drain; never blocks.

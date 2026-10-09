@@ -143,6 +143,20 @@ fn manual_local_workflow_stays_in_manual_and_skips_ai_proposal() {
     assert_eq!(report.product_mode, "Manual");
     assert_eq!(report.save_outcome, BetaSaveOutcome::Saved);
     assert_eq!(report.proposal_mode, BetaProposalMode::ManualLocalSkipped);
+    assert!(
+        report
+            .active_file_search_status
+            .starts_with("completed Completed results=2 "),
+        "{}",
+        report.active_file_search_status
+    );
+    assert!(
+        report
+            .workspace_search_status
+            .starts_with("completed Completed results=5 "),
+        "{}",
+        report.workspace_search_status
+    );
     assert!(report.errors.is_empty());
     let evidence_text = fs::read_to_string(&evidence).expect("evidence should be written");
     assert!(evidence_text.contains("product_mode: Manual"));
@@ -216,4 +230,20 @@ fn desktop_launch_config_rejects_combined_smoke_modes() {
         .expect_err("native and beta smoke modes must be mutually exclusive");
 
     assert!(error.to_string().contains("cannot be combined"));
+}
+
+#[test]
+fn desktop_launch_config_selects_manual_beta_only_when_explicit() {
+    let manual =
+        DesktopLaunchConfig::from_args(["--beta-smoke".into(), "--beta-manual-local".into()])
+            .expect("explicit Manual beta should parse");
+    assert!(manual.beta.expect("beta config").manual_local);
+
+    let assist = DesktopLaunchConfig::from_args(["--beta-smoke".into()])
+        .expect("default Assist beta should parse");
+    assert!(!assist.beta.expect("beta config").manual_local);
+
+    let error = DesktopLaunchConfig::from_args(["--beta-manual-local".into()])
+        .expect_err("Manual beta selection requires beta smoke");
+    assert!(error.to_string().contains("requires --beta-smoke"));
 }
