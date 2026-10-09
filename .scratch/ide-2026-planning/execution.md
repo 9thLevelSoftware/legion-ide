@@ -16,6 +16,11 @@ describes specification creation and does not negate this later authorization.
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
 - 02: resolved and independently reviewed; integrated as `dfcdd42`.
 - 03: resolved and independently reviewed; integrated as `cb817998`.
+- 05: resolved at the A02 app workflow/storage-reopen boundary; independent
+  review PASS and source integrated as `9cff366`. [Save-conflict evidence](../../plans/evidence/ide-2026-ticket005-save-conflict-recovery.md)
+  records 15 unique focused passing tests and preserved original/recovery-copy
+  bytes across conflict and actual store reopen. No native GUI, abrupt-kill,
+  broader A02 or ticket 04 acceptance is inferred; composed-wave gates remain pending.
 - 40: explicit provider core integrated as `77166f7`, with reviewed workspace
   session metadata persistence in `928275e` and reviewed native settings UI
   implementation in `1fb8180` (integrated through `f3f9436`). Native input,
