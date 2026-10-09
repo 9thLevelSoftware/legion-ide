@@ -20669,6 +20669,9 @@ pub struct WorkbenchSettingsRecord {
     /// Absent in older sessions. App composition owns validation and restoration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_provider_configuration_json: Option<String>,
+    /// Bounded named MCP HTTP configuration; no credentials, grants or runtime state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_mcp_peer_configuration_json: Option<String>,
     /// DTO schema version.
     pub schema_version: u16,
 }
@@ -20704,6 +20707,7 @@ impl Default for WorkbenchSettingsRecord {
             telemetry: WorkbenchTelemetryConsent::default(),
             terminal_shell_selection: String::new(),
             ai_provider_configuration_json: None,
+            named_mcp_peer_configuration_json: None,
             schema_version: 1,
         }
     }

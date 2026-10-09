@@ -11,6 +11,7 @@ use legion_protocol::{
 };
 use legion_protocol::{McpServerId, McpTransportKind, named_mcp_peer::*};
 use legion_storage::secrets::{SecretReference, SecretStore};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{
     Arc,
@@ -67,7 +68,7 @@ pub fn named_mcp_peer_secret_reference(config: &NamedMcpPeerConfig) -> SecretRef
     )
 }
 
-/// Operational transport configuration, excluded from retained metadata.
+/// Operational transport configuration, excluded from workflow projections.
 #[derive(Clone)]
 pub enum NamedMcpPeerTransport {
     /// Existing HTTP transport endpoint.
@@ -84,12 +85,12 @@ pub enum NamedMcpPeerTransport {
     },
 }
 
-/// Configuration input; Debug/serialization intentionally omit operational data.
+/// Configuration input; persistence uses a separate restricted HTTP codec.
 #[derive(Clone)]
 pub struct NamedMcpPeerConfig {
     /// Safe, reviewed peer metadata.
     pub metadata: McpPeerMetadata,
-    /// Endpoint/launch details retained only in app memory.
+    /// Endpoint/launch details; only validated HTTP endpoints may be persisted.
     pub transport: NamedMcpPeerTransport,
 }
 
@@ -115,6 +116,162 @@ impl NamedMcpPeerConfig {
                 endpoint: endpoint.into(),
             },
         }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedHttpPeer {
+    peer_id: McpServerId,
+    display_label: String,
+    role: McpPeerRole,
+    protocol_version: String,
+    transport: McpTransportKind,
+    authentication: McpPeerAuthentication,
+    credential_scopes: Vec<String>,
+    privacy: McpPeerPrivacy,
+    endpoint: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedPeers {
+    version: u16,
+    peers: Vec<PersistedHttpPeer>,
+}
+
+fn persistence_error() -> crate::AppCompositionError {
+    crate::AppCompositionError::AiRuntime("invalid named MCP configuration metadata".into())
+}
+
+fn parse_persisted_peers(
+    json: &str,
+) -> Result<Vec<NamedMcpPeerConfig>, crate::AppCompositionError> {
+    if json.len() > 65536 {
+        return Err(persistence_error());
+    }
+    let stored: PersistedPeers = serde_json::from_str(json).map_err(|_| persistence_error())?;
+    if stored.version != 1 || stored.peers.len() > 32 {
+        return Err(persistence_error());
+    }
+    let mut ids = std::collections::HashSet::new();
+    stored
+        .peers
+        .into_iter()
+        .map(|peer| {
+            if !ids.insert(peer.peer_id.0.clone()) || peer.endpoint.len() > 4096 {
+                return Err(persistence_error());
+            }
+            for value in [&peer.peer_id.0, &peer.display_label, &peer.endpoint]
+                .into_iter()
+                .chain(peer.credential_scopes.iter())
+            {
+                if !legion_security::secrets::scan_text_for_secrets(value)
+                    .findings
+                    .is_empty()
+                {
+                    return Err(persistence_error());
+                }
+            }
+            let config = NamedMcpPeerConfig {
+                metadata: McpPeerMetadata {
+                    peer_id: peer.peer_id,
+                    display_label: peer.display_label,
+                    role: peer.role,
+                    protocol_version: peer.protocol_version,
+                    transport: peer.transport,
+                    authentication: peer.authentication,
+                    credential_scopes: peer.credential_scopes,
+                    privacy: peer.privacy,
+                },
+                transport: NamedMcpPeerTransport::Http {
+                    endpoint: peer.endpoint,
+                },
+            };
+            validate_config(&config).map_err(|_| persistence_error())?;
+            Ok(config)
+        })
+        .collect()
+}
+
+impl AppComposition {
+    /// Encode HTTP configuration only, without accessing a secret or transport.
+    pub fn named_mcp_peer_configuration_json(&self) -> Result<String, crate::AppCompositionError> {
+        let mut peers = Vec::new();
+        for peer in self.named_mcp_peers.values() {
+            let NamedMcpPeerTransport::Http { endpoint } = &peer.config.transport else {
+                return Err(persistence_error());
+            };
+            let metadata = &peer.config.metadata;
+            peers.push(PersistedHttpPeer {
+                peer_id: metadata.peer_id.clone(),
+                display_label: metadata.display_label.clone(),
+                role: metadata.role,
+                protocol_version: metadata.protocol_version.clone(),
+                transport: metadata.transport,
+                authentication: metadata.authentication,
+                credential_scopes: metadata.credential_scopes.clone(),
+                privacy: metadata.privacy,
+                endpoint: endpoint.clone(),
+            });
+        }
+        peers.sort_by(|a, b| a.peer_id.0.cmp(&b.peer_id.0));
+        let json = serde_json::to_string(&PersistedPeers { version: 1, peers })
+            .map_err(|_| persistence_error())?;
+        Self::validate_named_mcp_peer_configuration_json(&json)?;
+        Ok(json)
+    }
+
+    /// Pure validation for the existing desktop session store.
+    pub fn validate_named_mcp_peer_configuration_json(
+        json: &str,
+    ) -> Result<(), crate::AppCompositionError> {
+        parse_persisted_peers(json).map(|_| ())
+    }
+
+    pub(crate) fn prepare_named_mcp_peer_restore(
+        &self,
+        json: Option<&str>,
+    ) -> Result<std::collections::HashMap<String, NamedMcpPeer>, crate::AppCompositionError> {
+        let configs = parse_persisted_peers(json.unwrap_or(r#"{"version":1,"peers":[]}"#))?;
+        let mut peers = std::collections::HashMap::new();
+        for config in configs {
+            let id = config.metadata.peer_id.0.clone();
+            let revision = self
+                .named_mcp_peers
+                .get(&id)
+                .map_or(Some(1), |peer| peer.snapshot.revision.checked_add(1))
+                .ok_or_else(persistence_error)?;
+            let snapshot = McpPeerSnapshot {
+                metadata: config.metadata.clone(),
+                revision,
+                health: McpPeerHealth::Configured,
+                transport_granted: false,
+                credential_state: McpPeerCredentialState::Unchanged,
+            };
+            peers.insert(
+                id,
+                NamedMcpPeer {
+                    config,
+                    snapshot,
+                    permissions: NamedMcpPeerPermissions::default(),
+                    live_grant: Arc::new(AtomicBool::new(false)),
+                    client: None,
+                },
+            );
+        }
+        Ok(peers)
+    }
+
+    pub(crate) fn commit_named_mcp_peer_restore(
+        &mut self,
+        peers: std::collections::HashMap<String, NamedMcpPeer>,
+    ) {
+        for id in self.named_mcp_peers.keys().chain(peers.keys()) {
+            self.automate_mcp_tool_runtimes.remove(id);
+            self.automate_workflow.mcp_registries.remove(id);
+        }
+        self.named_mcp_peers = peers;
     }
 }
 

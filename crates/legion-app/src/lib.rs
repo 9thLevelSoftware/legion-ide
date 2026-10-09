@@ -11907,6 +11907,7 @@ fn workbench_settings_record_from_projection(
         telemetry: settings.telemetry.clone(),
         terminal_shell_selection: settings.terminal_shell_selection.clone(),
         ai_provider_configuration_json: None,
+        named_mcp_peer_configuration_json: None,
         schema_version: settings.schema_version,
     }
 }
@@ -29992,6 +29993,11 @@ impl AppComposition {
         record.workbench_settings = workbench_settings_record_from_projection(&self.settings);
         record.workbench_settings.ai_provider_configuration_json =
             Some(self.ai_provider_configuration_json()?);
+        #[cfg(feature = "ai")]
+        {
+            record.workbench_settings.named_mcp_peer_configuration_json =
+                Some(self.named_mcp_peer_configuration_json()?);
+        }
         record.language_toolchain_settings = self.language_toolchain_settings.clone();
         record.memory_snapshot_json = Some(
             serde_json::to_string(
@@ -30009,6 +30015,29 @@ impl AppComposition {
         &mut self,
         record: &WorkspaceSessionRecord,
     ) -> Result<AppSessionRestoreOutcome, AppCompositionError> {
+        // Restore cannot carry consent forward or partially cancel a live operation.
+        if self.active_worker.is_some() || self.provider_configuration_busy() {
+            return Err(AppCompositionError::AiRuntime(
+                "session restore requires idle application".into(),
+            ));
+        }
+        #[cfg(feature = "ai")]
+        let restored_mcp = self.prepare_named_mcp_peer_restore(
+            record
+                .workbench_settings
+                .named_mcp_peer_configuration_json
+                .as_deref(),
+        )?;
+        #[cfg(not(feature = "ai"))]
+        if record
+            .workbench_settings
+            .named_mcp_peer_configuration_json
+            .is_some()
+        {
+            return Err(AppCompositionError::AiRuntime(
+                "named MCP configuration unavailable in this build".into(),
+            ));
+        }
         // Preflight fallible payload restoration before committing provider/settings
         // metadata. A malformed session must not partially replace the active route.
         let restored_memory = record
@@ -30029,6 +30058,9 @@ impl AppComposition {
                 .unwrap_or(r#"{"profiles":[],"selected":null}"#),
         )?;
         self.settings = settings_projection_from_workbench_record(&record.workbench_settings);
+        #[cfg(feature = "ai")]
+        self.commit_named_mcp_peer_restore(restored_mcp);
+        self.set_product_mode(AppProductMode::Manual);
         // Restore metadata only. Stored paths remain an unapproved draft until
         // the operator explicitly configures the toolchain again.
         self.clear_typescript_toolchain();
