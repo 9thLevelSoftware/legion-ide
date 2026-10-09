@@ -1,6 +1,65 @@
 //! Bounded SC-MANUAL-OPEN-TYPE-SAVE steps 1–6, using the existing external
 //! driver only. Never a six-class conformance or complete scenario result.
-use std::{fs, path::Path};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+pub struct JourneyOutput {
+    pub session_state: PathBuf,
+    report_file: fs::File,
+}
+
+/// Reserve new evidence and an empty session directory outside the clone.
+/// Never restore, overwrite or reset the workspace's default session metadata.
+pub fn reserve_journey_output(workspace: &Path, report: &Path) -> Result<JourneyOutput, String> {
+    let workspace = workspace.canonicalize().map_err(|e| e.to_string())?;
+    let parent = report
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = parent
+        .canonicalize()
+        .map_err(|e| format!("report parent must exist: {e}"))?;
+    if parent.starts_with(&workspace) {
+        return Err("journey report and session must be outside the disposable workspace".into());
+    }
+    let name = report.file_name().ok_or("report filename is required")?;
+    let report = parent.join(name);
+    match fs::symlink_metadata(&report) {
+        Ok(_) => return Err("journey report already exists; refusing to overwrite".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    let mut directory_name = name.to_os_string();
+    directory_name.push(".session");
+    let directory = parent.join(directory_name);
+    fs::create_dir(&directory)
+        .map_err(|e| format!("cannot reserve fresh session directory: {e}"))?;
+    let report_file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&report)
+        .map_err(|e| format!("cannot reserve new journey report: {e}"))?;
+    Ok(JourneyOutput {
+        session_state: directory.join("session.json"),
+        report_file,
+    })
+}
+
+/// Use the normal public windowed CLI with an isolated, initially absent session.
+pub fn product_command(product: &Path, workspace: &Path, session_state: &Path) -> Command {
+    let mut command = Command::new(product);
+    command
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--session-state")
+        .arg(session_state)
+        .current_dir(workspace);
+    command
+}
 
 #[cfg(windows)]
 fn guarded_input(
@@ -28,7 +87,17 @@ pub fn run(
     report: &Path,
     await_foreground: bool,
 ) -> i32 {
-    let mut observations = Vec::new();
+    let mut output = match reserve_journey_output(workspace, report) {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+    let mut observations = vec![format!(
+        "isolated_session_state={}; initially_absent=true; default_session_untouched=true",
+        output.session_state.display()
+    )];
     let result = if !product.is_file() {
         Err((3, "packaged product executable is unavailable".to_string()))
     } else {
@@ -36,6 +105,7 @@ pub fn run(
             product,
             workspace,
             target,
+            &output.session_state,
             &mut observations,
             await_foreground,
         )
@@ -64,13 +134,7 @@ pub fn run(
     }
     // Store observations as an array, not duplicate TOML keys.
     text = text.replace("\nobservation = ", "\n[[observations]]\ndetail = ");
-    if let Some(parent) = report.parent() {
-        if let Err(error) = fs::create_dir_all(parent) {
-            eprintln!("{error}");
-            return 2;
-        }
-    }
-    match fs::write(report, text) {
+    match output.report_file.write_all(text.as_bytes()) {
         Ok(()) => code,
         Err(error) => {
             eprintln!("{error}");
@@ -81,6 +145,7 @@ pub fn run(
 
 #[cfg(not(windows))]
 fn observe(
+    _: &Path,
     _: &Path,
     _: &Path,
     _: &Path,
@@ -98,12 +163,12 @@ fn observe(
     product: &Path,
     workspace: &Path,
     target: &Path,
+    session_state: &Path,
     notes: &mut Vec<String>,
     await_foreground: bool,
 ) -> Result<(), (i32, String)> {
     use crate::{inject, observe, session};
     use std::{
-        process::Command,
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -153,10 +218,7 @@ fn observe(
             ));
         }
     }
-    let mut child = Command::new(product)
-        .arg("--workspace")
-        .arg(&workspace)
-        .current_dir(&workspace)
+    let mut child = product_command(product, &workspace, session_state)
         .spawn()
         .map_err(|e| (3, e.to_string()))?;
     let result = (|| {
@@ -238,7 +300,7 @@ fn observe(
             &filename,
             || oracle.explorer_navigation_elements(&root, &filename),
             |drawer| {
-                let (x, y) = oracle.clickable_center(&drawer)?;
+                let (x, y) = oracle.clickable_center(window, &drawer.element, drawer.scope.as_ref())?;
                 guarded_input(window, || inject::click_at(x, y)).map_err(|(_, error)| error)?;
                 notes.push("Explorer drawer clicked once through guarded atomic OS pointer; waiting up to 3 seconds for exact visible target".into());
                 Ok(())
@@ -246,10 +308,37 @@ fn observe(
             || navigation_started.elapsed(),
             || thread::sleep(Duration::from_millis(100)),
         ).map_err(blocked)?;
-        let (x, y) = oracle.clickable_center(&file).map_err(blocked)?;
+        let file_point = oracle
+            .clickable_center_with_observation(window, &file.element, file.scope.as_ref())
+            .map_err(blocked)?;
+        if file_point.explorer_scope_geometry_unavailable {
+            notes.push("Explorer file scope geometry unavailable (verified named Dialog reports all-zero bounds); exact subtree, positive target/client bounds and exact point hit verified".into());
+        }
+        let (x, y) = file_point.center;
         guarded_input(window, || inject::click_at(x, y))?;
         thread::sleep(Duration::from_millis(900));
         notes.push("Explorer file selected through OS pointer".into());
+        let close_started = std::time::Instant::now();
+        observe::close_explorer_drawer(
+            || oracle.explorer_navigation_elements(&root, &filename),
+            |close| {
+                let close_point =
+                    oracle.clickable_center_with_observation(window, &close.element, close.scope.as_ref())?;
+                if close_point.explorer_scope_geometry_unavailable {
+                    notes.push("Explorer close scope geometry unavailable (verified named Dialog reports all-zero bounds); exact subtree, positive target/client bounds and exact point hit verified".into());
+                }
+                let (x, y) = close_point.center;
+                guarded_input(window, || inject::click_at(x, y)).map_err(|(_, error)| error)?;
+                notes.push(
+                    "scoped Close Explorer drawer clicked through guarded atomic OS pointer".into(),
+                );
+                Ok(())
+            },
+            || close_started.elapsed(),
+            || thread::sleep(Duration::from_millis(100)),
+        )
+        .map_err(blocked)?;
+        notes.push("Explorer drawer absent before editor pointer/focus/text".into());
         if oracle
             .selected_tab_state(&root, &filename)
             .map_err(blocked)?
@@ -271,10 +360,18 @@ fn observe(
         let (editor, pattern) = oracle
             .exact_document_element(&root, baseline)
             .map_err(blocked)?;
-        let rect = oracle.bounding_rectangle(&editor).map_err(blocked)?;
-        guarded_input(window, || {
-            inject::click_at((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2)
-        })?;
+        let (x, y) = oracle
+            .clickable_center(window, &editor, None)
+            .map_err(blocked)?;
+        guarded_input(window, || inject::click_at(x, y))?;
+        let focus_started = std::time::Instant::now();
+        observe::wait_for_editor_focus(
+            || oracle.element_is_focused(&editor),
+            || focus_started.elapsed(),
+            || thread::sleep(Duration::from_millis(50)),
+        )
+        .map_err(blocked)?;
+        notes.push("exact document UIA element owns keyboard focus before text input".into());
         guarded_input(window, || inject::chord(&[VK_CONTROL], VK_HOME))?;
         let marker = format!(
             "LEGION-NATIVE-RUN-{} ",

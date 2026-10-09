@@ -78,113 +78,153 @@ fn selected_tab_oracle_blocks_ambiguity_inactive_hidden_and_unknown_states() {
     }
 }
 
+fn explorer_control(
+    name: &str,
+    control_type: i32,
+    value: &'static str,
+) -> observe::ExplorerElement<&'static str> {
+    observe::ExplorerElement {
+        name: name.into(),
+        control_type,
+        visible: true,
+        value,
+    }
+}
+
+fn restored_controls() -> Vec<observe::ExplorerElement<&'static str>> {
+    // r3 trace: tab, breadcrumb and Excerpts SwitchTab button all named README.md.
+    vec![
+        explorer_control("README.md", 50019, "tab"),
+        explorer_control("README.md", 50020, "breadcrumb"),
+        explorer_control("README.md", 50000, "excerpt"),
+        explorer_control("Explorer drawer", 50000, "toggle"),
+    ]
+}
+
 #[test]
-fn explorer_navigation_reveals_recorded_compact_tree_once_and_prefers_visible_target() {
+fn explorer_scope_opens_once_and_ignores_restored_global_filename_controls() {
     use std::{cell::Cell, time::Duration};
-    // Names from the coordinator's read-only 29-element packaged-window sample.
-    let recorded = [
-        "Legion IDE",
-        "",
-        "System",
-        "System",
-        "Minimize",
-        "Maximize",
-        "Close",
-        "Legion",
-        "Manual",
-        "Assist",
-        "Delegate",
-        "Legion Workflows",
-        "Command",
-        "",
-        "Manual",
-        "Explorer drawer",
-        "Bottom panel drawer",
-        "TERMINAL",
-        "PROBLEMS (0)",
-        "ACTIVITY",
-        "DIAGNOSTICS",
-        "Terminal / Runtime",
-        "disabled",
-        "Terminal workflow disabled",
-        "Open terminal",
-        "No terminal activity",
-        "<no open tabs>",
-        "<none>",
-        "<no active buffer>",
-    ];
     let polls = Cell::new(0);
-    let mut clicked = Vec::new();
-    let target = observe::navigate_explorer_target(
+    let mut clicks = Vec::new();
+    let file = observe::navigate_explorer_target(
         "README.md",
         || {
-            let mut tree: Vec<_> = recorded
-                .iter()
-                .map(|name| (name.to_string(), *name))
-                .collect();
+            let mut controls = restored_controls();
             if polls.get() >= 2 {
-                tree.push(("README.md".into(), "file"));
+                controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
             }
-            Ok(tree)
+            observe::explorer_navigation_snapshot("README.md", controls, |scope| {
+                assert_eq!(*scope, "dialog");
+                Ok(vec![explorer_control("README.md", 50000, "explorer-row")])
+            })
         },
-        |element| {
-            clicked.push(element);
+        |control| {
+            clicks.push(control);
             Ok(())
         },
         || Duration::from_millis(polls.get() * 100),
         || polls.set(polls.get() + 1),
     )
     .unwrap();
-    assert_eq!(target, "file");
-    assert_eq!(clicked, ["Explorer drawer"]);
+    assert_eq!(file, "explorer-row");
+    assert_eq!(clicks, ["toggle"]);
     assert_eq!(polls.get(), 2);
-    let visible = observe::navigate_explorer_target(
+    let open = observe::navigate_explorer_target(
         "README.md",
         || {
-            Ok(vec![
-                ("README.md".into(), "file"),
-                ("Explorer drawer".into(), "drawer"),
-            ])
+            let mut controls = restored_controls();
+            controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
+            observe::explorer_navigation_snapshot("README.md", controls, |_| {
+                Ok(vec![explorer_control("README.md", 50000, "open-row")])
+            })
         },
-        |_| panic!("already visible target must not toggle the drawer"),
+        |_| panic!("open scoped drawer must not toggle"),
         || Duration::ZERO,
-        || panic!("already visible target must not wait"),
+        || panic!("target already available"),
     )
     .unwrap();
-    assert_eq!(visible, "file");
+    assert_eq!(open, "open-row");
 }
 
 #[test]
-fn explorer_navigation_blocks_ambiguity_missing_controls_focus_loss_and_timeout() {
+fn explorer_scope_refuses_unscoped_ambiguous_missing_unreadable_and_focus_loss() {
     use std::{cell::Cell, time::Duration};
-    for names in [
-        vec![],
-        vec!["README.md", "README.md", "Explorer drawer"],
-        vec!["Explorer drawer", "Explorer drawer"],
-        vec!["README.md.backup"],
+    for controls in [
+        vec![explorer_control("README.md", 50000, "unscoped")],
+        vec![
+            explorer_control("Explorer drawer", 50000, "a"),
+            explorer_control("Explorer drawer", 50000, "b"),
+        ],
+        vec![
+            explorer_control("Explorer drawer", 50032, "a"),
+            explorer_control("Explorer drawer", 50032, "b"),
+        ],
     ] {
-        let result = observe::navigate_explorer_target(
-            "README.md",
-            || Ok(names.iter().map(|name| (name.to_string(), *name)).collect()),
-            |_| panic!("ambiguous or missing exact controls must send no input"),
-            || Duration::ZERO,
-            || panic!("invalid initial tree must not wait"),
+        assert!(
+            observe::navigate_explorer_target(
+                "README.md",
+                || observe::explorer_navigation_snapshot("README.md", controls.clone(), |_| Ok(
+                    vec![]
+                )),
+                |_| panic!("invalid scope must send no input"),
+                || Duration::ZERO,
+                || panic!("invalid initial scope must stop")
+            )
+            .is_err()
         );
-        assert!(result.is_err(), "{names:?}");
     }
+    for rows in [
+        vec![],
+        vec![
+            explorer_control("README.md", 50019, "tab"),
+            explorer_control("README.md", 50020, "text"),
+        ],
+        vec![
+            explorer_control("README.md", 50000, "a"),
+            explorer_control("README.md", 50000, "b"),
+        ],
+        vec![explorer_control("README.md.bak", 50000, "wrong")],
+        vec![observe::ExplorerElement {
+            visible: false,
+            ..explorer_control("README.md", 50000, "hidden")
+        }],
+    ] {
+        assert!(
+            observe::navigate_explorer_target(
+                "README.md",
+                || observe::explorer_navigation_snapshot(
+                    "README.md",
+                    vec![explorer_control("Explorer drawer", 50032, "dialog")],
+                    |_| Ok(rows.clone())
+                ),
+                |_| panic!("invalid open drawer must not toggle"),
+                || Duration::ZERO,
+                || panic!("invalid initial rows must stop")
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        observe::explorer_navigation_snapshot(
+            "README.md",
+            vec![explorer_control("Explorer drawer", 50032, "dialog")],
+            |_| Err("UIA read failed".into())
+        )
+        .is_err()
+    );
     let lost = observe::navigate_explorer_target(
         "README.md",
-        || Ok(vec![("Explorer drawer".into(), "drawer")]),
+        || observe::explorer_navigation_snapshot("README.md", restored_controls(), |_| Ok(vec![])),
         |_| focus::guarded_batch(42, 99, || panic!("focus loss must send no input")),
         || Duration::ZERO,
-        || panic!("focus loss must stop immediately"),
+        || panic!("focus loss must stop"),
     );
     assert!(lost.unwrap_err().contains("foreground"));
     let seconds = Cell::new(0);
     let clicks = Cell::new(0);
     let timeout = observe::navigate_explorer_target(
         "README.md",
-        || Ok(vec![("Explorer drawer".into(), "drawer")]),
+        || observe::explorer_navigation_snapshot("README.md", restored_controls(), |_| Ok(vec![])),
         |_| {
             clicks.set(clicks.get() + 1);
             Ok(())
@@ -193,33 +233,135 @@ fn explorer_navigation_blocks_ambiguity_missing_controls_focus_loss_and_timeout(
         || seconds.set(seconds.get() + 1),
     );
     assert!(timeout.unwrap_err().contains("timed out"));
-    assert_eq!(seconds.get(), 3);
-    assert_eq!(clicks.get(), 1);
-    let reads = Cell::new(0);
-    let ambiguous_after = observe::navigate_explorer_target(
-        "README.md",
-        || {
-            reads.set(reads.get() + 1);
-            Ok(if reads.get() == 1 {
-                vec![("Explorer drawer".into(), "drawer")]
-            } else {
-                vec![("README.md".into(), "a"), ("README.md".into(), "b")]
-            })
-        },
-        |_| Ok(()),
-        || Duration::ZERO,
-        || panic!("new ambiguity must block immediately"),
-    );
-    assert!(ambiguous_after.unwrap_err().contains("found 2"));
+    assert_eq!((seconds.get(), clicks.get()), (3, 1));
 }
 
 #[path = "../src/focus.rs"]
 mod focus;
 
+#[test]
+fn explorer_close_requires_scoped_unique_button_and_observed_absence_before_editor_input() {
+    use std::{cell::Cell, time::Duration};
+    let snapshot = |open, buttons: Vec<_>| {
+        let mut controls = restored_controls();
+        // A same-name control outside the drawer must not be used to close it.
+        controls.push(explorer_control(
+            "Close Explorer drawer",
+            50000,
+            "unscoped-close",
+        ));
+        if open {
+            controls.push(explorer_control("Explorer drawer", 50032, "dialog"));
+        }
+        observe::explorer_navigation_snapshot("README.md", controls, |_| Ok(buttons.clone()))
+    };
+    let close = explorer_control("Close Explorer drawer", 50000, "scoped-close");
+    let ticks = Cell::new(0);
+    let mut clicks = Vec::new();
+    observe::close_explorer_drawer(
+        || snapshot(ticks.get() < 2, vec![close.clone()]),
+        |button| {
+            clicks.push(button);
+            Ok(())
+        },
+        || Duration::from_millis(ticks.get() * 100),
+        || ticks.set(ticks.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(clicks, ["scoped-close"]);
+    assert_eq!(
+        ticks.get(),
+        2,
+        "editor input must wait for observed drawer absence"
+    );
+    observe::close_explorer_drawer(
+        || snapshot(false, vec![]),
+        |_| panic!("absent drawer must not toggle"),
+        || Duration::ZERO,
+        || panic!("absent drawer needs no wait"),
+    )
+    .unwrap();
+    for buttons in [
+        vec![],
+        vec![close.clone(), close.clone()],
+        vec![explorer_control(
+            "Close Explorer drawer",
+            50020,
+            "wrong-role",
+        )],
+    ] {
+        assert!(
+            observe::close_explorer_drawer(
+                || snapshot(true, buttons.clone()),
+                |_| panic!("missing/ambiguous scoped close must send no input"),
+                || Duration::ZERO,
+                || panic!("invalid close must stop"),
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        observe::close_explorer_drawer(
+            || snapshot(true, vec![close.clone()]),
+            |_| focus::guarded_batch(42, 99, || panic!("focus loss must send no input")),
+            || Duration::ZERO,
+            || panic!("focus loss must stop"),
+        )
+        .is_err()
+    );
+    let seconds = Cell::new(0);
+    let count = Cell::new(0);
+    assert!(
+        observe::close_explorer_drawer(
+            || snapshot(true, vec![close.clone()]),
+            |_| {
+                count.set(count.get() + 1);
+                Ok(())
+            },
+            || Duration::from_secs(seconds.get()),
+            || seconds.set(seconds.get() + 1),
+        )
+        .unwrap_err()
+        .contains("timed out")
+    );
+    assert_eq!((seconds.get(), count.get()), (3, 1));
+}
+
 #[cfg(windows)]
 #[path = "../src/inject.rs"]
 #[allow(dead_code)]
 mod inject;
+
+#[test]
+fn journey_editor_focus_requires_observation_and_blocks_timeout_or_read_failure() {
+    use std::{cell::Cell, time::Duration};
+    let ticks = Cell::new(0);
+    observe::wait_for_editor_focus(
+        || Ok(ticks.get() == 2),
+        || Duration::from_millis(ticks.get() * 100),
+        || ticks.set(ticks.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(ticks.get(), 2);
+    let seconds = Cell::new(0);
+    assert!(
+        observe::wait_for_editor_focus(
+            || Ok(false),
+            || Duration::from_secs(seconds.get()),
+            || seconds.set(seconds.get() + 1),
+        )
+        .is_err()
+    );
+    assert_eq!(seconds.get(), 3);
+    assert!(
+        observe::wait_for_editor_focus(
+            || Err("UIA focus unavailable".into()),
+            || Duration::ZERO,
+            || panic!("read failure must stop"),
+        )
+        .is_err()
+    );
+}
 
 #[cfg(windows)]
 #[test]
@@ -420,6 +562,203 @@ mod cli;
 #[path = "../src/observe.rs"]
 #[allow(dead_code)]
 mod observe;
+
+#[path = "../src/journey.rs"]
+#[allow(dead_code)]
+mod journey;
+
+#[test]
+fn journey_click_bounds_refuse_clipped_centers_outside_client_or_drawer() {
+    use observe::contained_click_center;
+    let client = [80, 160, 1040, 880];
+    let drawer = [100, 210, 410, 750];
+    assert_eq!(
+        contained_click_center([110, 320, 186, 344], client, Some(drawer)).unwrap(),
+        (148, 332)
+    );
+    // IsOffscreen=false did not exclude clipped text in the native trace.
+    for rect in [
+        [110, 900, 186, 924],
+        [110, 748, 186, 772],
+        [1040, 200, 1060, 220],
+        [110, 320, 110, 344],
+    ] {
+        assert!(contained_click_center(rect, client, Some(drawer)).is_err());
+    }
+    assert!(contained_click_center([110, 900, 186, 924], client, None).is_err());
+    assert!(contained_click_center([110, 320, 186, 344], client, Some([0, 0, 0, 0])).is_err());
+    assert_eq!(
+        contained_click_center([-1000, -600, -900, -500], [-1100, -700, -100, -50], None).unwrap(),
+        (-950, -550)
+    );
+}
+
+#[test]
+fn journey_click_hit_test_blocks_occlusion_mismatch_and_read_failure_without_coordinates() {
+    let rect = [110, 320, 186, 344];
+    let client = [80, 160, 1040, 880];
+    assert_eq!(
+        observe::verified_click_center(rect, client, None, |point| {
+            assert_eq!(point, (148, 332));
+            Ok(true)
+        })
+        .unwrap(),
+        (148, 332)
+    );
+    for hit in [Ok(false), Err("UIA point read failed".to_string())] {
+        assert!(observe::verified_click_center(rect, client, None, |_| hit).is_err());
+    }
+    assert!(
+        observe::verified_click_center([0, 0, 20, 20], client, None, |_| panic!(
+            "outside product client must stop before hit testing"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn verified_zero_explorer_scope_requires_point_hit_and_preserves_other_geometry_refusals() {
+    use observe::{ScopeBounds, verified_scoped_click_center};
+    let target = [343, 552, 422, 570];
+    let client = [235, 258, 1195, 978];
+    let scope = ScopeBounds {
+        rectangle: [0; 4],
+        verified_explorer_drawer: true,
+    };
+    let result = verified_scoped_click_center(target, client, Some(scope), |point| {
+        assert_eq!(point, (382, 561));
+        Ok(true)
+    })
+    .unwrap();
+    assert_eq!(result.center, (382, 561));
+    assert!(result.explorer_scope_geometry_unavailable);
+    for hit in [Ok(false), Err("point read failed".to_string())] {
+        assert!(verified_scoped_click_center(target, client, Some(scope), |_| hit).is_err());
+    }
+    for invalid in [
+        ScopeBounds {
+            verified_explorer_drawer: false,
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [1, 1, 1, 1],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [0, 0, 10, 0],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [500, 600, 400, 700],
+            ..scope
+        },
+        ScopeBounds {
+            rectangle: [235, 258, 350, 978],
+            ..scope
+        },
+    ] {
+        assert!(
+            verified_scoped_click_center(target, client, Some(invalid), |_| panic!(
+                "invalid scope must stop before hit query"
+            ))
+            .is_err()
+        );
+    }
+    for invalid_client in [[0; 4], [235, 258, 350, 978], [1195, 978, 235, 258]] {
+        assert!(
+            verified_scoped_click_center(target, invalid_client, Some(scope), |_| panic!(
+                "invalid client must stop before hit query"
+            ))
+            .is_err()
+        );
+    }
+    assert!(
+        verified_scoped_click_center([0; 4], client, Some(scope), |_| panic!(
+            "invalid target must stop"
+        ))
+        .is_err()
+    );
+    let available = verified_scoped_click_center(
+        target,
+        client,
+        Some(ScopeBounds {
+            rectangle: client,
+            ..scope
+        }),
+        |_| Ok(true),
+    )
+    .unwrap();
+    assert!(!available.explorer_scope_geometry_unavailable);
+}
+
+#[test]
+fn journey_session_is_fresh_external_and_passed_through_public_product_cli() {
+    let base = temp_dir("isolated-journey-session");
+    let workspace = base.join("workspace");
+    fs::create_dir_all(workspace.join(".legion")).unwrap();
+    let default_session = workspace.join(".legion/session.json");
+    fs::write(&default_session, b"existing restored session").unwrap();
+    let output = journey::reserve_journey_output(&workspace, &base.join("run.toml")).unwrap();
+    assert!(
+        !output.session_state.exists(),
+        "normal product launch must see no session to restore"
+    );
+    assert!(
+        !output
+            .session_state
+            .starts_with(workspace.canonicalize().unwrap())
+    );
+    assert_eq!(
+        fs::read(default_session).unwrap(),
+        b"existing restored session"
+    );
+    let command = journey::product_command(
+        std::path::Path::new("packaged.exe"),
+        &workspace,
+        &output.session_state,
+    );
+    let args: Vec<_> = command.get_args().map(|arg| arg.to_os_string()).collect();
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsString::from("--workspace"),
+            workspace.into_os_string(),
+            std::ffi::OsString::from("--session-state"),
+            output.session_state.into_os_string()
+        ]
+    );
+}
+
+#[test]
+fn journey_session_refuses_workspace_paths_and_existing_reports_or_sidecars() {
+    let base = temp_dir("journey-session-refusal");
+    let workspace = base.join("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let inside = workspace.join("run.toml");
+    assert!(journey::reserve_journey_output(&workspace, &inside).is_err());
+    assert_eq!(
+        fs::read_dir(&workspace).unwrap().count(),
+        0,
+        "refusal must not write into clone"
+    );
+    let existing = base.join("existing.toml");
+    fs::write(&existing, b"old evidence").unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &existing).is_err());
+    assert_eq!(fs::read(&existing).unwrap(), b"old evidence");
+    let report = base.join("run.toml");
+    let first = journey::reserve_journey_output(&workspace, &report).unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &report).is_err());
+    assert!(!first.session_state.exists());
+    let occupied = base.join("occupied.toml.session");
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("session.json"), b"prior state").unwrap();
+    assert!(journey::reserve_journey_output(&workspace, &base.join("occupied.toml")).is_err());
+    assert_eq!(
+        fs::read(occupied.join("session.json")).unwrap(),
+        b"prior state"
+    );
+    assert!(!base.join("occupied.toml").exists());
+}
 
 #[test]
 fn product_window_selection_waits_past_observed_helper_and_rejects_ambiguity() {
