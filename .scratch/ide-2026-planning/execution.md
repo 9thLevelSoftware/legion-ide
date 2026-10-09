@@ -39,6 +39,14 @@ On 2026-10-08 the user answered “Yes to both” to these concrete preflight ch
 Source inspection and host observations are recorded outside the checkout in
 `D:/legion-ide-2026-notes/pilot-prerequisites.md`; they are not product acceptance.
 
+The user subsequently approved CodeLLDB 1.12.3 Windows x64 as a qualification
+candidate and its isolated download/extraction. The official VSIX was downloaded
+to `D:/legion-ide-2026-tools/codelldb-1.12.3/` and its SHA-256 matched
+`a916e509308dac817732f63ca604a8b93ed29cd16f38a2fa9f0b64ed58e8f51a`.
+The adapter exists at `extracted/extension/adapter/codelldb.exe`. This records
+artifact integrity and availability only: no extension was installed and no
+DAP/MSVC compatibility or native product acceptance is claimed.
+
 ## Completion limits
 
 Keep implementation, experiments and product acceptance separate. Real provider,
