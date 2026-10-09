@@ -15,7 +15,21 @@ describes specification creation and does not negate this later authorization.
 
 - 01: resolved and independently reviewed; integrated as `c2a6578`.
 - 02: claimed on `codex/ide-2026-ticket-002`; pilot configuration contract.
-- 03: claimed on `codex/ide-2026-ticket-003`; migration workflow contract.
+- 03: resolved and independently reviewed; integrated as `cb817998`.
+- 40: claimed on `codex/ide-2026-ticket-040`; explicit provider configuration.
+- Native candidate prerequisite repair: isolated branch
+  `codex/ide-2026-native-smoke-repair`; preserve the failed immutable candidate.
+
+The offline candidate at source `87580fae51293ca619a71535a184ef1a96a00b9c`
+packaged successfully (MSI SHA-256
+`f73b50214c81bdb1498672268385d9439443bc420e4fb6099901fd4602d07976`).
+`verify-native-package.ps1` passed checksum, metadata, version and extraction,
+but failed headless workflow smoke: both search results were still `Running`,
+and the Assist proposal was refused with `offline.ai_feature_disabled`.
+The bounded repair addresses asynchronous smoke completion and the offline
+Manual smoke contract; it must not weaken acceptance or enable AI implicitly.
+Raw evidence remains in `D:/legion-ide-2026-tools/pilot-candidate-87580fa/`.
+Native-input acceptance has not run.
 
 ## Verification policy
 
